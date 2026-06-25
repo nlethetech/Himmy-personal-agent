@@ -190,6 +190,13 @@ export type GoogleStatus = {
 };
 export type MailMessage = {
   id: string; from: string; subject: string; snippet: string; date: string;
+  // Derived server-side from Gmail's labels + the user's sender rules.
+  category: "focused" | "promotions" | "social" | "updates" | "forums";
+  unread: boolean;        // "UNREAD" label present
+  important: boolean;     // "IMPORTANT" label present
+  starred: boolean;       // "STARRED" label present
+  vip: boolean;           // sender is on the user's VIP list
+  automated: boolean;     // looks machine-sent (noreply/mailer-daemon/…)
 };
 export type MailFull = {
   id: string; from: string; to: string; subject: string; date: string; body: string;
@@ -498,6 +505,21 @@ export const api = {
     message: (id: string) =>
       jget<{ ok: boolean; connected: boolean; email?: MailFull; message?: string }>(
         `/mail/message/${id}`
+      ),
+    // Sender rules: mute a sender out of the inbox, or VIP one to keep it focused.
+    rules: {
+      list: () =>
+        jget<{ ok: boolean; muted: string[]; vip: string[]; message?: string }>("/mail/rules"),
+      set: (action: "mute" | "unmute" | "vip" | "unvip", sender: string) =>
+        jpost<{ ok: boolean; muted?: string[]; vip?: string[]; message?: string }>(
+          "/mail/rules",
+          { action, sender }
+        ),
+    },
+    // A read-only, model-written brief of focused/VIP mail (cached ~6h; `force` recomputes).
+    digest: (force = false) =>
+      jget<{ ok: boolean; summary?: string; at?: number; cached?: boolean; stale?: boolean; message?: string }>(
+        `/mail/digest${force ? "?force=true" : ""}`
       ),
   },
   calendar: {

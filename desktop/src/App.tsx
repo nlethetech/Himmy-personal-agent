@@ -8,6 +8,7 @@ import {
   MessageSquare, SquarePen, PanelLeft, PanelRight, Telescope, ListChecks, BookText, Link2,
   Inbox, MapPin, KeyRound, ShieldCheck, Minus, ChevronLeft, ChevronRight, Repeat,
   Gauge, Coins, Zap, CalendarCheck, CalendarClock, Bell, Play, Flag,
+  Star, BellOff, Users,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -1947,7 +1948,7 @@ function GoogleTabHeader({ title, count, label, email, onRefresh, onDisconnect, 
 // --- Mail caches: show the inbox INSTANTLY on every open, refresh quietly in the background ---
 // In-memory (survives tab switches) + localStorage (survives an app restart). Opened message
 // bodies are memo-cached too, so re-opening an email is instant.
-const MAIL_CACHE_KEY = "himmy.mail.inbox.v1";
+const MAIL_CACHE_KEY = "himmy.mail.inbox.v2"; // v2: rows carry category/unread/vip/automated
 let mailMemCache: MailMessage[] | null = null;
 const mailBodyCache = new Map<string, MailFull>();
 function readMailCache(): MailMessage[] {
@@ -1963,24 +1964,170 @@ function writeMailCache(msgs: MailMessage[]) {
   try { localStorage.setItem(MAIL_CACHE_KEY, JSON.stringify(msgs)); } catch { /* ignore */ }
 }
 
+// --- Mail presentation helpers ---------------------------------------------
+// Strip the display name out of an RFC-5322 "Name <addr>" sender string.
+function senderName(raw: string): string {
+  const s = (raw || "").replace(/<[^>]*>/, "").replace(/"/g, "").trim();
+  return s || (raw || "").replace(/[<>]/g, "").trim() || "Unknown";
+}
+// Deterministic, pleasant avatar color from a sender string (hashed → hue).
+const MAIL_AVATAR_COLORS = [
+  "#0A84FF", "#30D158", "#FF9F0A", "#BF5AF2", "#FF453A",
+  "#64D2FF", "#FF375F", "#5E5CE6", "#FFD60A", "#AC8E68",
+];
+function avatarColor(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  return MAIL_AVATAR_COLORS[h % MAIL_AVATAR_COLORS.length];
+}
+function avatarInitial(name: string): string {
+  const c = (name || "").trim()[0];
+  return c ? c.toUpperCase() : "?";
+}
+// Which date-group bucket a message falls in (Today / Yesterday / Earlier this week / Earlier).
+function mailDateBucket(raw: string): "Today" | "Yesterday" | "Earlier this week" | "Earlier" {
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return "Earlier";
+  const now = new Date();
+  const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const dayMs = 86400000;
+  const days = Math.round((startOf(now) - startOf(d)) / dayMs);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return "Earlier this week";
+  return "Earlier";
+}
+const MAIL_BUCKET_ORDER = ["Today", "Yesterday", "Earlier this week", "Earlier"] as const;
+
+// Category tabs over the list. "focused" also pulls in VIP senders; "all" shows everything.
+type MailCat = "focused" | "promotions" | "social" | "updates" | "all";
+const MAIL_TABS: { id: MailCat; label: string }[] = [
+  { id: "focused", label: "Focused" },
+  { id: "promotions", label: "Promotions" },
+  { id: "social", label: "Social" },
+  { id: "updates", label: "Updates" },
+  { id: "all", label: "All" },
+];
+const MAIL_EMPTY: Record<MailCat, string> = {
+  focused: "Inbox zero in Focused — nicely done.",
+  promotions: "No promotions — nice and quiet.",
+  social: "Nothing social right now.",
+  updates: "No updates at the moment.",
+  all: "Your inbox is empty.",
+};
+function inCat(m: MailMessage, cat: MailCat): boolean {
+  if (cat === "all") return true;
+  if (cat === "focused") return m.category === "focused" || m.vip;
+  if (cat === "updates") return m.category === "updates" || m.category === "forums";
+  return m.category === cat;
+}
+// Short category chip label (only shown on the All tab, where mixing is visible).
+const MAIL_CAT_CHIP: Record<MailMessage["category"], string> = {
+  focused: "Focused", promotions: "Promo", social: "Social", updates: "Updates", forums: "Forum",
+};
+
 function MailTab() {
   const g = useGoogle();
   // seed from cache → the list is on screen the instant you open the tab, no spinner
   const [messages, setMessages] = useState<MailMessage[]>(() => readMailCache());
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [openId, setOpenId] = useState<string | null>(null);   // the message being read, if any
+  const [openId, setOpenId] = useState<string | null>(null);   // the highlighted/read message
+
+  const [cat, setCat] = useState<MailCat>("focused");
+  const [query, setQuery] = useState("");
+  const [unreadOnly, setUnreadOnly] = useState(false);
+  const [peopleOnly, setPeopleOnly] = useState(false);
+
+  // Sender rules (muted / VIP). Mutating a rule busts the inbox cache server-side, so we reload.
+  const [vip, setVip] = useState<string[]>([]);
+  const [muted, setMuted] = useState<string[]>([]);
+  const [showMuted, setShowMuted] = useState(false);
+
+  // Digest state lives here (not inside MailDigestCard) so dismissing it and the already-fetched
+  // summary both survive switching to another tab and back. Dismiss persists to localStorage.
+  const [digestDismissed, setDigestDismissed] = useState(() => {
+    try { return localStorage.getItem("himmy.mail.digest.dismissed") === "1"; } catch { return false; }
+  });
+  const dismissDigest = () => {
+    setDigestDismissed(true);
+    try { localStorage.setItem("himmy.mail.digest.dismissed", "1"); } catch { /* ignore */ }
+  };
+  // The digest summary is fetched once here and kept across tab switches (the card used to
+  // remount on every return to Focused and re-hit the network, flashing its skeleton).
+  const [digestSummary, setDigestSummary] = useState<string | null>(null);
+  const [digestLoading, setDigestLoading] = useState(false);
+  const fetchDigest = async (force = false) => {
+    setDigestLoading(true);
+    try {
+      const r = await api.mail.digest(force);
+      setDigestSummary(r.ok && r.summary?.trim() ? r.summary.trim() : null);
+    } catch { setDigestSummary(null); } finally { setDigestLoading(false); }
+  };
 
   const load = async (force = false) => {
     setRefreshing(true); setError(null);
     try {
-      const r = await api.mail.inbox(20, force);
-      if (r.messages) { setMessages(r.messages); writeMailCache(r.messages); }
+      const r = await api.mail.inbox(50, force);
+      if (r.messages) {
+        setMessages(r.messages); writeMailCache(r.messages);
+        // If the currently-open message vanished (e.g. its sender was just muted), clear the
+        // selection so the reading pane doesn't silently strand a stale highlight.
+        setOpenId((id) => (id && !r.messages!.some((m) => m.id === id) ? null : id));
+      }
       // only surface an error if we have nothing cached to show instead
       if (r.message && !(r.messages && r.messages.length)) setError(r.message);
     } catch (e: any) { if (!mailMemCache?.length) setError(e.message); } finally { setRefreshing(false); }
   };
-  useEffect(() => { if (g.status?.connected) load(); }, [g.status?.connected]);
+  const loadRules = async () => {
+    try { const r = await api.mail.rules.list(); if (r.ok) { setVip(r.vip || []); setMuted(r.muted || []); } }
+    catch { /* rules are best-effort */ }
+  };
+  useEffect(() => {
+    if (g.status?.connected) { load(); loadRules(); if (!digestDismissed) fetchDigest(false); }
+  }, [g.status?.connected]);
+
+  // Mute / unmute / VIP-toggle a sender, then reload the (now rule-filtered) inbox.
+  const applyRule = async (action: "mute" | "unmute" | "vip" | "unvip", sender: string) => {
+    try {
+      const r = await api.mail.rules.set(action, sender);
+      if (r.ok) { if (r.vip) setVip(r.vip); if (r.muted) setMuted(r.muted); }
+    } catch { /* ignore */ }
+    load(true);
+    // A rule change busts the server-side digest cache too — re-pull so the brief reflects it.
+    if (!digestDismissed) fetchDigest(false);
+  };
+  const isVip = (m: MailMessage) =>
+    m.vip || vip.includes((m.from.match(/<([^>]+)>/)?.[1] || m.from).trim().toLowerCase());
+
+  // counts per tab (over the people/unread-filtered set, ignoring the search box so they stay stable)
+  const base = useMemo(() => messages.filter((m) =>
+    (!peopleOnly || !m.automated) && (!unreadOnly || m.unread)
+  ), [messages, peopleOnly, unreadOnly]);
+  const counts = useMemo(() => {
+    const c: Record<MailCat, number> = { focused: 0, promotions: 0, social: 0, updates: 0, all: 0 };
+    for (const m of base) for (const t of MAIL_TABS) if (inCat({ ...m, vip: isVip(m) }, t.id)) c[t.id]++;
+    return c;
+  }, [base, vip]);
+
+  const q = query.trim().toLowerCase();
+  const visible = useMemo(() => base.filter((m) => {
+    if (!inCat({ ...m, vip: isVip(m) }, cat)) return false;
+    if (!q) return true;
+    return senderName(m.from).toLowerCase().includes(q) || (m.subject || "").toLowerCase().includes(q);
+  }), [base, cat, q, vip]);
+
+  // group the visible list by date bucket, preserving the server's (recency) order within each
+  const groups = useMemo(() => {
+    const byBucket = new Map<string, MailMessage[]>();
+    for (const m of visible) {
+      const b = mailDateBucket(m.date);
+      (byBucket.get(b) ?? byBucket.set(b, []).get(b)!).push(m);
+    }
+    return MAIL_BUCKET_ORDER.filter((b) => byBucket.has(b)).map((b) => ({ bucket: b, items: byBucket.get(b)! }));
+  }, [visible]);
+
+  const open = openId ? messages.find((m) => m.id === openId) : undefined;
 
   if (!g.status || !g.status.connected) {
     return <GoogleConnect icon={Mail} title="Your mail, in Himmy" g={g}
@@ -1991,22 +2138,101 @@ function MailTab() {
     <div className="h-full flex flex-col">
       <GoogleTabHeader title="Mail" count={messages.length} label="message" email={g.status.email}
         onRefresh={() => load(true)} onDisconnect={g.disconnect} loading={refreshing} />
-      <div className="flex-1 min-h-0 overflow-auto">
-        <div className="mx-auto max-w-[760px] px-6 pb-12">
-          {openId ? (
-            <MailReader id={openId} preview={messages.find((m) => m.id === openId)} onBack={() => setOpenId(null)} />
-          ) : refreshing && messages.length === 0 ? (
-            <div className="h-48 grid place-items-center text-mac-ink3"><Loader2 size={18} className="animate-spin" /></div>
-          ) : error && messages.length === 0 ? (
-            <div className="h-48 grid place-items-center text-center text-[13px] text-mac-ink2 max-w-[44ch] mx-auto">{error}</div>
-          ) : messages.length === 0 ? (
-            <div className="pt-20 grid place-items-center text-center">
-              <Inbox size={34} strokeWidth={1.5} className="text-mac-ink3 mb-3" />
-              <p className="text-[14px] text-mac-ink2">Your inbox is empty.</p>
+
+      <div className="flex-1 min-h-0 flex">
+        {/* ── left: list pane ─────────────────────────────────────────── */}
+        <div className="w-[380px] shrink-0 border-r border-mac-stroke flex flex-col min-h-0">
+          {/* tabs */}
+          <div className="shrink-0 px-3 pt-1 flex items-center gap-0.5 overflow-x-auto">
+            {MAIL_TABS.map((t) => (
+              <button key={t.id} onClick={() => setCat(t.id)}
+                className={`shrink-0 h-8 px-2.5 rounded-[8px] text-[12.5px] font-medium transition-colors flex items-center gap-1.5 ${
+                  cat === t.id ? "bg-mac-fillHi text-mac-ink" : "text-mac-ink3 hover:text-mac-ink2"}`}>
+                {t.label}
+                {counts[t.id] > 0 && (
+                  <span className={`tnum text-[11px] ${cat === t.id ? "text-mac-ink2" : "text-mac-ink4"}`}>{counts[t.id]}</span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          {/* search + filters */}
+          <div className="shrink-0 px-3 pt-2 pb-2 space-y-2">
+            <div className="flex items-center gap-2 h-8 px-2.5 rounded-[9px] bg-mac-fill border border-mac-stroke">
+              <Search size={13} className="text-mac-ink3 shrink-0" />
+              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search sender or subject"
+                className="flex-1 bg-transparent text-[12.5px] text-mac-ink outline-none placeholder:text-mac-ink3" />
+              {query && <button onClick={() => setQuery("")} className="text-mac-ink3 hover:text-mac-ink"><X size={13} /></button>}
             </div>
+            <div className="flex items-center gap-1.5">
+              <FilterChip on={unreadOnly} onClick={() => setUnreadOnly((v) => !v)} icon={Circle} label="Unread" />
+              <FilterChip on={peopleOnly} onClick={() => setPeopleOnly((v) => !v)} icon={Users} label="People" />
+              {muted.length > 0 && (
+                <button onClick={() => setShowMuted((v) => !v)}
+                  className="ml-auto h-7 px-2 rounded-[8px] text-[11.5px] text-mac-ink3 hover:text-mac-ink2 flex items-center gap-1">
+                  <BellOff size={12} /> {muted.length} muted
+                </button>
+              )}
+            </div>
+            {showMuted && muted.length > 0 && (
+              <div className="rounded-[9px] border border-mac-stroke bg-mac-fill p-2 space-y-1 max-h-32 overflow-auto">
+                {muted.map((s) => (
+                  <div key={s} className="flex items-center justify-between gap-2 text-[11.5px]">
+                    <span className="text-mac-ink2 truncate">{s}</span>
+                    <button onClick={() => applyRule("unmute", s)}
+                      className="text-mac-accentHi hover:underline shrink-0">Unmute</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* list */}
+          <div className="flex-1 min-h-0 overflow-auto px-2 pb-6">
+            {cat === "focused" && !digestDismissed && (digestLoading || digestSummary) && (
+              <MailDigestCard summary={digestSummary} loading={digestLoading}
+                onRefresh={() => fetchDigest(true)} onDismiss={dismissDigest} />
+            )}
+            {refreshing && messages.length === 0 ? (
+              <div className="h-40 grid place-items-center text-mac-ink3"><Loader2 size={18} className="animate-spin" /></div>
+            ) : error && messages.length === 0 ? (
+              <div className="px-3 pt-10 text-center text-[12.5px] text-mac-ink2">{error}</div>
+            ) : visible.length === 0 ? (
+              <div className="px-3 pt-16 grid place-items-center text-center">
+                <Inbox size={28} strokeWidth={1.5} className="text-mac-ink3 mb-2.5" />
+                <p className="text-[12.5px] text-mac-ink2">
+                  {q ? "Nothing matches your search." : MAIL_EMPTY[cat]}
+                </p>
+              </div>
+            ) : (
+              groups.map((grp) => (
+                <div key={grp.bucket} className="mb-1">
+                  <div className="px-2.5 pt-2.5 pb-1 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-mac-ink3">{grp.bucket}</div>
+                  {grp.items.map((m) => (
+                    <MailRow key={m.id} m={m} active={m.id === openId} vip={isVip(m)} showChip={cat === "all"}
+                      onOpen={() => setOpenId(m.id)}
+                      onMute={() => applyRule("mute", m.from)}
+                      onToggleVip={() => applyRule(isVip(m) ? "unvip" : "vip", m.from)} />
+                  ))}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* ── right: reading pane ─────────────────────────────────────── */}
+        <div className="flex-1 min-w-0 min-h-0 overflow-auto">
+          {open ? (
+            <MailReader key={open.id} id={open.id} preview={open} />
           ) : (
-            <div className="rounded-[12px] border border-mac-stroke overflow-hidden divide-y divide-mac-stroke">
-              {messages.map((m) => <MailRow key={m.id} m={m} onOpen={() => setOpenId(m.id)} />)}
+            <div className="h-full grid place-items-center text-center px-8">
+              <div className="max-w-[34ch]">
+                <Mail size={32} strokeWidth={1.5} className="text-mac-ink3 mx-auto mb-3" />
+                <p className="text-[14px] text-mac-ink2">Select a message to read it here.</p>
+                <p className="text-[12px] text-mac-ink3 mt-1.5 leading-relaxed">
+                  Himmy can draft or send a reply for any email you open.
+                </p>
+              </div>
             </div>
           )}
         </div>
@@ -2015,24 +2241,104 @@ function MailTab() {
   );
 }
 
-function MailRow({ m, onOpen }: { m: MailMessage; onOpen: () => void }) {
-  const from = m.from.replace(/<.*>/, "").replace(/"/g, "").trim() || m.from;
+// A small pill toggle used for the Unread / People filters.
+function FilterChip({ on, onClick, icon: Ico, label }: {
+  on: boolean; onClick: () => void; icon: LucideIcon; label: string;
+}) {
   return (
-    <button onClick={onOpen}
-      className="group w-full text-left flex flex-col gap-0.5 px-4 py-3 hover:bg-mac-fill transition-colors cursor-pointer">
-      <div className="flex items-baseline gap-3">
-        <span className="text-[12.5px] text-mac-ink truncate max-w-[230px]">{from}</span>
-        <span className="flex-1 text-[13px] text-mac-ink truncate">{m.subject}</span>
-        <span className="text-[11.5px] text-mac-ink3 shrink-0">{relTime(m.date)}</span>
-      </div>
-      <p className="text-[12px] text-mac-ink3 truncate leading-snug">{m.snippet}</p>
+    <button onClick={onClick}
+      className={`h-7 px-2.5 rounded-[8px] text-[11.5px] font-medium transition-colors flex items-center gap-1.5 border ${
+        on ? "bg-mac-accentDim border-mac-accent/40 text-mac-accentHi"
+           : "bg-mac-fill border-mac-stroke text-mac-ink3 hover:text-mac-ink2 hover:border-mac-strokeHi"}`}>
+      <Ico size={12} strokeWidth={on ? 2.5 : 2} /> {label}
     </button>
   );
 }
 
-/* Full-message reader — opens when a Mail row is clicked. Reads the body via mail_read's route,
-   and offers one-tap "Reply / Draft with Himmy" that prefill the Cmd-K bar. */
-function MailReader({ id, preview, onBack }: { id: string; preview?: MailMessage; onBack: () => void }) {
+// "Today in your inbox" — a dismissible, model-written brief atop the Focused tab. State
+// (summary, loading, dismissed) is owned by MailTab so it survives tab switches; this is a
+// pure presentational component driven by props.
+function MailDigestCard({ summary, loading, onRefresh, onDismiss }: {
+  summary: string | null; loading: boolean; onRefresh: () => void; onDismiss: () => void;
+}) {
+  return (
+    <div className="mx-1 mt-2 mb-1 rounded-[11px] border border-mac-stroke bg-mac-fill px-3.5 py-3">
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-mac-ink2">
+          <Sparkles size={13} className="text-mac-accentHi" /> Today in your inbox
+        </div>
+        <div className="flex items-center gap-1">
+          <button onClick={onRefresh} disabled={loading} title="Refresh"
+            className="text-mac-ink3 hover:text-mac-ink disabled:opacity-50">
+            {loading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+          </button>
+          <button onClick={onDismiss} title="Dismiss" className="text-mac-ink3 hover:text-mac-ink"><X size={13} /></button>
+        </div>
+      </div>
+      {loading && !summary ? (
+        <div className="space-y-1.5 py-0.5">
+          <div className="h-2.5 rounded bg-mac-fillHi w-[92%] animate-pulse" />
+          <div className="h-2.5 rounded bg-mac-fillHi w-[78%] animate-pulse" />
+          <div className="h-2.5 rounded bg-mac-fillHi w-[64%] animate-pulse" />
+        </div>
+      ) : (
+        <p className="text-[12.5px] leading-relaxed text-mac-ink2 whitespace-pre-wrap">{summary}</p>
+      )}
+    </div>
+  );
+}
+
+function MailRow({ m, active, vip, showChip, onOpen, onMute, onToggleVip }: {
+  m: MailMessage; active: boolean; vip: boolean; showChip: boolean;
+  onOpen: () => void; onMute: () => void; onToggleVip: () => void;
+}) {
+  const name = senderName(m.from);
+  const color = avatarColor(name || m.from);
+  return (
+    <div role="button" tabIndex={0} onClick={onOpen}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
+      className={`group relative rounded-[9px] px-2 py-2 cursor-pointer transition-colors flex gap-2.5 outline-none focus-visible:ring-2 focus-visible:ring-mac-accent ${
+        active ? "bg-mac-accentDim" : "hover:bg-mac-fill"}`}>
+      {/* avatar */}
+      <div className="shrink-0 mt-0.5 h-7 w-7 rounded-full grid place-items-center text-[12px] font-semibold text-white"
+        style={{ backgroundColor: color }}>{avatarInitial(name)}</div>
+
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline gap-2">
+          {m.unread && <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-mac-accent" />}
+          <span className={`flex-1 truncate text-[12.5px] ${m.unread ? "text-mac-ink font-medium" : "text-mac-ink2"}`}>{name}</span>
+          {vip && <Star size={11} className="shrink-0 text-mac-orange" fill="currentColor" />}
+          <span className="shrink-0 text-[11px] text-mac-ink3 tnum">{relTime(m.date)}</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className={`flex-1 truncate text-[12.5px] ${m.unread ? "text-mac-ink font-semibold" : "text-mac-ink2"}`}>
+            {m.subject || "(no subject)"}
+          </span>
+          {showChip && (
+            <span className="shrink-0 text-[9.5px] px-1.5 py-0.5 rounded-full bg-mac-fillHi text-mac-ink3">{MAIL_CAT_CHIP[m.category]}</span>
+          )}
+        </div>
+        <p className={`truncate text-[11.5px] leading-snug ${m.unread ? "text-mac-ink3" : "text-mac-ink4"}`}>{m.snippet}</p>
+      </div>
+
+      {/* hover quick-actions */}
+      <div className="absolute right-1.5 bottom-1.5 hidden group-hover:flex items-center gap-0.5">
+        <button onClick={(e) => { e.stopPropagation(); onToggleVip(); }} title={vip ? "Remove VIP" : "Mark VIP"}
+          className="h-6 w-6 grid place-items-center rounded-[7px] bg-mac-fillHi border border-mac-stroke text-mac-ink3 hover:text-mac-orange">
+          <Star size={12} fill={vip ? "currentColor" : "none"} className={vip ? "text-mac-orange" : ""} />
+        </button>
+        <button onClick={(e) => { e.stopPropagation(); onMute(); }} title="Mute sender"
+          className="h-6 w-6 grid place-items-center rounded-[7px] bg-mac-fillHi border border-mac-stroke text-mac-ink3 hover:text-mac-ink">
+          <BellOff size={12} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* Full-message reader — lives in the right pane when a Mail row is selected. Reads the body via
+   mail_read's route, and offers one-tap "Reply / Draft with Himmy" that prefill the Cmd-K bar. */
+function MailReader({ id, preview }: { id: string; preview?: MailMessage }) {
   const cached = mailBodyCache.get(id) || null;
   const [m, setM] = useState<MailFull | null>(cached);
   const [loading, setLoading] = useState(!cached);
@@ -2054,33 +2360,35 @@ function MailReader({ id, preview, onBack }: { id: string; preview?: MailMessage
   }, [id]);
 
   const rawFrom = m?.from || preview?.from || "";
-  const fromName = rawFrom.replace(/<.*>/, "").replace(/"/g, "").trim() || rawFrom;
+  const fromName = senderName(rawFrom);
   const subject = m?.subject || preview?.subject || "(no subject)";
-  const ref = `the email from ${fromName} about "${subject}"`;
+  const ref = `the email from ${fromName} about "${subject}" (message_id ${id})`;
+  const color = avatarColor(fromName || rawFrom);
 
   return (
-    <div className="pt-1">
-      <div className="flex items-center justify-between gap-3 mb-4">
-        <button onClick={onBack} className="flex items-center gap-1.5 text-[13px] text-mac-ink2 hover:text-mac-ink transition-colors">
-          <ArrowLeft size={16} /> Inbox
+    <div className="mx-auto max-w-[760px] px-8 py-6">
+      <div className="flex items-center justify-end gap-1.5 mb-5">
+        <button onClick={() => ask(`Draft a reply to ${ref}. Save it as a draft.`)}
+          className="h-7 px-2.5 rounded-md bg-mac-fill border border-mac-stroke text-[12px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors flex items-center gap-1.5">
+          <SquarePen size={13} /> Draft reply
         </button>
-        <div className="flex items-center gap-1.5">
-          <button onClick={() => ask(`Draft a reply to ${ref}. Save it as a draft.`)}
-            className="h-7 px-2.5 rounded-md bg-mac-fill border border-mac-stroke text-[12px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors flex items-center gap-1.5">
-            <SquarePen size={13} /> Draft reply
-          </button>
-          <button onClick={() => ask(`Reply to ${ref} saying: `)}
-            className="h-7 px-2.5 rounded-md bg-mac-accent text-white text-[12px] font-medium hover:bg-mac-accentHi transition-colors flex items-center gap-1.5">
-            <Sparkles size={13} /> Reply with Himmy
-          </button>
-        </div>
+        <button onClick={() => ask(`Reply to ${ref} saying: `)}
+          className="h-7 px-2.5 rounded-md bg-mac-accent text-white text-[12px] font-medium hover:bg-mac-accentHi transition-colors flex items-center gap-1.5">
+          <Sparkles size={13} /> Reply with Himmy
+        </button>
       </div>
 
-      <h1 className="font-display text-[19px] font-semibold text-mac-ink leading-snug">{subject}</h1>
-      <div className="text-[12.5px] text-mac-ink3 mt-1.5 mb-5 pb-4 border-b border-mac-stroke">
-        <span className="text-mac-ink2">{fromName}</span>
-        {(m?.date || preview?.date) ? <> · {relTime(m?.date || preview!.date)}</> : null}
-        {m?.to ? <> · to {m.to.replace(/<.*>/, "").trim()}</> : null}
+      <h1 className="font-display text-[20px] font-semibold text-mac-ink leading-snug">{subject}</h1>
+      <div className="flex items-center gap-2.5 mt-3 mb-5 pb-4 border-b border-mac-stroke">
+        <div className="shrink-0 h-8 w-8 rounded-full grid place-items-center text-[13px] font-semibold text-white"
+          style={{ backgroundColor: color }}>{avatarInitial(fromName)}</div>
+        <div className="min-w-0">
+          <div className="text-[13px] text-mac-ink truncate">{fromName}</div>
+          <div className="text-[11.5px] text-mac-ink3 truncate">
+            {(m?.date || preview?.date) ? relTime(m?.date || preview!.date) : ""}
+            {m?.to ? ` · to ${senderName(m.to)}` : ""}
+          </div>
+        </div>
       </div>
 
       {loading ? (
