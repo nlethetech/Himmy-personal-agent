@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Save to Himmy",
+  "version": "0.1.0",
+  "description": "One-click save the paper you're viewing to your Himmy library.",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": [
+    "http://127.0.0.1:8131/*",
+    "http://localhost:8131/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Save to Himmy" }
+}

@@ -1,0 +1,20 @@
+# secrets + local state
+.env
+.scholar-desk/
+.himmy/
+
+# macOS
+.DS_Store
+
+# node
+node_modules/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+build/
+dist/

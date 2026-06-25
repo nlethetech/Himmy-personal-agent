@@ -1,0 +1,1135 @@
+{
+  "maps": {
+    "fwSched": {
+      "area": "Scheduling / Automation (himmy \"Routines\" layer)",
+      "summary": "himmy ships a near-complete, production-hardened \"Routines\" subsystem: a routine is a saved prompt bound to an agent that fires unattended on a schedule, runs through the exact same pipeline as an interactive run (lands in the runs store, obeys HITL/approval gating, can deliver its result via Telegram/email), and is durable across restarts. Three recent commits built it out: Phase 0 (559cb0d) added a standalone `himmy worker` process so routines fire with NO API server plus an OS-cron bridge (`himmy routines run-now`); Phase 1 (cef0823) added cron expressions, per-routine IANA timezones, and missed-run/catch-up policies; the multi-node commit (63ea053) added sleep-to-next-fire precision, Postgres leader election, and per-tenant fairness/quotas. The whole layer is reachable as a library: the store (`RoutinesStore` / `get_routines_store()`), the scheduler (`RoutineScheduler` / `get_scheduler()`), pure schedule math (`himmy.api.routine_schedule`), the shared startup bootstrap (`himmy.api.runtime_bootstrap`), a CLI (`himmy routines ...`, `himmy worker`), and two HTTP routers. The key architectural fact for scholar-desk: routines are stored in SQLite at `.himmy/routines.db` (cwd-keyed) and fire ONLY when something runs the scheduler \u2014 either the full himmy server, OR `himmy worker`, OR by directly calling `RoutineScheduler.start()` from scholar-desk's own FastAPI lifespan. scholar-desk currently runs its own custom FastAPI app (`src/himmy_app/server.py`, NOT himmy's BFF) and registers local tools (e.g. `src/himmy_app/connectors/google_calendar.py`), so it must opt into scheduling explicitly \u2014 nothing fires today. Maturity is overwhelmingly \"built\" and e2e-verified on real models + live Postgres; the only soft spots are that the single-user-local path is SQLite-only (cron is an optional `himmy[cron]` extra via cronsim) and deliver kinds are limited to none/telegram/email.",
+      "capabilities": [
+        {
+          "name": "Routines store + Routine/Schedule models (the durable definition layer)",
+          "whatItDoes": "Defines and persists a 'routine' \u2014 a saved prompt bound to an agent (by filesystem agent_path for single-user-local, or by stored agent_id for multi-tenant) that runs on a schedule. The Schedule model supports four kinds: daily (HH:MM), every (N hours, 1..168), cron (5-field expr), and at (one-shot ISO instant), plus timezone, missed-run policy (coalesce/skip/run_each), max_catchup, grace_seconds, and overlap. Persisted to SQLite at .himmy/routines.db with an additive migration; tracks last_run_at/last_status/last_preview/last_error and next_fire_at.",
+          "publicApi": "himmy.api.routines.Routine(name=, agent_path=, prompt=, schedule=Schedule(...), provider=, model=, deliver=, enabled=); himmy.api.routines.Schedule(kind='daily'|'every'|'cron'|'at', at=, hours=, expr=, at_datetime=, timezone=, missed=, max_catchup=, grace_seconds=); store = himmy.api.routines.get_routines_store(); store.upsert(routine) -> Routine; store.list(workspace_id=...) ; store.get(id, workspace_id=...); store.delete(id, workspace_id=...); store.count(workspace_id=, enabled_only=); Schedule.describe(). DB path overridable via HIMMY_ROUTINES_PATH.",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/api/routines.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "scholar-desk imports himmy.api.routines directly (it already imports himmy.api.* e.g. studio_google). Because get_routines_store() resolves .himmy/routines.db relative to cwd, scholar-desk's server should run from a stable working dir (or set HIMMY_ROUTINES_PATH to its data dir, alongside the existing .scholar-desk data dir convention) so routines survive restarts. Routines created here default to the __local__ workspace and bind by agent_path to a project agent.yaml \u2014 exactly the single-user-local seam a desktop app wants. scholar-desk would expose CRUD over its OWN FastAPI app by calling these store methods (it does not need himmy's /v1 router).",
+          "appOpportunity": "Lets the user save reusable automations in the workspace app: 'every morning at 7:00, summarize my new arXiv papers', 'every 6h, check for new citations', a one-shot 'at 2026-07-01T09:00 remind me to renew'. The UI is just a list of saved routines with schedule + last-run status, backed entirely by this store."
+        },
+        {
+          "name": "RoutineScheduler \u2014 the in-process firing loop (sleep-to-next-fire)",
+          "whatItDoes": "The asyncio loop that ticks, finds due routines (is_due math per kind), and launches them through the unattended pipeline. It is sleep-to-next-fire: it computes the soonest boundary across all enabled routines (next_fire) and sleeps until then, capped by HIMMY_SCHEDULER_MAX_SLEEP (default 30s), and wakes instantly on CRUD via notify_change(). One bad tick never kills the loop; no overlapping execution of the same routine; per-run wall-clock timeout (HIMMY_ROUTINE_TIMEOUT_S, default 300s). On launch it can apply each routine's missed-run/catch-up policy.",
+          "publicApi": "sched = himmy.api.routines.get_scheduler(); sched.start() (idempotent); await sched.stop(); sched.notify_change() (wake after CRUD); sched.is_running(routine_id) -> bool; await sched.run_now(routine_id) -> Routine (raises RoutineBusyError on overlap); await sched.catch_up_on_launch() -> dict[id, action]; sched.tick() -> list[str]. Enable/disable globally via HIMMY_ROUTINES_SCHEDULER env (on/off).",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/api/routines.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/api/routers/studio_routines.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "This is the cheapest integration for scholar-desk: in its FastAPI startup (server.py create_app), call himmy.api.routines.get_scheduler().start() and await get_scheduler().catch_up_on_launch(); on shutdown await get_scheduler().stop(). After any CRUD from scholar-desk's routes call get_scheduler().notify_change() so a new/edited routine re-plans immediately (this is exactly what himmy's studio_routines router does via its _wake_scheduler helper). No extra process needed for a single-user desktop app. The scheduler runs every tenant's routines, but in __local__-only scholar-desk that's just the user's own.",
+          "appOpportunity": "Makes the saved automations actually fire while the app/back-end is running: scheduled daily news digest, recurring library enrichment, morning briefing \u2014 all run on the same agent brain scholar-desk already uses, with results landing where interactive runs do."
+        },
+        {
+          "name": "Standalone `himmy worker` \u2014 fire routines + drain the run queue with no API server (Phase 0)",
+          "whatItDoes": "A single CLI process that brings up the SAME durable substrate the FastAPI server's lifespan builds (durable container, dispatch enabled, RunDispatcher for the durable run-queue, plus the RoutineScheduler) and blocks until SIGINT/SIGTERM, then shuts down gracefully. Closes the gap where routines silently never fire outside the full server. Modes: default (scheduler + queue worker), --no-scheduler (queue only), --scheduler-only (tick only). Requires a durable run store (auto-sets HIMMY_DURABLE_STORAGE=1; Postgres via HIMMY_DATABASE_URL). --store sets the SQLite path, --concurrency sets dispatch concurrency.",
+          "publicApi": "CLI: `himmy worker [--store PATH] [--concurrency N] [--no-scheduler|--scheduler-only]`. Programmatic equivalent: himmy.cli.commands.cmd_worker(args) / _run_worker(run_scheduler=, run_dispatcher=); or build it yourself from himmy.api.runtime_bootstrap.build_durable_container() + start_run_substrate() + stop_run_substrate().",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/cli/commands.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/cli/__main__.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/docs/enterprise/worker-and-cron-bridge.md"
+          ],
+          "maturity": "built",
+          "integrationNotes": "Two options for scholar-desk. (A) If it prefers a SEPARATE background process (so scheduling survives even when the UI server is restarted), the Electron main process can spawn `himmy worker --store <data-dir>/runs.db` on app launch and kill it on quit. (B) If it wants everything in one process, skip the worker and just start RoutineScheduler in its own FastAPI lifespan (see RoutineScheduler row) \u2014 the dispatcher/durable-queue is only needed for the multi-tenant agent_id path, which scholar-desk doesn't use. The runbook docs/enterprise/worker-and-cron-bridge.md is the reference.",
+          "appOpportunity": "An always-on background automations engine for the Electron app: even with the front-end closed, the spawned worker keeps firing the morning briefing / news digest / library enrichment, so they're ready when the user opens the workspace."
+        },
+        {
+          "name": "OS-cron bridge \u2014 `himmy routines run-now` (durable single fire)",
+          "whatItDoes": "Runs one routine immediately through the full unattended rails and records a durable, lineage-tracked run (RUN_* spine events + actor.routine_id) in the same canonical store the server/`himmy runs`/Studio read. A cross-process flock refuses a concurrent second run of the same routine (CLI run-now and the scheduler can never double-execute). Designed as the bridge for OS cron / systemd timers / launchd / Electron schedulers that want to own the clock instead of the in-process loop.",
+          "publicApi": "CLI: `himmy routines run-now <id> [--json]`. Programmatic: await himmy.api.routines.execute_routine(routine_id) (single-user agent_path path) \u2014 flock-guarded, raises RoutineBusyError on contention; returns the refreshed Routine with last_status. get_scheduler().run_now(id) for the in-process awaited variant.",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/cli/routines_cmd.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/api/routines.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "If scholar-desk (or its Electron shell) would rather drive timing with the OS scheduler (launchd on macOS) than keep a Python loop alive, register a launchd job that runs `himmy routines run-now <id>` (or call himmy.api.routines.execute_routine(id) from a tiny script). This gives durable single fires without keeping a long-lived scheduler process. The flock guarantees it won't collide with an in-process scheduler if both exist.",
+          "appOpportunity": "Lets the macOS app schedule a 'wake the machine and run my 7am briefing' via launchd even when nothing else is running, and gives a manual 'Run now' button on each routine in the UI that goes through the identical durable path as the scheduled fire."
+        },
+        {
+          "name": "Cron expressions + per-routine IANA timezones + catch-up (Phase 1 schedule math)",
+          "whatItDoes": "Pure, side-effect-free timezone-aware scheduling math, isolated for golden-testing. cron_next_fire computes the next 5-field-cron occurrence IN the routine's IANA timezone then normalises to UTC (DST-correct; verified for the non-integer +5:45 Asia/Kathmandu offset; uses cronsim, which fires a DST fall-back exactly once \u2014 croniter was rejected for double-firing). Timezone resolves explicit -> env HIMMY_TZ -> host-local. Missed-run/catch-up reads the authoritative last_run_at anchor (clock-skew safe): coalesce (fire once now), skip (drop the gap), run_each (backfill each missed occurrence, hard-capped by max_catchup and grace_seconds so a long laptop sleep can't enqueue an unbounded backlog).",
+          "publicApi": "himmy.api.routine_schedule.cron_next_fire(expr, after_utc, zone); cron_occurrences_between(expr, after, until, zone, limit=); resolve_zone(tz_name|None) -> ZoneInfo; default_timezone_name(); validate_cron(expr); validate_timezone(name); cron_is_available() -> bool. Surfaced through Schedule(kind='cron', expr=, timezone=) and CLI flags --cron/--timezone/--missed-run/--overlap. Optional dep: `pip install himmy[cron]` (cronsim).",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/api/routine_schedule.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/api/routines.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "scholar-desk should add the [cron] extra to its himmy install (its requirements.txt currently pins himmy[toolkit,api,openai,embeddings]; add cron) IF it wants cron-grammar routines \u2014 otherwise daily/every work with zero extra deps and cron strings are accepted at create-time but error only at fire. For a Nepal-based user, set HIMMY_TZ=Asia/Kathmandu (or pass timezone per routine) so 'daily 07:00' means 07:00 local. The catch-up policy is the laptop-sleep story that matters for a desktop app: coalesce (the default) means a routine missed while the Mac was asleep fires exactly once on wake.",
+          "appOpportunity": "Precise, human-friendly schedules in the workspace app: 'weekdays at 6:30 Kathmandu time' (cron 30 6 * * 1-5), one-shot reminders, and laptop-sleep-safe behavior so the morning briefing still appears once after the lid was closed overnight instead of silently skipping or firing a storm of backfills."
+        },
+        {
+          "name": "Result delivery + lifecycle notifications (Telegram / email / in-app)",
+          "whatItDoes": "When a routine finishes, _deliver sends the result text through a configured himmy connection (deliver='telegram' or 'email'; capped at 4000 chars; failures are recorded, never raised) and _notify records an in-app notification ('Routine ran', 'Routine needs approval', 'Routine failed') with a deep link. Approval-gated tools PAUSE the run as awaiting_approval and surface a notification pointing at the Approvals inbox \u2014 the scheduler never auto-approves.",
+          "publicApi": "Set Routine.deliver = 'none'|'telegram'|'email'. Delivery uses himmy.api.studio_connections.get_connection/send_via_connection; notifications use himmy.api.routers.studio_notify.record_notification. DeliverKind and DELIVERY_MAX_CHARS exported from himmy.api.routines.",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/api/routines.py"
+          ],
+          "maturity": "partial",
+          "integrationNotes": "Telegram/email delivery requires the corresponding himmy connection to be configured (studio_connections). scholar-desk could reuse the email path (SMTP) for a self-emailed digest with minimal wiring, or rely on the in-app notification record and render it in its own UI. To add a custom delivery channel (e.g. a desktop notification or writing into scholar-desk's own notes/inbox), scholar-desk would post-process the routine result itself rather than relying on the built-in deliver kinds, since only none/telegram/email exist.",
+          "appOpportunity": "The morning briefing / news digest lands somewhere the user sees it: an email to self, a Telegram ping, or an in-app notification badge \u2014 and an automation that hits a tool needing approval safely parks itself in an Approvals queue instead of acting unattended."
+        },
+        {
+          "name": "Multi-node leader election + per-tenant fairness/quotas (production hardening)",
+          "whatItDoes": "Hardens scheduling for multi-node/multi-tenant deployments. scheduler_leader does Postgres leader election via a session pg_try_advisory_lock (only the leader ticks; clean failover when the leader dies; catch-up covers the gap; per-fire dedup-CAS prevents double-fire during overlap). On SQLite it's a same-host flock guard + a loud cross-host warning. The dispatcher adds opt-in per-tenant fairness (least-loaded-first claim) and HARD per-tenant quotas (max enabled routines -> 429, catch-up clamp, outstanding-run cap) fused atomically so one tenant can't starve or flood the shared queue. All additive/opt-in/fail-open; single-tenant behaviour is byte-identical.",
+          "publicApi": "himmy.api.scheduler_leader.acquire_scheduler_leadership(container, require_single_scheduler_ack=) -> SchedulerLeadership(is_leader, mode, ...); .refresh()/.release(). Quota knobs: HIMMY_TENANT_MAX_ROUTINES, HIMMY_TENANT_MAX_CATCHUP, HIMMY_DISPATCH_FAIRNESS, HIMMY_SCHEDULER_REQUIRE_ACK, HIMMY_SCHEDULER_SINGLE_NODE_ACK; helpers tenant_max_routines()/tenant_max_catchup()/create_routine_with_quota(). The __local__ workspace is exempt from all quotas.",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/api/scheduler_leader.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/api/routines.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/application/services.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/application/dispatcher.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "Mostly irrelevant for a single-user desktop scholar-desk: it runs one node, one __local__ workspace (which is exempt from quotas), and SQLite \u2014 so leader election degrades to the same-host flock guard and quotas/fairness are no-ops. scholar-desk gets the SAFETY (the flock stops a stray second scheduler from double-firing if both the in-process loop and a `himmy worker` are accidentally running) for free, without configuring anything. This layer only becomes relevant if scholar-desk ever moves its back-end to a shared Postgres / multi-instance deployment.",
+          "appOpportunity": "Future-proofing: if scholar-desk ever runs as a hosted multi-user service, the same routines layer already supports exactly-once firing across replicas and per-user fairness/quotas with no rewrite \u2014 today it simply guarantees a single-user desktop never double-fires a scheduled briefing."
+        },
+        {
+          "name": "HTTP routers for routines (REST CRUD + run-now) \u2014 optional, for reference",
+          "whatItDoes": "Two FastAPI routers expose routines over HTTP: the multi-tenant /v1/routines control-plane router (POST/GET/PATCH/DELETE + POST /{id}/run-now, RBAC-gated, agent_id-bound, no agent_path to avoid FS leaks, idempotency keys, per-tenant quota 429s) and the single-user studio_routines router (the GUI surface that also owns starting/stopping the scheduler and waking it on CRUD).",
+          "publicApi": "himmy.api.routers.routines.router (prefix /v1/routines) with CreateRoutineRequest/UpdateRoutineRequest/RoutineView/RoutineListResponse; himmy.api.routers.studio_routines.router (Studio). Mountable via app.include_router(...).",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/api/routers/routines.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/api/routers/studio_routines.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "scholar-desk runs its OWN custom FastAPI app (src/himmy_app/server.py), deliberately NOT himmy's BFF, so it likely should NOT mount these routers wholesale (the /v1 one carries RBAC/multi-tenant machinery scholar-desk doesn't use). Instead, the cleaner pattern matches how scholar-desk already wraps himmy: write a handful of thin endpoints in its own server.py that call get_routines_store() + get_scheduler() directly (mirroring what studio_routines.py does, minus the multi-tenant bits). The studio_routines router is the best copy-from reference for the scheduler start/notify_change/catch_up wiring.",
+          "appOpportunity": "Gives scholar-desk's React front-end a clean way to list/create/edit/delete/run-now routines from the UI \u2014 implemented as a few endpoints on its existing FastAPI app that delegate to the himmy store + scheduler, powering a 'Automations' or 'Schedules' panel in the workspace."
+        }
+      ]
+    },
+    "fwKernels": {
+      "area": "himmy framework \u2014 non-scheduling reusable capabilities for scholar-desk (himmy-as-library)",
+      "summary": "Mapped the himmy framework (package `himmy` at /Users/samriddhagc/LocalProjects/himmy-agent-test, source under `himmy/`, NOT `src/himmy`) against scholar-desk's current usage. scholar-desk (src/himmy_app) already consumes a meaningful slice: the memory pack (durable remember/recall via register_memory_pack), the knowledge/RAG kernel with hybrid BM25+dense + cross-encoder rerank (papers_rag.py builds a himmy KnowledgeBase directly), the PlannerOrchestrator + reflect() (research.py deep_research), SSE streaming via stream_task (server.py /ask/stream), the SqliteSessionStore + SqliteCheckpointStore, and the tasks/google built-in packs. What it does NOT yet adopt \u2014 and where the leverage is for a research/productivity desktop app \u2014 is: (1) durable memory's richer layers (bi-temporal recall, the typed memory GRAPH, audited consolidation, and the auto-injection MemoryContextAdapter); (2) the durable on-disk SqliteKnowledgeBackend (so the papers index survives restarts instead of re-embedding every launch \u2014 explicitly designed for this Daybook case) plus the genuine local embedders (fastembed/Ollama via build_embedder \"auto\"); (3) the guardrails/DLP pipeline (PII redaction, prompt-injection, a SQLite-backed reversible token vault) on the input/output/tool surfaces; (4) SELF-LEARNING (opt-in spec flag self_learning, with outcome_weight + trajectory_hints) that mines OUTCOME_SCORED/TOOL_FAILED events into per-tool reputation, reorders flaky tools, injects reliability/loop hints, and feeds back user thumbs via OutcomeRecorder; (5) multi-agent orchestrators (handoff/delegate teams, group-chat, StateGraph) for a multi-step research council; (6) the BFCL-grade eval/benchmark harness for regression-testing the agent over local models; (7) the connector SDK proper (OutboundToolConnector.register_tools \u2014 connector-as-tool with SSRF guard, secrets layer, rate limit, idempotency, HITL requires_approval) which scholar-desk re-implements ad hoc; (8) constrained/structured decoding (CONSTRAINED_DECODING_KEY + ResponseFormat) for guaranteed-JSON extraction; (9) the EntityRecord audit spine + run-event stream for a verifiable activity/provenance log. Everything is offline-first and best-effort/opt-in by design, so each can be wired incrementally without destabilizing the existing app.",
+      "capabilities": [
+        {
+          "name": "Durable user MEMORY (remember/recall + temporal + graph + consolidation)",
+          "whatItDoes": "MemoryService persists facts per subject_id and recalls them by cosine similarity over an embedder, reading from the store every time so a SqliteMemoryStore survives restarts. Beyond simple recall it is bi-temporal (as_of point-in-time, active_only, invalidate-not-delete), Letta-tiered (core/recall/archival with promote()), relational (typed MemoryLink graph + traverse_graph + recall(max_hops=...) relational expansion), and audited (projects each write onto the EntityRecord spine + emits MEMORY_REMEMBERED/RECALLED events when a registry/sink is wired). MemoryConsolidator reconciles a new fact against existing ones as ADD/UPDATE/DELETE/NOOP instead of blindly appending. MemoryContextAdapter auto-injects recalled memories into the system prompt with a noise floor.",
+          "publicApi": "himmy.services.memory: MemoryService(store, embedder=, min_similarity=, registry=).remember(text, subject_id=, tier=, stable_key=) / await recall(query, subject_id=, top_k=, as_of=, active_only=, tier=, max_hops=) / link / await traverse_graph / invalidate / promote / forget; SqliteMemoryStore(path); MemoryContextAdapter(memory, top_k=, tiers=, max_hops=); MemoryConsolidator(memory, registry=).consolidate(text, subject_id=). Tool pack: himmy.toolkit.memory.register_memory_pack(registry, ToolkitConfig) + effective_memory_path().",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/memory/service.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/memory/store.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/memory/adapter.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/memory/consolidation.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/memory/temporal.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/memory/graph.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/toolkit/memory.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "scholar-desk already wires register_memory_pack in agent_tools.py (durable remember/recall). To go further: enable memory_consolidate in ToolkitConfig to get a 'consolidate' tool (no duplicate facts), set memory_subject per-user, and register MemoryContextAdapter on the ContextService so the agent silently sees relevant prior facts every turn (no explicit recall tool-call). The HIMMY_MEMORY_PATH default is .himmy/memory.db under the working dir, so it is already durable. Use link()/max_hops to relate facts (paper->note->task) into a small knowledge graph; use as_of for 'what did I believe last month'.",
+          "appOpportunity": "A persistent assistant that remembers the user's projects, preferences, and prior conclusions across sessions; a 'what I knew as of <date>' time-travel view; and a related-facts panel that surfaces linked notes/papers/tasks for the current item \u2014 turning Himmy from a stateless palette into a memory that compounds."
+        },
+        {
+          "name": "KNOWLEDGE BASE / RAG with durable SqliteKnowledgeBackend + hybrid retrieval + rerank + local embedders",
+          "whatItDoes": "KnowledgeBase chunks, embeds, and retrieves documents by cosine top-k with a parent-document context window, content-addressed ingest (re-running over an unchanged corpus is a no-op, changed sources replace not duplicate), embedder-fingerprint mismatch detection, and tenancy guards. Retrieval has a dense default and a RetrievalConfig(mode='hybrid') BM25+dense RRF fusion path with optional cross-encoder rerank and query rewrite. SqliteKnowledgeBackend is the offline/desktop twin of pgvector: it persists embeddings+chunks+fingerprint to a single .db file so an app RESTART loads the existing index instead of re-embedding the whole corpus (the docstring explicitly names the Daybook ~2-minute re-embed problem this solves). local_embedders.build_embedder('auto') gives genuine local semantic recall via fastembed (ONNX, no server) or a pulled Ollama embed model, degrading to the offline DeterministicEmbedder.",
+          "publicApi": "himmy.services.knowledge: KnowledgeBase(storage=, embedder=, backend=, retrieval=RetrievalConfig(mode='hybrid')).create_kb / ingest_documents / ingest_file / ingest_directory / await search(kb_id, query, top_k=, metadata_filters=). SqliteKnowledgeBackend(path). retrieval.reranker.build_reranker()/fastembed_rerank_available(). local_embedders.build_embedder(name='auto'). Tool pack: himmy.toolkit.knowledge.register_knowledge_pack (kb_ingest/kb_search). KnowledgeBaseAdapter for context auto-injection.",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/knowledge/service.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/knowledge/sqlite_backend.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/knowledge/local_embedders.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/knowledge/retrieval/hybrid.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/knowledge/retrieval/reranker.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/connectors/papers_rag.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "papers_rag.py currently builds an in-memory KnowledgeBase(storage=StorageService(), retrieval=hybrid) and rebuilds it each launch, caching extracted PDF text on disk but re-embedding in memory. The highest-ROI change is to pass backend=SqliteKnowledgeBackend(<library_files>/papers_index.db) so the embeddings persist; content-hash dedup then skips re-embedding unchanged papers on the next launch. Also swap the DeterministicEmbedder for build_embedder('auto') so recall is genuinely semantic when fastembed/Ollama is present. KB_WORKSPACE_ID/KB_CLIENT_ID/KB_NAME are already set, so resolve_kb makes the durable KB stable by name.",
+          "appOpportunity": "Instant 'ask my library' on launch (no embedding spinner), reliably high-quality cited retrieval across a large paper collection, and a unified KB that can also index notes, saved news, and highlights \u2014 so the user can semantically search everything they have read, not just one corpus."
+        },
+        {
+          "name": "GUARDRAILS / policy pipeline + DLP token vault",
+          "whatItDoes": "A composable, synchronous, dependency-free guardrail pipeline that inspects text on three surfaces (tool arguments, input prompt, model output) and returns a verdict that can redact, flag, or block, with per-guardrail attribution (GuardrailTrigger) safe to audit. Built-ins: PII redaction (incl. Nepal-specific), prompt-injection detection, blocklist, and a GroundingGuardrail. The DLP layer adds policy-driven detection with a reversible TokenVault (InMemory or SQLite-backed) so sensitive spans are tokenized out before the model sees them and re-substituted after \u2014 and pre/post tool hooks (build_guardrail_pre_hook/post_hook) plus suppresses_output_content() so a streaming caller knows to buffer-and-guard before emitting a blocked secret.",
+          "publicApi": "himmy.services.guardrails: build_guardrail_pipeline(['pii','injection']).inspect(text) -> GuardrailVerdict(allowed, text, flags, triggers); GuardrailPipeline; build_guardrail_pre_hook/build_guardrail_post_hook(pipeline) for the tool service; build_dlp_guardrail(policy, vault); SqliteTokenVaultBackend(path); DlpPolicy/DlpAction; PresidioAnalyzerAdapter (optional).",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/guardrails/base.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/guardrails/builtins.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/guardrails/dlp.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/guardrails/tool_hook.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "Not used by scholar-desk today. Wire build_guardrail_pipeline into the /ask and /ask/stream paths in server.py: inspect the user prompt before the run and the model output after. Because the app streams (StreamingResponse), check pipeline.suppresses_output_content() to decide whether to buffer a turn before emitting tokens. Register build_guardrail_pre_hook on the ToolRegistry so connector tool args (e.g. outbound email/calendar writes) are redacted. The SqliteTokenVaultBackend keeps the redaction reversible and local \u2014 no cloud DLP service.",
+          "appOpportunity": "A privacy-conscious research desk that redacts personal info before any text leaves for a cloud model (important since himmy is text-only and forwards prompts to OpenRouter/Gemini), warns on prompt-injection from fetched web/PDF content, and gives the user a visible 'what was redacted' indicator \u2014 a genuine trust feature for a personal workspace."
+        },
+        {
+          "name": "SELF-LEARNING (OUTCOME_SCORED + TOOL_FAILED -> reputation + reorder + trajectory hints)",
+          "whatItDoes": "An opt-in loop that turns recorded run-events into behavioural change. LearningService mines a bounded, workspace-scoped window of TOOL_COMPLETED/TOOL_FAILED into a per-tool operational reputation, and (with outcome_weight>0) blends in the mean of OUTCOME_SCORED grades. ToolReputationProvider snapshots this so ToolService.bound_tools stable-sorts flaky tools after reliable ones (annotate/reorder, never drop). LearnedHintsContextAdapter injects a short privacy-safe reliability note ('tool X failed 4 of its last 5 calls \u2014 verify inputs') into the prompt. TrajectoryAdvisor adds ordering/repetition-aware hints (looping, don't-call-first). OutcomeRecorder emits OUTCOME_SCORED from four provenance sources: an LLM judge, a deterministic grader, explicit user thumbs-up/down, or a trajectory grade. Everything is fail-open and inert unless spec.self_learning is on.",
+          "publicApi": "himmy.services.learning: LearningService(event_log, window=, workspace_id=, outcome_weight=).get_tool_reputation(); ToolReputationProvider(learning, floor=, event_sink=).refresh()/score_for/is_unreliable; LearnedHintsContextAdapter(learning, trajectory_advisor=); OutcomeRecorder(...).record(score, source=OutcomeSource.USER_FEEDBACK); TrajectoryAdvisor. Spec flags: self_learning / outcome_weight / trajectory_hints in himmy/config/agent_spec.py; build_runtime_for_spec wires it all + exposes runtime.reprime_self_learning.",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/learning/service.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/learning/outcome.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/learning/adapter.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/learning/trajectory.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/runtime/from_spec.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "Set self_learning: true (and optionally outcome_weight + trajectory_hints) in scholar-desk's agent spec; build_runtime_for_spec then auto-wires LearningService + ToolReputationProvider + LearnedHintsContextAdapter against the same SqliteSessionStore/event log the app already uses (subject= the per-user workspace_id so reputation is per user). Then surface a thumbs-up/down in the Cmd-K answer UI and call OutcomeRecorder.record(..., source=USER_FEEDBACK) on click; with outcome_weight>0 those grades feed back into which tools the agent prefers.",
+          "appOpportunity": "Himmy quietly gets better at the user's workflow: tools/connectors that keep failing (a flaky web fetch, a rate-limited API) get deprioritized, repeated-call loops self-correct, and a thumbs-down on an answer measurably shifts future tool selection \u2014 a personal assistant that adapts to one user instead of staying static."
+        },
+        {
+          "name": "MULTI-AGENT orchestrators (handoff/delegate teams, group-chat, StateGraph, planner)",
+          "whatItDoes": "Orchestration on top of the single-agent runtime. MultiAgentOrchestrator runs an AgentTeam of TeamMembers with two edge types: handoff (binds a synthetic transfer_to_<peer> tool, control moves to the peer on the same thread \u2014 swarm routing) and delegate (binds ask_<worker> that runs a worker to completion in a sub-thread and returns its answer \u2014 supervisor pattern), with fail-closed HITL handling. GroupChatOrchestrator runs round-robin/LLM-selected multi-speaker discussions with termination predicates and a fan_out helper. StateGraph is a LangGraph-style typed-state graph with reducers, interrupts/resume, and recursion guards. PlannerOrchestrator does plan-and-execute; reflect() does a critique-and-revise pass.",
+          "publicApi": "himmy.orchestrators: MultiAgentOrchestrator + AgentTeam(members=[TeamMember(persona, tools, handoffs=, delegates=)]); GroupChatOrchestrator + RoundRobinSelector/LLMSelector + fan_out; StateGraph/CompiledStateGraph + START/END/add_reducer + NodeInterrupt; PlannerOrchestrator(runtime, max_steps=).run(); reflect(runtime, draft, criteria=).",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/orchestrators/multi_agent.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/orchestrators/group_chat.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/orchestrators/state_graph.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/orchestrators/planner.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/orchestrators/reflection.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/research.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "scholar-desk already uses PlannerOrchestrator + reflect in research.py deep_research. The next step is a research COUNCIL: a MultiAgentOrchestrator team (e.g. a 'searcher' delegate that runs ask_papers/web search, an 'analyst' that synthesizes, a 'critic' worker) rather than one planner loop \u2014 wire it with the same _build_runtime from cli.py. For long multi-stage reports, StateGraph gives durable interrupt/resume so a partial report survives an app restart (it already wires SqliteCheckpointStore).",
+          "appOpportunity": "A 'Deep Research' mode that fans a question across specialist sub-agents (gather -> draft -> critique -> revise) and shows the user the intermediate reasoning steps, plus resumable long-running report generation that can be paused and continued across sessions \u2014 a meaningfully more capable research product than a single Q&A turn."
+        },
+        {
+          "name": "EVAL + BFCL-grade benchmark harness",
+          "whatItDoes": "A reproducible benchmark runner that executes a YAML suite (BFCL/core/irrelevance/multiagent/nepali/skills) of tasks against one or more model specs over N trials in isolated throwaway workspaces, running the real agent loop and grading correctness (graders incl. arg-level/data-flow trajectory grading via tool_called_with/result_feeds_arg/all_of/any_of), whether the expected tool was called, latency, turns, tokens, and cost. Includes an LLM judge with a judge!=candidate guard, statistics (McNemar/Holm via stats.py), a history.jsonl trend log, and a leaderboard report. The evaluation service adds AgentEvalHarness.evaluate_agent/evaluate_team for grading a configured agent against datasets, plus privacy/metrics.",
+          "publicApi": "himmy CLI `himmy bench` (cli/commands.py cmd_bench). himmy.benchmark: BenchmarkRunner(trials=, inference_factory=, judge_inference_factory=).run(suite, specs); graders.grade/grade_trajectory; judge.build_judge/judge_answer; history; report; stats. himmy.services.evaluation.agent_harness.AgentEvalHarness.evaluate_agent/evaluate_team.",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/benchmark/runner.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/benchmark/graders.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/benchmark/judge.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/benchmark/suites/bfcl.yaml",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/evaluation/agent_harness.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/cli/commands.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "Not used by scholar-desk. Author a small in-repo YAML suite of representative research-desk tasks (ask_papers retrieval, citation formatting, calendar/gmail tool selection, 'should NOT call a tool' irrelevance cases) and run BenchmarkRunner with an inference_factory pointing at the app's configured local/OpenRouter model. Use it as a regression gate when changing the agent spec, prompts, or tool set, and to compare candidate local models (which Ollama/embed model to ship).",
+          "appOpportunity": "Confidence that a prompt/model/tool change actually improves the assistant before shipping it to the user \u2014 and a principled way to pick the smallest local model that still answers research questions well, which matters for an offline-first desktop app."
+        },
+        {
+          "name": "CONNECTORS framework (connector-as-tool: SDK + declarative YAML spec)",
+          "whatItDoes": "A secure pattern for bridging the agent to external systems. OutboundToolConnector exposes typed tools whose credentials come from the secrets layer (never literals), whose HTTP is SSRF-guarded via a pinned transport, which are capability-gated, audited (one structured event per action), rate-limited (token bucket), retry-bounded, and idempotent (dedupe on retry) \u2014 and tools can be marked requires_approval for human-in-the-loop on side effects. register_tools(registry) binds them as native local tools. ConnectorSpec lets a whole REST connector (tools, auth, egress, rate limit, per-tool approval/idempotency) be declared in YAML with no Python. InboundChannelConnector handles receive-message->run-agent->reply with default-deny sender allowlists + HMAC/signature verification. Built-ins: GitHub, Slack, Discord, web search (Tavily/Brave), Nepal news, NRB, generic signed webhook. A ConnectorService catalogs/configures/tests/enables connectors.",
+          "publicApi": "himmy.connectors: OutboundToolConnector subclass with @capability + .register_tools(registry); ConnectorSpec/register_connector_specs (YAML); ConnectorRegistry/register_connector/default_registry; ConnectorContext/RateLimiter/RetryPolicy/IdempotencyStore; capability/redact_args/safe_error/verify_hmac_signature; ConnectorService(catalog/configure/enable/test/build); register_websearch_connectors/register_github_connectors etc.",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/connectors/sdk.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/connectors/spec.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/connectors/manage.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/connectors/websearch.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/connectors/_register.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/connectors/actions.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "scholar-desk hand-rolls its connectors (PapersRagConnector, GoogleCalendarConnector, ActionsConnector) with a safe_register_local_tool helper (to dodge the durable-content-addressing re-register bug noted in memory), bypassing the SDK. Migrating side-effecting tools (gmail_send, gcal_create, outbound webhooks) onto OutboundToolConnector would give them SSRF guarding, secret resolution, rate limiting, idempotency, and requires_approval HITL for free. For new third-party REST integrations (e.g. Semantic Scholar, arXiv, Crossref already used in library.py), a ConnectorSpec YAML is the lowest-effort path. The ConnectorService catalog could back a Settings 'Connections' UI.",
+          "appOpportunity": "A trustworthy 'Connections' settings panel where the user enables Gmail/Calendar/web-search/paper-APIs with per-connector status and test buttons, side-effecting actions (send email, create event) prompt for confirmation (HITL), and credentials are stored safely \u2014 turning ad-hoc integrations into a managed, auditable surface."
+        },
+        {
+          "name": "Structured / constrained output + streaming",
+          "whatItDoes": "The inference kernel can guarantee structured output: a JSON-Schema is compiled into the constraint each backend needs so the model physically cannot emit invalid output (Ollama format pass-through, llama.cpp GBNF grammar via schema_to_gbnf, OpenAI/OpenRouter response_format json_schema/guided tool-args), opt-in via the CONSTRAINED_DECODING_KEY request-metadata flag and fail-open (an unsupported schema widens to permissive JSON rather than breaking). ResponseFormat (AUTO_TOOLS etc.) on a run controls tool/JSON behaviour. The runtime exposes true token streaming: stream_task / stream_agent_loop yield incremental text over InferenceService.run_stream, with audit parity to the non-streaming path.",
+          "publicApi": "himmy.services.inference.structured: constrained_decoding_requested(request), schema_to_gbnf(schema), ollama_format(schema), CONSTRAINED_DECODING_KEY. himmy.services.inference.models: ResponseFormat, LLMConfig, InferenceRequest(metadata={'constrained_decoding':...}, output_json_schema=). SingleAgentRuntime.stream_task / stream_agent_loop / run_task_detailed (returns typed RunResult with structured output, cost, tool_calls).",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/inference/structured.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/services/inference/models.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/runtime/single_agent.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/research.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "scholar-desk already streams (server.py /ask/stream via answer_stream->stream_task) and already uses ResponseFormat.AUTO_TOOLS in research.py. The unused lever is constrained decoding: for features that need machine-parseable output (extracting structured metadata from a PDF, generating a citation object, producing a typed summary card), pass output_json_schema + metadata={'constrained_decoding': true} on the run so the JSON is guaranteed valid instead of parsed-and-hoped. Pure/offline and fail-open, so it is safe to add behind a flag.",
+          "appOpportunity": "Reliable structured features \u2014 auto-extract title/authors/venue/DOI from a dropped PDF into a fillable form, generate citation objects that always parse, and render typed 'answer cards' (summary + sources + confidence) \u2014 without brittle regex-on-LLM-prose, making the productivity surfaces dependable."
+        },
+        {
+          "name": "Sessions / threads / audit (EntityRecord spine + run-event stream)",
+          "whatItDoes": "The framework's audit spine: immutable content-addressed EntityRecords with deterministic UUID5 ids (stable_id_for/record_id_for), typed EntityLinks, an EntityRegistry (SQLite or Postgres backends) with metadata-containment queries mirroring Postgres JSONB @>, integrity/lineage helpers, and projection so subsystems (memory, learning) live ON the spine. On top sit durable conversation state: SqliteSessionStore (persistent threads/messages), SqliteCheckpointStore (resumable runs with redact_sensitive_args), and the RunEvent stream (TOOL_CALLED/COMPLETED/FAILED, OUTCOME_SCORED, MEMORY_*, LEARNING_APPLIED) that the learning + observability layers read. build_runtime_for_spec assembles the whole thing; an observability metrics registry tracks tokens/cost.",
+          "publicApi": "himmy.entities: EntityRecord/EntityLink, EntityRegistry, SqliteEntityRegistry, stable_id_for/record_id_for, lineage/integrity. himmy.runtime.session.SqliteSessionStore; himmy.runtime.checkpoint.SqliteCheckpointStore + redact_sensitive_args; himmy.config.project.conversations_db_path. himmy.core.events RunEvent/EventType/EventSink. himmy.services.observability.metrics.get_registry.",
+          "filePaths": [
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/entities/records.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/entities/sqlite_registry.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/runtime/session.py",
+            "/Users/samriddhagc/LocalProjects/himmy-agent-test/himmy/runtime/checkpoint.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/cli.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py"
+          ],
+          "maturity": "built",
+          "integrationNotes": "scholar-desk already uses SqliteSessionStore (cli.py conversations) + SqliteCheckpointStore and reads the observability metrics registry for token/cost usage (server.py /usage). The under-used piece is the RunEvent stream + EntityRegistry: passing a registry into MemoryService and turning on self_learning would make every tool call, memory write, and learning decision an auditable spine record (the same backend the session store uses), enabling a verifiable activity/provenance log. EntityLinks could relate a note to the paper and run it was derived from.",
+          "appOpportunity": "An 'Activity & Provenance' view: a trustworthy timeline of what Himmy did (tools called, what it read, what it remembered, why it chose an answer) with per-answer source links \u2014 plus resumable runs and accurate per-session token/cost accounting, which a power-user research desktop benefits from for both transparency and debugging."
+        }
+      ]
+    },
+    "appBackend": {
+      "area": "Daybook/Himmy desktop app \u2014 backend + agent surface",
+      "summary": "Himmy is a single-user local macOS workspace: an Electron shell (desktop/electron/main.cjs spawns the Python backend as a child process and kills it on quit) over a FastAPI server (src/himmy_app/server.py, binds 127.0.0.1:8131, wide-open CORS, no auth). The backend wraps a himmy-framework agent (agent/agent.yaml, provider=openrouter google/gemini-2.5-flash) plus several \"direct, no-agent-in-the-loop\" feature modules: a native reference-manager Library (library.py), a deterministic News hub (news.py), a papers RAG index (connectors/papers_rag.py), deep research (research.py), tasks/google via himmy's own packs, and chat (cli.py). ALL durable data lives under .scholar-desk/ (a folder kept named \".scholar-desk\" for data continuity even though the product is \"Himmy\"). The agent currently has 18 tools across utils/web/memory/tasks/google/RAG/calendar/actions. The single biggest gap across the whole surface is automation/scheduling: there is NO scheduler, worker, cron, timer, OS-notification, digest, reminder, or due-date firing anywhere \u2014 tasks have a `due` column that nothing acts on, news has no refresh loop, calendar/mail are poll-on-open only, and approval-gated runs only resume on an explicit UI call. Frontend setInterval calls are pure UI refresh polling, not backend automation.",
+      "notableFindings": [
+        "NO scheduling/automation layer exists at all. grep for schedul/cron/worker/routine/timer/reminder/notify/digest across src/himmy_app/ returns only unrelated hits (research.py 'worker threads', a reverted RAG 'warm' comment). The Electron main process (desktop/electron/main.cjs, 136 lines) only spawns/kills the backend and has no Notification/powerMonitor/setInterval. This is the clean slate for any proposed scheduling feature.",
+        "Tasks have a `due` field (server.py _task_dict returns t.due; himmy's studio_tasks store) but NOTHING reads or fires on it \u2014 no overdue detection, no reminders, no calendar linkage. add_task tool only accepts a `title`, so the agent cannot even set a due date.",
+        "Mail is READ-ONLY by design and Calendar WRITE + mail_send are HITL approval-gated. The HITL machinery (approvals.db SqliteCheckpointStore, /ask/resume, ask_turn/resume_turn) is real and working, but a paused run only continues when the UI explicitly POSTs /ask/resume \u2014 there is no timeout, expiry, or auto-resume.",
+        "Two tool sets overlap on Google Calendar: himmy's built-in `google` pack (gcal_events/gcal_create, registered but mostly not in the allowlist) AND the project's GoogleCalendarConnector (calendar_find/add/edit/remove). The agent.yaml allowlist admits the connector's 4 + gmail_inbox only; gmail_send from the pack is deliberately excluded in favor of the approval-gated mail_send action tool.",
+        "RAG index is in-memory, rebuilt lazily on first ask_papers and on any change to the library item-id set; a startup 'warm' was tried and reverted (GIL froze the loop), so first-run cold-build (~2-3 min over all PDFs) is a known cost. Index is NOT persisted across restarts (only extracted PDF text is cached in papers_cache.db).",
+        "Zotero is fully deprecated: config.py still carries zotero_api_base/library and connectors/zotero.py + zotero_client.py still exist and are exported from __init__.py, but agent_tools.register never wires ZoteroConnector \u2014 Himmy reads its own library.db directly. Dead/legacy surface.",
+        "Usage/cost accounting (/usage) folds himmy's process-wide metrics-registry counters into a persisted lifetime tally in .scholar-desk/usage.json, surviving backend restarts by detecting counter resets.",
+        "Streaming (/ask/stream) does NOT truly stream the tool loop: it runs the bounded HITL tool loop buffered, then re-issues one no-tool synthesis turn and re-chunks the guard-cleared reply into word-group deltas for a 'premium reveal' feel \u2014 because the blocking output guardrail (grounding/PII/injection) cannot stream past content it might withhold.",
+        "Self-learning (TOOL_FAILED reputation priming) and context compaction are ON in agent.yaml; the self-learning prime is scheduled as a background task on the running loop to avoid crashing /ask.",
+        "Deep research (/research) bypasses the LLM's tool-choice for the library leg: it calls the RAG retriever directly in Python (deterministic grounding) and runs the web leg best-effort in a thread; web search is keyless DuckDuckGo and frequently empty without HIMMY_SEARCH_API_KEY (tavily/brave)."
+      ],
+      "surfaces": [
+        {
+          "name": "Chat / Ask + Streaming (Cmd-K assistant)",
+          "description": "The reactive single-turn agent loop powering the command-palette assistant. POST /ask (one turn, HITL on, returns reply+tools or an awaiting_approval checkpoint), POST /ask/resume (approve/reject a gated tool and continue), POST /ask/stream (SSE token deltas via a buffered-then-re-chunked synthesis turn). Context can include the currently-viewed paper/article.",
+          "currentState": "Working. HITL approval-gating real (approvals.db). Streaming is simulated (buffered tool loop + word-group re-chunk) because of the blocking output guardrail. Self-learning + context compaction enabled.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/cli.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/agent/agent.yaml"
+          ],
+          "gaps": [
+            "No true token streaming through the guardrail.",
+            "Approval-gated runs never time out / auto-expire; resume only on explicit UI POST.",
+            "No per-turn server-side error surfacing beyond a string reply."
+          ]
+        },
+        {
+          "name": "Sessions (persistent conversations / history sidebar)",
+          "description": "Durable Cmd-K conversation store. GET /sessions (list w/ title preview), GET /sessions/{id} (messages), DELETE /sessions/{id}. Threads are himmy ChatThreads persisted to conversations.db; synthesis-plumbing turns are stripped from the displayed transcript.",
+          "currentState": "Working. Pinned to .scholar-desk/conversations.db via HIMMY_CONVERSATIONS_PATH so all endpoints share one DB regardless of cwd.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/cli.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/config.py"
+          ],
+          "gaps": [
+            "delete_session reaches into store._store (private API).",
+            "No rename, search, pinning, or export of conversations.",
+            "The streaming path always writes to session id 'last' when none given (can collide)."
+          ]
+        },
+        {
+          "name": "Library (native reference manager)",
+          "description": "Himmy's own paper store \u2014 SQLite catalogue library.db + PDF store library_files/. Add by DOI (Crossref) or arXiv (arXiv API) or import PDFs; open-access PDF fetch via Unpaywall/arXiv; AI-assisted enrich (model reads page 1 -> Crossref); metadata edit; per-item notes; delete; dedupe (annotation-protected). Endpoints: GET /library, GET /library/{id}, GET /library/{id}/pdf, POST /library/doi, POST /library/files, PUT /library/{id}, POST /library/{id}/enrich, POST /library/{id}/fetch-pdf, PUT /library/{id}/notes, DELETE /library/{id}, POST /library/dedupe, GET /datadir.",
+          "currentState": "Working and feature-rich (described in memory as Zotero-grade, E2E-tested).",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/library.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py"
+          ],
+          "gaps": [
+            "No full-text search inside the library tab (list() filters title/author/venue/tags only; full-text search is only via RAG).",
+            "enrich depends on OPENROUTER_API_KEY; silently returns {} if absent.",
+            "add_files only accepts local paths (no multipart upload endpoint).",
+            "No BibTeX/RIS import; citation export not exposed as an endpoint here (only highlights markdown export)."
+          ]
+        },
+        {
+          "name": "Collections & Tags",
+          "description": "Folders + membership and tag aggregation. GET/POST /collections, PUT/DELETE /collections/{cid}, POST/DELETE /collections/{cid}/items/{item_id}, GET /tags. Tags are a JSON column on items updated via PUT /library/{id}.",
+          "currentState": "Working.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/library.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py"
+          ],
+          "gaps": [
+            "Tags edited only through the generic item-update path (no dedicated add/remove-tag endpoint).",
+            "No nested collections / smart collections / saved searches."
+          ]
+        },
+        {
+          "name": "Highlights & Annotations",
+          "description": "PDF highlights/notes stored in the highlights table (page, color, text, note, rects JSON). GET/POST /library/{id}/highlights, PUT/DELETE /highlights/{hid}, POST /library/{id}/highlights/export (writes a Markdown file of notes+highlights to ~/Downloads).",
+          "currentState": "Working.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/library.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py"
+          ],
+          "gaps": [
+            "Export only to ~/Downloads markdown (no clipboard/return-body variant, no per-collection export).",
+            "Highlights not surfaced to the RAG/agent (only the item-level note is)."
+          ]
+        },
+        {
+          "name": "News hub (feeds + reader + saved articles)",
+          "description": "Deterministic, non-LLM RSS reader. Categories Nepal/World/Business/Technology + a personalised 'For You' built from saved interests via Google News RSS. Endpoints: GET/PUT /news/interests, GET /news/categories, GET /news/feed?cat&force, GET /news/recommendations (arXiv paper recs from interests), GET /news/article?url (Safari-Reader extraction via trafilatura/bs4). Saved articles (folders) stored in library.db saved_news table and fed to RAG: GET /news/saved/folders, /news/saved/urls, /news/saved, /news/saved/{nid}, POST /news/save, PUT /news/saved/{nid} (move), DELETE /news/saved/{nid}.",
+          "currentState": "Working. 15-min in-memory/file cache (news_cache.json). Interests in news.json.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/news.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py"
+          ],
+          "gaps": [
+            "No background refresh \u2014 feeds only update when a client requests them (or force=true); no scheduled morning digest/notification.",
+            "RSS parsing is regex-based (fragile).",
+            "'Recommended papers' surface returns up to 8 arXiv candidates but has no save-to-library shortcut endpoint and no dedup against existing library."
+          ]
+        },
+        {
+          "name": "Tasks board",
+          "description": "Shared task board over himmy's studio_tasks SQLite store, pinned to .scholar-desk/tasks.db (HIMMY_TASKS_PATH) so the agent's tools and the UI share one DB. GET /tasks (with open/total counts), POST /tasks (title), POST /tasks/{id}/complete, DELETE /tasks/{id}. Same store the agent's list_tasks/add_task/complete_task hit.",
+          "currentState": "Working for create/list/complete/delete.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/config.py"
+          ],
+          "gaps": [
+            "`due` field is read/returned but NEVER set (add takes only title) and NEVER acted on \u2014 no reminders, overdue flags, or notifications.",
+            "No edit/reschedule, no priority/tags, no subtasks, no recurring tasks.",
+            "No calendar integration (tasks and calendar are entirely separate).",
+            "No automation: nothing watches the board."
+          ]
+        },
+        {
+          "name": "Google Calendar + Mail",
+          "description": "Read-only Gmail + read/write Calendar over himmy.api.studio_google with a loopback OAuth2 flow. Setup/auth: GET /google/status, POST /google/client, GET /google/auth-url, POST /google/exchange, GET /google/callback (renders a close-tab page), POST /google/disconnect. Data: GET /mail/inbox, GET /calendar/events, GET /calendar/range (month grid), POST /calendar/events, PUT/DELETE /calendar/events/{id}. Tokens persisted in keychain (HIMMY_SECRETS=keychain).",
+          "currentState": "Working. Mail strictly read-only (no send endpoint). Calendar full CRUD via REST; agent calendar writes are HITL-gated.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/connectors/google_calendar.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/connectors/actions.py"
+          ],
+          "gaps": [
+            "Mail is read-only at the REST layer; sending only via the agent's approval-gated mail_send tool (no /mail/send endpoint, no compose UI path documented here).",
+            "No mail labels/threads/search; inbox capped at 30.",
+            "No background sync/notification of new mail or upcoming events \u2014 fetched only when a tab is opened/polled.",
+            "User must self-provision a Google OAuth client (client_id/secret) \u2014 non-trivial for a non-technical user.",
+            "No free/busy or scheduling-assistant logic beyond raw event CRUD."
+          ]
+        },
+        {
+          "name": "Deep Research",
+          "description": "Explicit multi-step orchestration (plan -> fan-out library+web concurrently -> synthesize cited brief -> reflect). POST /research {question}. Library leg calls the RAG retriever directly in Python (deterministic grounding); web leg is best-effort in a thread. Returns {ok, brief, sources, steps}. Bounded by a 180s wall-clock deadline.",
+          "currentState": "Working; never automatic (UI button only).",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/research.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py"
+          ],
+          "gaps": [
+            "Web leg uses keyless DuckDuckGo and is usually empty without HIMMY_SEARCH_API_KEY (tavily/brave).",
+            "No streaming/progress events to the UI during the run (returns only at the end).",
+            "No persistence of past research briefs (not saved anywhere)."
+          ]
+        },
+        {
+          "name": "Index / Papers RAG",
+          "description": "Hybrid (BM25+dense) himmy KnowledgeBase over library papers + saved news, with an optional fastembed cross-encoder reranker (probed once, degrades to plain hybrid). POST /index {force} rebuilds; the index also auto-refreshes when the library item-id set changes. Extracted PDF text cached in papers_cache.db. Exposed to the agent as ask_papers/index_papers.",
+          "currentState": "Working but in-memory only.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/connectors/papers_rag.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py"
+          ],
+          "gaps": [
+            "Index not persisted across restarts (only PDF text cache is) -> cold rebuild on every backend start; startup warm was reverted (GIL).",
+            "Refresh trigger only watches the SET of item ids, not content edits (re-enriched metadata won't re-index unless ids change or force=true).",
+            "In-memory search is sync inside the loop for parts of the KB (per memory notes); large libraries risk a slow first build (~2-3 min)."
+          ]
+        },
+        {
+          "name": "Backup / Restore",
+          "description": "Whole-library zip (catalogue + PDFs) for cross-device sync via a cloud folder. POST /backup (writes himmy-backup-<ts>.zip to ~/Downloads), POST /restore {path}, GET /datadir.",
+          "currentState": "Working (manual).",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/library.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py"
+          ],
+          "gaps": [
+            "Backs up only library.db + library_files/ \u2014 NOT highlights/collections are in library.db so OK, but conversations.db, memory.db, tasks.db, news.json, saved_news (in library.db, OK), usage.json are NOT included.",
+            "Backup destination hardcoded to ~/Downloads; no scheduled/auto backup.",
+            "Restore is destructive (replaces library wholesale)."
+          ]
+        },
+        {
+          "name": "Agent tools (the agent's hands)",
+          "description": "18 tools registered by himmy_app.agent_tools:register and allowlisted in agent.yaml. From himmy built-in packs: calculator, current_time (utils); web_search, web_fetch (web); list_tasks, add_task, complete_task (tasks, shared SQLite); gmail_inbox (google, read-only); remember, recall (memory pack, durable). From the papers_rag connector: ask_papers, index_papers. From GoogleCalendarConnector: calendar_find, calendar_add (gated), calendar_edit (gated), calendar_remove (gated). From ActionsConnector: save_article (direct), add_paper (direct), mail_send (approval-gated). Registration is resilient via safe_register_local_tool (works around himmy content-address violations that previously dropped calendar_edit/remove).",
+          "currentState": "Working. 4 approval-gated tools (calendar add/edit/remove + mail_send). Zotero connector exists but is NOT registered.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/agent_tools.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/connectors/_register.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/connectors/actions.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/connectors/google_calendar.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/connectors/papers_rag.py"
+          ],
+          "gaps": [
+            "add_task tool takes only `title` \u2014 agent cannot set due dates, so no task-time awareness.",
+            "No tool to schedule anything, set a reminder, or create a recurring background job \u2014 the agent cannot set up automation for itself.",
+            "gmail_send registered by the google pack but excluded from the allowlist (only the gated mail_send action is exposed).",
+            "Two overlapping calendar tool families (built-in gcal_* vs connector calendar_*); only the connector set is in the allowlist."
+          ]
+        },
+        {
+          "name": "Persisted data (.scholar-desk data dir)",
+          "description": "All durable state under .scholar-desk/ (DEFAULT_DATA_DIR, override HIMMY_APP_DATA_DIR). library.db (items, highlights, collections, item_collections, saved_news tables) + library_files/ (PDFs); papers_cache.db (extracted PDF text for RAG); conversations.db (Cmd-K chat threads); memory.db (durable remember/recall, subject 'scholar-desk', fastembed); tasks.db (shared task board); approvals.db (HITL checkpoints); storage.db (himmy durable entity/audit spine); news.json (interests) + news_cache.json (feed cache); usage.json (lifetime token/cost tally). Secrets (Google OAuth client+tokens) in macOS keychain, not on disk.",
+          "currentState": "All present and in active use (confirmed on disk).",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/config.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/.scholar-desk/"
+          ],
+          "gaps": [
+            "Folder named '.scholar-desk' (legacy) intentionally kept for data continuity despite the 'Himmy' rebrand.",
+            "No scheduling/state store exists (no jobs/routines table) \u2014 a scheduling feature would need a new persisted store here.",
+            "Backup only covers library.db + PDFs, leaving conversations/memory/tasks/usage unprotected."
+          ]
+        },
+        {
+          "name": "Scheduling / Automation (ABSENT \u2014 gap surface)",
+          "description": "What a 'set it and forget it' layer WOULD cover: timed news digests, morning briefings, scheduled backups, task due-date reminders, recurring research runs, auto-index, new-mail/event notifications, auto-expiry of stale approval checkpoints.",
+          "currentState": "Does not exist. No scheduler, worker, cron bridge, asyncio background loop, OS notification, or due-date firing anywhere in the backend or Electron main process. Frontend setInterval calls (App.tsx) are pure UI refresh polling (tasks 5s, usage 15s, clock). Electron main.cjs (136 lines) only spawns/kills the backend.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/electron/main.cjs",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+          ],
+          "gaps": [
+            "No scheduler/worker process (note: himmy framework ships a Routines layer per user memory, but it is NOT wired into this app).",
+            "No native macOS notifications (Electron Notification/powerMonitor unused).",
+            "No task due-date reminders despite a `due` column.",
+            "No scheduled news digest or auto-refresh.",
+            "No scheduled/auto backups.",
+            "No approval-checkpoint timeout/expiry.",
+            "Backend only runs while the Electron app is open (child process killed on quit) \u2014 any future scheduling must account for the app not always being running."
+          ]
+        }
+      ]
+    },
+    "appFrontend": {
+      "area": "Himmy (Daybook) desktop app \u2014 Electron + React frontend",
+      "summary": "The frontend lives in /Users/samriddhagc/LocalProjects/scholar-desk/desktop. It is a native-feeling macOS Electron app (vibrancy/frosted-glass, hidden-inset titlebar) whose renderer is an almost-monolithic React + TypeScript + Tailwind SPA. electron/main.cjs spawns the Python himmy backend (python -m himmy_app.server on port 8131, env HIMMY_APP_PORT) and opens ONE BrowserWindow (1340x880, vibrancy under-window, titleBarStyle hiddenInset, traffic-light inset) onto the Vite dev server (localhost:5173) or the packaged dist/index.html. preload.cjs exposes a small window.himmy bridge: backendPort, platform, pickPapers (native PDF open dialog), pathForFile (resolve dropped File to path), revealData (open .scholar-desk in Finder), pickZip (restore backup), openExternal (Google OAuth opens in system browser). The renderer talks to the backend purely over HTTP via src/lib/api.ts (fetch to http://127.0.0.1:8131; SSE for chat streaming with auto-fallback to /ask). Almost the entire UI is ONE file: src/App.tsx (3,059 lines \u2014 every surface + the command palette), with the PDF reader split into src/Reader.tsx (473 lines) and citation formatters in src/lib/cite.ts. There is NO router library \u2014 navigation is a single `section` useState in App() (type Section = today|news|library|planner|tasks|calendar|mail) plus two custom window events used as a global bus: `himmy:nav` (jump to a section from any card) and `himmy:ask` (open the assistant pre-filled). A second in-module `_refreshBus` (App.tsx:38-73, surfaces calendar|tasks|library|news) lets the assistant trigger live re-fetch of an open view after it runs a write tool (emitRefreshForTools maps tool names to surfaces). An openItemRef module ref (App.tsx:79-119) tracks the currently-open paper/article so the assistant gets it as context. Design language = macOS label system: white-with-opacity ink tiers (mac.ink/ink2/ink3/ink4), translucent fills over vibrancy (mac.fill/fillHi/stroke/strokeHi), one system-blue accent (#0A84FF / accentHi #409CFF), status colors (green #30D158, red #FF453A, orange #FF9F0A), SF Pro Text/Display fonts, 10px radii (rounded-mac), custom shadows (mac/pop/tab), 13px base. CSS in src/index.css adds a 0.62-alpha dark tint over the native vibrancy, custom scrollbars, blue focus ring, and keyframe animations (himmy-pop center-enter, himmy-slide-right dock-enter, himmy-bubble-in iMessage bubble, himmy-typing dots). lucide-react is the icon set; @blueprintjs/core+icons are dependencies but are effectively unused in App.tsx (no Blueprint components imported there).",
+      "surfaces": [
+        {
+          "name": "App shell / Toolbar + Content router",
+          "description": "Root layout. A 52px draggable titlebar (Toolbar, App.tsx:180) with a centered pill nav (Today/News/Library/Planner/Mail driven by the NAV array App.tsx:26) and a right-side Settings gear; a flex-1 main area that either shows the Reader (when openId set) or routes a surface via Content's switch(section) (App.tsx:216); the global CommandBar; and the conditional SettingsPanel modal. Health is polled every 5s (api.health) to drive an online/offline state.",
+          "currentState": "Complete and working. 5 visible nav tabs; Planner expands to tasks/calendar sub-sections. Online dot logic exists but the toolbar currently renders no visible status indicator (online prop computed but unused in the header JSX).",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/electron/main.cjs",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/electron/preload.cjs"
+          ],
+          "gaps": [
+            "NAV array (App.tsx:26-32) is the single source of truth for top-level tabs \u2014 adding a new top-level surface = add an entry here + a case in Content (App.tsx:218-226) + the Section union type (App.tsx:25).",
+            "No persistent left sidebar at the shell level (only the Library has its own rail); a settings/preferences area is only a modal, not a full surface.",
+            "online/offline health is computed but not surfaced visually."
+          ]
+        },
+        {
+          "name": "Today (home cockpit)",
+          "description": "Default landing surface (Today, App.tsx:256). A time-of-day hero (greeting + live clock + date), then a 12-col grid of cards: 'Up next' (next calendar events, gated on Google connect), 'To do' (top open tasks with inline add + hover-to-complete), 'Jump back in' (recent papers + saved articles), and a full-width 'Usage' card (UsageCard, App.tsx:518 \u2014 token + cost meter for the assistant, session vs all-time, polled every 15s from /usage). Cards subscribe to the refresh bus so assistant mutations show instantly.",
+          "currentState": "Complete and polished. Pulls tasks (5s poll), saved reading, library, calendar, and usage live.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+          ],
+          "gaps": [
+            "This is the most natural home for new at-a-glance widgets (e.g. a 'Reminders / Schedules' card, a 'Today's agenda' digest). New cards drop straight into the grid in Today() around App.tsx:340-417 using the shared Card component (App.tsx:2422).",
+            "There is an unused Step component (App.tsx:567) that looks built for a first-run onboarding/setup checklist but is not rendered anywhere \u2014 a ready-made pattern for a getting-started card.",
+            "Greeting/clock use local Date only; no settings for locale/timezone."
+          ]
+        },
+        {
+          "name": "Library (reference manager)",
+          "description": "Zotero-grade library (Library, App.tsx:593). Left CollectionsRail (App.tsx:907) lists All / collections / tags / a 'Recommended' entry; main area is a PaperTable (App.tsx:1049, draggable rows for drag-into-collection) with search, 'Add by DOI/arXiv' inline field, native 'Add papers' file picker, drag-and-drop PDF zone (EmptyLibrary App.tsx:1093), and a 'Cite' export modal (CiteExport App.tsx:856 \u2014 APA/MLA/BibTeX via lib/cite.ts). 'Recommended' swaps the main pane to RecommendedMain (App.tsx:796) showing arXiv suggestions from saved research interests (api.news.recommendations / interests).",
+          "currentState": "Complete, the richest surface. Collections, tags, search, add-by-DOI, drag-drop ingest, citation export, and recommendations all wired.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/lib/cite.ts",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/lib/api.ts"
+          ],
+          "gaps": [
+            "api.index(force) (RAG re-index endpoint, api.ts:223) exists but is NOT wired to any UI control \u2014 there is no 'rebuild knowledge base / re-index' button anywhere in the renderer.",
+            "No bulk-select / multi-paper actions (cite/export operate on the whole filtered list, not a selection)."
+          ]
+        },
+        {
+          "name": "Reader (PDF reader + metadata/notes/highlights)",
+          "description": "Full-screen reader (Reader.tsx) shown when a paper is opened (App renders <Reader> in place of Content). Lazy pdf.js rendering with a selectable text layer and a separate highlight overlay layer; 4 highlight colors; floating highlight popover. Right panel has 3 tabs (Reader.tsx:267-274): Info (InfoPanel \u2014 editable metadata via api.library.update, enrich via api.library.enrich, TagsEditor), Notes (NotesPanel \u2014 per-paper notes), Highlights (list + per-highlight note/color edit + delete + export to markdown via api.highlights.exportMarkdown). Toolbar: back, zoom, cite, fetch-PDF when missing. Sets openItemRef so the assistant knows 'this paper'.",
+          "currentState": "Complete and E2E-tested per project memory. Highlights, notes, metadata edit, enrich, fetch-PDF, citation, markdown export all functional.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/Reader.tsx",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/lib/cite.ts"
+          ],
+          "gaps": [
+            "pdf.worker is bundled via Vite ?url import; depends on pdfjs-dist version.",
+            "No table-of-contents/outline or page thumbnails navigation."
+          ]
+        },
+        {
+          "name": "Planner \u2014 Tasks",
+          "description": "Tasks view (Tasks, App.tsx:1725), reachable via the Planner tab's Tasks sub-tab or directly via section='tasks'. Add-a-task input (Enter to add), open tasks newest-first with completed sinking to the bottom, hover-to-complete and delete (TaskRow App.tsx:1819). Polls /tasks every 4s and subscribes to the 'tasks' refresh bus so assistant-added tasks (add_task / complete_task tools) appear live.",
+          "currentState": "Complete but minimal. Tasks are title + done + optional free-text due + created_at (api.ts Task type); no editing, no structured due-date picker, no recurrence.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/lib/api.ts"
+          ],
+          "gaps": [
+            "Tasks `due` is free text (Himmy stores 'tomorrow'/dates as strings); isOverdue (App.tsx:559) is best-effort parse. No real due-date UI or reminders.",
+            "This is the natural sibling location for a Reminders view or a Schedules/Routines panel \u2014 Planner already has a sub-tab switcher (Planner App.tsx:1408) so adding a third sub-tab (e.g. 'Reminders' or 'Routines') is mechanically trivial: add to the tab array at App.tsx:1415 and render a new component. Or add 'planner'-style entries (tasks/calendar already map to Section)."
+          ]
+        },
+        {
+          "name": "Planner \u2014 Calendar (Google, read+write)",
+          "description": "Calendar view (CalendarTab, App.tsx:1432), Planner's Calendar sub-tab. Month grid (MonthGrid App.tsx:1578) and list view; create/edit/delete events via an EventEditor modal (App.tsx:1620) that writes through api.calendar.create/update/remove (sends local wall-clock; backend attaches timezone). Gated behind Google connect \u2014 shows GoogleConnect (App.tsx:1233) until an account is linked. Subscribes to the 'calendar' refresh bus so assistant calendar_add/edit/remove updates the grid live.",
+          "currentState": "Complete. Full month/list, CRUD events, recurring-event id awareness. Read+write to the connected Google Calendar.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+          ],
+          "gaps": [
+            "Week/day views not present (only month + list).",
+            "All calendar functionality requires Google connect; no local-only calendar."
+          ]
+        },
+        {
+          "name": "Mail (Google inbox, read-only)",
+          "description": "MailTab (App.tsx:1319), top-level nav tab. Read-only Gmail inbox list (MailRow App.tsx:1366) via api.mail.inbox. Gated behind Google connect (shares the useGoogle hook App.tsx:1141 with Calendar); shows GoogleConnect / GoogleSetup (one-time OAuth client_id/secret entry, GoogleSetup App.tsx:1183) until linked. GoogleTabHeader (App.tsx:1292) shows the account email + Refresh + Disconnect.",
+          "currentState": "Complete but intentionally read-only \u2014 Himmy can see inbox + calendar, never send/modify mail.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+          ],
+          "gaps": [
+            "No message detail/open view (just sender/subject/snippet/date rows); no compose (read-only by design).",
+            "Google OAuth requires the user to paste their own Cloud client_id/secret (GoogleSetup) \u2014 a friction point, but the only place credentials are entered in-app."
+          ]
+        },
+        {
+          "name": "News (feeds + in-app reader + saved \u2192 RAG)",
+          "description": "News surface (News, App.tsx:1850), top-level nav tab. Left NewsRail (App.tsx:2046) toggles between feed categories (For You / Nepal / World / Business / Technology, NEWS_FEEDS App.tsx:1842) and saved folders. Cards (NewsCard App.tsx:2113, SavedCard App.tsx:2141) with images; in-app readable-article reader (NewsReader App.tsx:2272, serif typography) via api.news.article; save/unsave into folders (FolderMenu App.tsx:2243); 'For You' needs interests (interest editor inline). Saved articles feed the assistant's RAG. Sets openItemRef so Himmy knows 'this article'. Subscribes to 'news' refresh bus.",
+          "currentState": "Complete. Live feeds, in-app reader, save-to-folder, interests, recommendations all wired.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/lib/api.ts"
+          ],
+          "gaps": [
+            "News interests are shared with Library 'Recommended' (same /news/interests endpoint) \u2014 a settings/preferences surface would be the cleaner home for managing interests centrally."
+          ]
+        },
+        {
+          "name": "Himmy assistant \u2014 \u2318K command palette / chat",
+          "description": "CommandBar (App.tsx:2480) is the global assistant, summoned by \u2318K (or himmy:ask events from any 'Ask Himmy' button). Not a nav tab \u2014 overlays everything. Modes: floating center modal OR docked right side-panel (DOCK_KEY localStorage, toggle App.tsx:2683), plus a minimized floating pill. iMessage-style streaming chat bubbles (Bubble App.tsx:2882, TypingDots App.tsx:2872) over SSE (api.askStream); starter CHIPS (App.tsx:2465); conversation history sidebar (api.sessions, persisted session id in localStorage daybook.chat.session); per-turn context injection (buildAskContext sends the open paper/article); a tool-approval flow (ApprovalCard App.tsx:2951 \u2014 approve/cancel gated tools via api.resume); and an explicit Deep research button (Telescope, ResearchLoading App.tsx:2794 / ResearchCard App.tsx:2817 via api.research, 60-150s).",
+          "currentState": "Complete and central to the product. Streaming, sessions/history, dock/float/minimize, HITL tool approvals, deep research, and live-refresh-after-tool all work.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx",
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/lib/api.ts"
+          ],
+          "gaps": [
+            "No model/provider selector in the UI (model shown read-only on the Today Usage card from /usage).",
+            "The assistant is the primary entry point for scheduling/reminders today (tasks/calendar via tools) \u2014 a dedicated Schedules/Routines surface would complement, not replace, it."
+          ]
+        },
+        {
+          "name": "Settings (Backup & Sync modal)",
+          "description": "SettingsPanel (App.tsx:970), opened from the toolbar gear. A single centered modal limited to: Back up library (zip to Downloads, api.backup), Restore from a backup zip (window.himmy.pickZip + api.restore), Reveal library folder in Finder (window.himmy.revealData), and the data-dir path display (api.dataDir). Honest note that real-time phone sync isn't available.",
+          "currentState": "Complete but narrow \u2014 only backup/sync. SettingRow (App.tsx:1037) is a reusable labeled-control row.",
+          "files": [
+            "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+          ],
+          "gaps": [
+            "This is the ONLY settings area and it is scoped to backup/sync. There is no general Preferences surface for: model/provider choice, news interests, Google account management (currently only reachable inside Mail/Calendar tabs), notification/reminder settings, or a RAG re-index control. A new 'Settings' could either expand this modal (add SettingRows) or become a full nav surface. The modal pattern + SettingRow component are the ready building blocks."
+          ]
+        }
+      ],
+      "notableFindings": [
+        "Entire UI is essentially two files: src/App.tsx (3,059 lines, all 8 surfaces + assistant) and src/Reader.tsx. New surfaces are added by (1) extending the Section union (App.tsx:25), (2) adding a NAV entry (App.tsx:26) or a Planner sub-tab (App.tsx:1415), and (3) adding a case in Content (App.tsx:218). No router, no per-surface files.",
+        "Two global event buses drive everything: window CustomEvents `himmy:nav` (navigate) and `himmy:ask` (open assistant), plus the in-module _refreshBus (App.tsx:38-73) that lets assistant tool-calls live-refresh open views. emitRefreshForTools (App.tsx:52) is the map from tool name \u2192 surface to refresh \u2014 a new write-tool-backed surface must be registered there to get live updates.",
+        "Best places for a NEW Schedules/Routines or Reminders surface: (a) a new sub-tab inside Planner (App.tsx:1408-1429) \u2014 mechanically the cheapest, sits beside Tasks/Calendar; or (b) a new top-level nav tab via NAV + Content + Section; or (c) a card on the Today home grid (App.tsx:340) for an at-a-glance view. Reminders specifically map naturally onto the existing Tasks model (which already has a free-text `due`) but would need a real date/recurrence picker \u2014 none exists today.",
+        "The backend already exposes scheduling-adjacent primitives the UI could build on: tasks (with `due`), calendar create/update/remove, and the assistant's tool-approval (HITL) machinery. There is NO frontend for himmy 'routines'/cron \u2014 the desktop app has no Routines/Schedules concept yet (consistent with the himmy-scheduling memory note that routines lack a UI).",
+        "Unwired capability: api.index(force) (RAG re-index, api.ts:223) has no UI trigger anywhere \u2014 a natural addition to a future Settings surface.",
+        "Settings is a single modal scoped only to Backup & Sync (App.tsx:970); Google account connect/disconnect lives inside the Mail/Calendar tabs (useGoogle hook App.tsx:1141), and news/research interests are edited inline in News and Library. A consolidated Preferences/Settings surface is an obvious gap and a clean home for: model display, interests, Google account, RAG re-index, and any new reminder/notification settings.",
+        "Reusable design building blocks for new UI: Card (App.tsx:2422), Placeholder (App.tsx:2445), Stub (App.tsx:1123, with an 'Ask Himmy' CTA), Step (App.tsx:567, an unused onboarding-checklist row), SettingRow (App.tsx:1037), and the Google connect/gate pattern (GoogleConnect App.tsx:1233). New surfaces should reuse these + the mac.* Tailwind tokens to match the language.",
+        "Electron model: single window, backend spawned from .venv/bin/python -m himmy_app.server (main.cjs:77), health-checked on :8131; preload exposes only narrow native capabilities. New UI that needs native access (file dialogs, external URLs) must add an ipcMain.handle in main.cjs + a method in preload.cjs (window.himmy)."
+      ]
+    }
+  },
+  "synthesis": {
+    "headlineRecommendation": "Wire himmy's already-built Routines scheduler into scholar-desk's FastAPI app \u2014 this is the single highest-leverage move because the framework ships a production-hardened scheduling subsystem that the app currently uses NONE of, and it unlocks a whole class of \"set it and forget it\" recurring experiences (morning briefing, daily news digest, due-date reminders, periodic library enrichment) with very little new code. Concretely: start the in-process RoutineScheduler from a new FastAPI lifespan in create_app(), add a thin Routines CRUD on the existing custom server (delegating to himmy's get_routines_store()/get_scheduler(), NOT mounting the multi-tenant /v1 router), and surface a \"Routines/Schedules\" sub-tab in the Planner. Sequence the rest by impact-to-effort: (2) persist the RAG index with SqliteKnowledgeBackend so the ~2-3 min cold rebuild on every launch disappears (the framework docstring literally names this Daybook case); (3) deliver scheduled results as native macOS notifications + an in-app inbox; then memory auto-injection, thumbs feedback into self-learning, guardrail DLP redaction, and a research council. Order routines FIRST because every downstream automation (digest, reminders, enrichment) depends on the scheduler existing.",
+    "opportunities": [
+      {
+        "title": "Wire the in-process RoutineScheduler into the app + a Routines CRUD",
+        "whatUserGets": "The app can now run saved automations on a schedule while it's open: 'every morning at 7:00 summarize my new arXiv papers', 'every 6 hours check for new citations', 'on July 1 at 9am remind me to renew'. Until this exists, NOTHING in the app can fire on a timer \u2014 this is the foundation every other automation feature below sits on.",
+        "frameworkCapabilityUsed": "fwSched: RoutineScheduler (get_scheduler().start()/stop()/notify_change()/catch_up_on_launch()) + RoutinesStore (get_routines_store().upsert/list/get/delete) + Routine/Schedule models",
+        "howItWorks": "Add a FastAPI lifespan to create_app() in server.py: on startup set HIMMY_ROUTINES_PATH to the data dir (alongside the existing HIMMY_TASKS_PATH/HIMMY_CONVERSATIONS_PATH pins in config.py) so .himmy/routines.db lives under .scholar-desk and survives restarts, then call get_scheduler().start() and await get_scheduler().catch_up_on_launch(); on shutdown await get_scheduler().stop(). The app currently has NO lifespan (app=create_app() at server.py:826, plain FastAPI() at :178), so this is net-new. Add ~5 thin endpoints on the existing custom app \u2014 GET/POST /routines, PUT/DELETE /routines/{id}, POST /routines/{id}/run-now \u2014 each delegating to get_routines_store() + (for run-now) await get_scheduler().run_now(id); call get_scheduler().notify_change() after every CRUD write so an edited schedule re-plans immediately. Copy the start/notify/catch_up wiring from himmy's studio_routines.py router (its _wake_scheduler helper) but do NOT mount the /v1 router (it carries RBAC/multi-tenant machinery the single-user app doesn't use). Routines bind by agent_path to the existing agent/agent.yaml, so they reuse the exact agent brain the chat already runs.",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/config.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/lib/api.ts",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ],
+        "effort": "M",
+        "impact": "high",
+        "dependsOn": "none"
+      },
+      {
+        "title": "Persist the papers RAG index with SqliteKnowledgeBackend (kill the cold-start rebuild)",
+        "whatUserGets": "'Ask my library' works instantly on launch instead of spinning for 2-3 minutes re-embedding every PDF. The knowledge base survives restarts; only genuinely new/changed papers get embedded thanks to content-hash dedup.",
+        "frameworkCapabilityUsed": "fwKernels: KnowledgeBase backend=SqliteKnowledgeBackend(path) (the offline twin of pgvector; its docstring explicitly names this Daybook ~2-min re-embed problem) + local_embedders.build_embedder('auto') for genuinely semantic recall",
+        "howItWorks": "In papers_rag.py PapersIndex.__init__/build, the KnowledgeBase is built in-memory and rebuilt each launch (only extracted PDF text is cached in papers_cache.db). Change the KnowledgeBase construction to pass backend=SqliteKnowledgeBackend(<data_dir>/papers_index.db) so embeddings+chunks+fingerprint persist; content-addressed ingest then skips unchanged papers on the next launch. Also swap the DeterministicEmbedder for build_embedder('auto') so recall is real semantic similarity when fastembed/Ollama is present (embeddings extra is already in requirements.txt: himmy[...,embeddings]). KB_WORKSPACE_ID/KB_CLIENT_ID/KB_NAME are already set so resolve_kb keeps the durable KB stable by name across runs. Optionally wire api.index(force) (already in api.ts:223 but UNbound to any UI) to a 'Rebuild knowledge base' button.",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/connectors/papers_rag.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/config.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ],
+        "effort": "S",
+        "impact": "high",
+        "dependsOn": "none"
+      },
+      {
+        "title": "Scheduled morning briefing + daily news digest routine",
+        "whatUserGets": "A 'Daily Briefing' that runs unattended (e.g. weekdays 6:30 Kathmandu time): summarizes new papers in the library, top saved-news, today's calendar, and open/overdue tasks \u2014 ready and waiting when the user opens the app. The flagship recurring experience for a personal research workspace.",
+        "frameworkCapabilityUsed": "fwSched: Routine + Schedule(kind='cron'/'daily', timezone=, missed='coalesce') firing through the same agent pipeline; plus the existing news.py feed + tasks store + calendar endpoints as the data the prompt pulls",
+        "howItWorks": "Seed a built-in 'Daily Briefing' Routine via get_routines_store().upsert() pointing at agent/agent.yaml with a prompt that asks the agent to use its existing tools (ask_papers, list_tasks, gmail_inbox, calendar_find) to assemble a briefing. Use Schedule(kind='cron', expr='30 6 * * 1-5', timezone='Asia/Kathmandu', missed='coalesce') so a briefing missed while the Mac slept fires exactly once on wake instead of skipping or storming backfills. This needs the [cron] extra \u2014 add 'cron' to the himmy[...] pin in requirements.txt (daily/every kinds work with zero extra deps if you skip cron grammar). Persist each briefing's result text into a new 'briefings' table (or reuse saved_news/notes) so the Today home grid can render the latest one in a card (Today() around App.tsx:340 using the shared Card component).",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/requirements.txt",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/news.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ],
+        "effort": "M",
+        "impact": "high",
+        "dependsOn": "Wire the in-process RoutineScheduler into the app + a Routines CRUD"
+      },
+      {
+        "title": "Native macOS notification + in-app inbox for routine results",
+        "whatUserGets": "When a scheduled briefing/digest/reminder finishes, the user gets a real macOS notification and a badge/inbox entry in-app \u2014 so automations are actually seen, not silently logged. Also surfaces 'routine needs approval' when an automation hits a gated tool, parking it safely instead of acting unattended.",
+        "frameworkCapabilityUsed": "fwSched: result delivery + lifecycle notifications (_deliver/_notify; deliver kinds limited to none/telegram/email, so the desktop-notification channel is added by post-processing the routine result). Plus the framework's approval-gating which auto-parks gated tools.",
+        "howItWorks": "Built-in deliver kinds are only none/telegram/email, so for a native macOS toast scholar-desk post-processes the routine result itself: have the briefing/digest routines write their result into a new 'inbox' table, then expose GET /notifications. In Electron main.cjs add an ipcMain.handle('notify:show', ...) using electron's Notification (currently UNUSED \u2014 main.cjs only spawns/kills the backend) and a method in preload.cjs (window.himmy.notify). The renderer polls /notifications (mirroring the existing 5s/15s polls in App.tsx) and on a new entry calls window.himmy.notify(...) and shows an inbox badge in the toolbar (online/offline dot logic already computed but unused in the header \u2014 same spot). Approval-gated routine runs already park as awaiting_approval and emit an in-app notification deep-link via the framework, routing into the existing HITL approval UI (ApprovalCard, /ask/resume).",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/electron/main.cjs",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/electron/preload.cjs",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ],
+        "effort": "M",
+        "impact": "high",
+        "dependsOn": "Wire the in-process RoutineScheduler into the app + a Routines CRUD"
+      },
+      {
+        "title": "Real task due-dates + reminder routine (act on the dead `due` column)",
+        "whatUserGets": "Tasks get a real date picker and the app actually reminds the user when something is due or overdue \u2014 today the `due` column exists in the store and is returned to the UI but NOTHING reads or fires on it, and add_task only accepts a title.",
+        "frameworkCapabilityUsed": "fwSched: a recurring Routine (Schedule kind='every', hours=N or 'daily') that scans the tasks store for due/overdue items and emits a notification; fwKernels structured/constrained output (optional) to parse a natural-language due date into an ISO date",
+        "howItWorks": "Two parts. (a) Make due-dates settable: the add_task tool takes only `title` (agent_tools.py), and there's no /tasks edit endpoint \u2014 add a due param to the task-create path and a PUT /tasks/{id} reschedule endpoint, plus a date picker in TaskRow (App.tsx ~1819; isOverdue at App.tsx:559 is already a best-effort parse waiting for real data). (b) Seed a built-in 'Reminders' Routine (Schedule kind='every', hours=1) whose prompt lists tasks via list_tasks and flags due/overdue ones, delivering via the notification channel from the inbox feature. Optionally use constrained decoding (output_json_schema + metadata={'constrained_decoding':true}) so 'tomorrow 3pm' parses to a guaranteed-valid ISO date instead of a fragile free-text string.",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/agent_tools.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ],
+        "effort": "M",
+        "impact": "med",
+        "dependsOn": "Native macOS notification + in-app inbox for routine results"
+      },
+      {
+        "title": "Memory auto-injection so Himmy silently remembers across sessions",
+        "whatUserGets": "Himmy stops being a stateless palette and quietly recalls the user's projects, preferences, and prior conclusions every turn \u2014 without the user having to explicitly ask it to recall \u2014 and stops storing duplicate facts.",
+        "frameworkCapabilityUsed": "fwKernels: MemoryContextAdapter (auto-injects recalled memories into the system prompt with a noise floor) + MemoryConsolidator (ADD/UPDATE/DELETE/NOOP instead of blind append). The app already wires register_memory_pack (durable remember/recall) but uses neither of these.",
+        "howItWorks": "The memory pack is already registered in agent_tools.py against the durable .scholar-desk/memory.db (HIMMY_MEMORY_PATH set in config.py). Two additive steps: (1) construct a MemoryContextAdapter(memory, top_k=, tiers=) and register it on the ContextService used by the run pipeline (in cli.py's runtime build) so the agent sees relevant prior facts each turn with no explicit recall tool-call; set memory_subject to the per-user workspace. (2) Enable memory_consolidate in ToolkitConfig (the consolidate tool) so re-stating a fact updates rather than duplicates. Both are offline and fail-open.",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/agent_tools.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/cli.py"
+        ],
+        "effort": "S",
+        "impact": "med",
+        "dependsOn": "none"
+      },
+      {
+        "title": "Thumbs up/down on answers feeding self-learning",
+        "whatUserGets": "A simple \ud83d\udc4d/\ud83d\udc4e on each assistant answer measurably shifts which tools Himmy prefers next time \u2014 flaky tools/connectors get deprioritized and the assistant adapts to this one user instead of staying static.",
+        "frameworkCapabilityUsed": "fwKernels: OutcomeRecorder.record(score, source=USER_FEEDBACK) feeding the already-on self-learning loop (LearningService + ToolReputationProvider). agent.yaml already has self_learning: true (confirmed line 156) but no user-feedback signal is wired and outcome_weight isn't set.",
+        "howItWorks": "self_learning is already enabled, so LearningService + ToolReputationProvider + LearnedHintsContextAdapter are already mining TOOL_FAILED/TOOL_COMPLETED. The missing lever is the OUTCOME_SCORED user signal: set outcome_weight>0 in agent.yaml, add a POST /feedback {session_id, turn, score} endpoint that calls OutcomeRecorder.record(score, source=OutcomeSource.USER_FEEDBACK) against the same SqliteSessionStore/event log the app uses, and add a thumbs control to the chat Bubble (App.tsx ~2882). Because outcome_weight>0, those grades blend into per-tool reputation and reorder tool selection.",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/agent/agent.yaml",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/cli.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ],
+        "effort": "S",
+        "impact": "med",
+        "dependsOn": "none"
+      },
+      {
+        "title": "Always-on background automations engine via spawned `himmy worker`",
+        "whatUserGets": "Scheduled briefings/digests/reminders keep firing even when the UI is closed or restarted (e.g. an overnight digest is ready at 7am whether or not the window was open), because timing no longer depends on the FastAPI process staying alive.",
+        "frameworkCapabilityUsed": "fwSched: standalone `himmy worker` (brings up the durable substrate + RoutineScheduler with no API server) OR the launchd-driven OS-cron bridge `himmy routines run-now <id>` (durable single fire, flock-guarded against double-execution)",
+        "howItWorks": "Two options. (A) In Electron main.cjs spawn `.venv/bin/python -m himmy worker --store <data-dir>/runs.db` on app launch (next to the existing backend spawn at main.cjs:77) and kill it on before-quit (main.cjs:135). (B) For survival even when the app is fully quit, register a macOS launchd job that runs `himmy routines run-now <id>` (or calls himmy.api.routines.execute_routine(id)); the cross-process flock guarantees it never collides with the in-process scheduler. The in-process scheduler (first feature) already covers the common 'app is open' case, so this is the upgrade for the 'machine asleep / app closed' case \u2014 lower priority but the only way to be truly always-on.",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/electron/main.cjs",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/requirements.txt"
+        ],
+        "effort": "M",
+        "impact": "med",
+        "dependsOn": "Wire the in-process RoutineScheduler into the app + a Routines CRUD"
+      },
+      {
+        "title": "Privacy guardrails: redact PII before prompts leave for the cloud model",
+        "whatUserGets": "Personal info is redacted before any text is sent to the cloud model (OpenRouter/Gemini), fetched web/PDF content is screened for prompt-injection, and the user sees a 'what was redacted' indicator \u2014 a real trust feature for a personal workspace whose backend forwards prompts off-device.",
+        "frameworkCapabilityUsed": "fwKernels: build_guardrail_pipeline(['pii','injection']).inspect() on input/output + SqliteTokenVaultBackend (local, reversible DLP) + build_guardrail_pre_hook for tool args; suppresses_output_content() to know when to buffer a streamed turn",
+        "howItWorks": "Not used today. In server.py /ask and /ask/stream, run pipeline.inspect() on the user prompt before the run and on the model output after; since the app streams, check pipeline.suppresses_output_content() to buffer-and-guard before emitting tokens (the existing /ask/stream is already buffered-then-rechunked, so this fits the current shape). Register build_guardrail_pre_hook on the ToolRegistry (agent_tools.py) so outbound tool args (mail_send, calendar writes) are redacted. Use SqliteTokenVaultBackend(<data_dir>/vault.db) for reversible local tokenization. Surface flagged GuardrailTriggers as a small 'redacted N items' note in the chat UI.",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/agent_tools.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/cli.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ],
+        "effort": "M",
+        "impact": "med",
+        "dependsOn": "none"
+      },
+      {
+        "title": "Periodic library enrichment + new-citation routine",
+        "whatUserGets": "The library quietly keeps itself tidy: papers missing metadata get auto-enriched, and the user is periodically alerted to new arXiv recommendations matching their interests \u2014 set-and-forget upkeep instead of manual per-paper enrich clicks.",
+        "frameworkCapabilityUsed": "fwSched: recurring Routine (Schedule kind='every', hours=6) running through the agent; reusing the existing library enrich endpoint and news recommendations surface",
+        "howItWorks": "Seed a built-in 'Library upkeep' Routine (Schedule kind='every', hours=6) whose prompt scans library items lacking metadata and calls the existing enrich path (library.py POST /library/{id}/enrich), and a prompt leg that pulls news recommendations (already in news.py / api.news.recommendations) and flags new arXiv candidates. Deliver via the notification/inbox channel. Note: enrich depends on OPENROUTER_API_KEY (silently no-ops without it), so the routine should skip gracefully when absent. Optionally add a save-to-library shortcut endpoint (the recommendations surface currently has none and no dedup against existing items).",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/library.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/news.py"
+        ],
+        "effort": "M",
+        "impact": "med",
+        "dependsOn": "Native macOS notification + in-app inbox for routine results"
+      },
+      {
+        "title": "Deep Research council (multi-agent gather\u2192draft\u2192critique\u2192revise)",
+        "whatUserGets": "A meaningfully more capable 'Deep Research' mode that fans a question across specialist sub-agents and shows the intermediate reasoning, plus long reports that survive an app restart and can be resumed.",
+        "frameworkCapabilityUsed": "fwKernels: MultiAgentOrchestrator (handoff/delegate teams) + StateGraph (durable interrupt/resume on the already-wired SqliteCheckpointStore). The app already uses PlannerOrchestrator + reflect() in research.py \u2014 this is the next rung.",
+        "howItWorks": "research.py already runs PlannerOrchestrator + reflect via _build_runtime (deterministic library leg + best-effort web leg). Upgrade to a MultiAgentOrchestrator AgentTeam: a 'searcher' delegate (ask_papers + web search), an 'analyst' that synthesizes, and a 'critic' worker \u2014 built with the same _build_runtime. For long multi-stage reports, model the flow as a StateGraph with NodeInterrupt so a partial report persists across restarts (SqliteCheckpointStore is already wired). Note the web leg is keyless DuckDuckGo and usually empty without HIMMY_SEARCH_API_KEY (tavily/brave), so this pairs well with surfacing a search-key setting. Persist briefs (currently saved nowhere) so past research is browsable.",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/research.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ],
+        "effort": "L",
+        "impact": "med",
+        "dependsOn": "none"
+      },
+      {
+        "title": "Activity & Provenance timeline (EntityRecord/RunEvent audit spine)",
+        "whatUserGets": "A trustworthy 'what Himmy did' timeline: tools called, what it read, what it remembered, why it chose an answer, with per-answer source links \u2014 transparency a power-user research desktop benefits from.",
+        "frameworkCapabilityUsed": "fwKernels: EntityRecord audit spine + RunEvent stream (TOOL_CALLED/COMPLETED/FAILED, OUTCOME_SCORED, MEMORY_*, LEARNING_APPLIED) read off the same storage.db the app already has; EntityLinks to relate a note\u2192paper\u2192run",
+        "howItWorks": "storage.db (the durable entity/audit spine) already exists in .scholar-desk and SqliteSessionStore is wired. Pass an EntityRegistry into MemoryService so memory writes project onto the spine, and read the RunEvent stream to build a GET /activity feed. Render it as a new read-only surface \u2014 cheapest as a Today card or a Planner sub-tab (the Section union + NAV + Content switch pattern in App.tsx:25/26/218, or the Planner sub-tab array at App.tsx:1415). EntityLinks can relate a derived note to its source paper and the run that produced it. Largely an observability/read surface over data the app is already generating once self_learning/memory events flow.",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/agent_tools.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ],
+        "effort": "M",
+        "impact": "low",
+        "dependsOn": "none"
+      },
+      {
+        "title": "Regression benchmark suite for the research agent (BFCL-grade)",
+        "whatUserGets": "Confidence that any prompt/model/tool change actually improves the assistant before it ships to the user, plus a principled way to pick the smallest local model that still answers research questions well (matters for an offline-first desktop app).",
+        "frameworkCapabilityUsed": "fwKernels: BenchmarkRunner + graders (arg-level/trajectory) + judge + stats (`himmy bench`), or AgentEvalHarness.evaluate_agent",
+        "howItWorks": "Not a user-facing feature \u2014 an internal eng gate. Author a small in-repo YAML suite of representative tasks (ask_papers retrieval, citation formatting, calendar/gmail tool selection, 'should NOT call a tool' irrelevance cases) and run BenchmarkRunner with an inference_factory pointing at the app's configured model. Use it as a check before changing agent.yaml/prompts/tools and to compare candidate local models. Low user impact but high developer-velocity value and cheap to stand up.",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/agent/agent.yaml"
+        ],
+        "effort": "M",
+        "impact": "low",
+        "dependsOn": "none"
+      }
+    ]
+  },
+  "critique": {
+    "missedCapabilities": [
+      "Multi-surface backup coverage (verified at library.py:558-568): backup() zips ONLY library.db + library_files/. The appBackend map flags that conversations.db, memory.db, tasks.db, usage.json (and a future routines.db) are NOT backed up, and restore is destructive. No opportunity proposes a 'whole-workspace backup' (and crucially, once Routines/memory-consolidation/self-learning add valuable durable state, leaving them out of backup becomes a real data-loss risk). This is a cheap, high-trust win the synthesis missed.",
+      "ConnectorSpec YAML / OutboundToolConnector SDK migration as its OWN opportunity (fwKernels 'CONNECTORS framework', maturity=built). The map explicitly notes scholar-desk hand-rolls its connectors with safe_register_local_tool and bypasses the SDK, losing SSRF guarding, secrets-layer credential resolution, rate limiting, idempotency, and built-in requires_approval HITL. The map also calls out that a ConnectorService catalog could back a 'Connections' settings UI. The proposals reference connectors only obliquely inside the guardrails item; there is no opportunity to (a) declare arXiv/Crossref/Semantic-Scholar/Unpaywall (already used in library.py) as ConnectorSpec YAML, or (b) surface a managed/testable Connections panel \u2014 both directly enabled by a built capability.",
+      "Bi-temporal recall + typed memory GRAPH + EntityLinks as a USER-FACING feature (fwKernels memory: as_of point-in-time recall, MemoryLink graph, traverse_graph, recall(max_hops=...)). The map's appOpportunity literally describes a 'what I knew as of <date>' time-travel view and a related-facts panel (paper->note->task). The 'memory auto-injection' opportunity only adopts MemoryContextAdapter + consolidation; it omits the temporal/graph layer that turns linked notes/papers/tasks into a navigable knowledge graph \u2014 a distinctive research-desk feature.",
+      "Structured/constrained decoding (CONSTRAINED_DECODING_KEY + output_json_schema) as a STANDALONE high-value feature for the Library (fwKernels structured output, maturity=built). The map's appOpportunity is auto-extracting title/authors/venue/DOI from a dropped PDF into a fillable form and guaranteed-parse citation objects. This maps onto a real existing gap: library enrich currently has the AI read page 1 and parse prose. Constrained decoding appears only as an optional aside inside the task-due-date item, not as its own metadata-extraction opportunity where it has the clearest payoff.",
+      "Full-text search inside the Library tab (appBackend Library gap: list() filters only title/author/venue/tags; full-text is ONLY via RAG). With SqliteKnowledgeBackend persistence landing (proposal #2), a 'search everything I've read' surface over the durable KB becomes nearly free, but no opportunity proposes exposing in-library full-text/semantic search to the user as a UI surface distinct from the chat agent.",
+      "Surfacing highlights/annotations to RAG/agent (appBackend Highlights gap: 'Highlights not surfaced to the RAG/agent (only the item-level note is)'). The user's own margin notes are arguably the highest-signal text in the library yet are invisible to ask_papers. Feeding highlights into the (now-durable) KB is a small, high-value change no opportunity covers."
+    ],
+    "overreach": [
+      "'Privacy guardrails: redact PII before prompts leave for the cloud model' is largely ALREADY BUILT and wired, not a net-new feature. Verified at from_spec.py:281-298: build_runtime_for_spec already constructs an input_guardrail pipeline from spec.guardrails, an output_guardrail (grounding + spec guardrails), AND pre/post tool-execution hooks (build_guardrail_pre_hook/post_hook at lines 510-511). agent.yaml already declares 'guardrails: [pii, injection]'. So PII redaction on input, injection screening, and tool-arg redaction are ACTIVE TODAY. The genuinely-unwired delta is only: (a) the reversible DLP TokenVault (SqliteTokenVaultBackend) and (b) a UI 'what was redacted' indicator surfacing GuardrailTriggers. The opportunity overstates the work by presenting the whole pipeline as unwired; it should be rescoped to just the DLP vault + the redaction-indicator UI.",
+      "'Persist the RAG index... swap the DeterministicEmbedder for build_embedder(\"auto\")' is partly inaccurate. Verified at papers_rag.py:177/184: the app already calls ToolkitConfig.from_env().build_embedder_and_dim() (not a hardcoded DeterministicEmbedder), and the himmy[...,embeddings] extra ships fastembed, so recall is very likely ALREADY semantic. The real, accurate change is solely backend=None -> SqliteKnowledgeBackend(path) for persistence. The embedder-swap framing risks wasted effort or a regression; the opportunity's headline win (kill the cold rebuild) is correct, but the embedder claim should be dropped or verified-first.",
+      "'Thumbs up/down feeding self-learning' overstates novelty in its rationale but is otherwise sound. self_learning: true is confirmed in agent.yaml and the learning loop (LearningService/ToolReputationProvider/LearnedHintsContextAdapter) is already mining TOOL_FAILED/TOOL_COMPLETED. The new lever (OUTCOME_SCORED via OutcomeRecorder + outcome_weight>0 + a thumbs control) is genuinely unwired, so the opportunity is valid \u2014 but it should be clear that the self-learning ENGINE is already on; this only adds the user-feedback signal.",
+      "Feature #1's integration claim that 'the dispatcher/durable-queue is only needed for the multi-tenant agent_id path' is an oversimplification, though it lands on the right answer. Verified at routines.py:1140-1210: the single-user agent_path path executes through studio_service.stream_agent_run + resolve_canonical_storage() (NOT the durable RunDispatcher), so the in-process scheduler can indeed skip the worker/dispatcher. But it DOES depend on resolve_canonical_storage() returning a usable canonical store and on studio_service being importable/functional inside scholar-desk's custom (non-BFF) app. This is an integration risk to verify, not the no-dependency drop-in the wording implies.",
+      "'Always-on background automations engine via spawned himmy worker' is marked dependsOn the in-process scheduler, but per the map the worker is an ALTERNATIVE firing mechanism, not a downstream consumer \u2014 it brings up its OWN RoutineScheduler. Running BOTH the in-process scheduler (in the FastAPI app) and a spawned worker simultaneously means two schedulers; the map notes the flock guard prevents double-fire, but the proposal should explicitly say worker is an either/or upgrade path (worker OR in-process loop), not an additive layer on top of feature #1.",
+      "Several opportunities silently depend on himmy[cron] which is NOT in requirements.txt today (verified: 'himmy[toolkit,api,openai,embeddings]', no cron). The morning-briefing and reminder routines use cron expressions ('30 6 * * 1-5'). Per fwSched, cron strings are accepted at create-time but only error at FIRE time without the cronsim extra. So a cron routine seeded without adding 'cron' to the extras will silently never fire correctly \u2014 a latent footgun the briefing/reminder opportunities under-emphasize (the briefing item mentions it; the reminders item leans on kind='every' which is safe, but any cron grammar in the UI needs the extra)."
+    ],
+    "sequencing": [
+      "FOUNDATION (build first): 'Wire the in-process RoutineScheduler + Routines CRUD' is correctly identified as the root dependency. Confirmed there is NO lifespan today (server.py:175 create_app, :826 app=create_app(), no lifespan) and zero scheduling code anywhere in src/himmy_app or desktop/electron. Nothing else in the automation chain (briefing, digest, reminders, library upkeep) can fire until this exists. Build it first.",
+      "BEFORE seeding any cron-based routine: add 'cron' to the himmy extras in requirements.txt (currently himmy[toolkit,api,openai,embeddings]). Cron strings parse at create-time but only fail at fire-time without cronsim, so a cron routine would silently never fire. Also set HIMMY_TZ=Asia/Kathmandu (Nepal user) so 'daily 07:00'/'30 6 * * 1-5' mean local time, and rely on missed='coalesce' for laptop-sleep safety. This is a prerequisite for the morning-briefing item, not a footnote.",
+      "BEFORE wiring routines.db: pin HIMMY_ROUTINES_PATH into the .scholar-desk data dir (mirroring the existing HIMMY_TASKS_PATH/HIMMY_CONVERSATIONS_PATH pins in config.py). get_routines_store() resolves .himmy/routines.db relative to cwd, and the Electron-spawned backend's cwd is not guaranteed stable, so without this pin routines could be created in one location and read from another across launches \u2014 silently 'losing' saved automations. This config pin must land in the same change as feature #1.",
+      "Notification/inbox (feature #3) must precede the user-visible automation payoffs (reminders feature #5, library-upkeep feature #11) \u2014 the proposal sequences these correctly. Built-in deliver kinds are only none/telegram/email (fwSched delivery, maturity=partial), so a desktop user sees NOTHING unless the result is post-processed into an in-app inbox + a native macOS Notification (electron Notification is confirmed unused in main.cjs). Without #3, scheduled briefings run but are invisible \u2014 building reminders before notifications produces silent automations.",
+      "VERIFY-FIRST gate before committing to feature #1's effort estimate: confirm resolve_canonical_storage() returns a usable store and studio_service.stream_agent_run runs end-to-end inside scholar-desk's custom (non-BFF) FastAPI app with a routine bound by agent_path to agent/agent.yaml. The agent_path path routes through the Studio run pipeline (routines.py:1154-1205), and load_studio_spec honors tools_module so the app's custom tools (ask_papers, calendar_*) WILL be available \u2014 but this whole chain has never run in this app, so a thin spike (create one 'every 5 min' test routine, confirm it fires through the real agent and lands its result) should precede the full CRUD + UI build.",
+      "Persist-RAG (feature #2) and memory auto-injection (feature #6) are independent of the scheduler and can be built in parallel with / before feature #1. Both are pure-additive, fail-open, touch no scheduling code, and deliver immediate user value (instant 'ask my library', cross-session memory). Front-load #2 especially \u2014 it's effort=S, removes a known 2-3 min launch stall, and has zero dependency on the routines work.",
+      "Backup-coverage expansion should be sequenced EARLY relative to the new durable stores, not deferred. Once routines.db, richer memory (consolidation), and self-learning reputation accumulate value, the existing library-only backup (verified library.py:558-568) leaves them exposed and restore is destructive. Widen backup to the full .scholar-desk set before/as those stores fill, so the first scheduled-automation user isn't a data-loss case."
+    ],
+    "additionalOpportunities": [
+      {
+        "title": "Whole-workspace backup + restore (not just library.db + PDFs)",
+        "whatUserGets": "A real 'back up everything' that protects conversations, durable memory, tasks, usage history, and (once it exists) saved routines \u2014 not just papers. Today backup() zips only library.db + library_files/ (verified library.py:558-568), and restore is destructive, so a sync mishap silently loses chat history, remembered facts, and the task board.",
+        "why": "appBackend Backup/Restore + Persisted-data gaps explicitly list conversations.db, memory.db, tasks.db, usage.json as unprotected; this becomes higher-stakes the moment Routines/self-learning/memory-consolidation add valuable state. Pure app-side change, no framework dependency, high trust payoff."
+      },
+      {
+        "title": "Declare arXiv/Crossref/Unpaywall/Semantic-Scholar as ConnectorSpec YAML + a managed 'Connections' settings panel",
+        "whatUserGets": "A trustworthy Connections settings surface (enable/test/status per integration) where paper-API and side-effecting tools get SSRF guarding, secrets-layer credentials, rate limiting, idempotency, and requires_approval HITL for free \u2014 instead of the current ad-hoc hand-rolled connectors.",
+        "why": "fwKernels CONNECTORS framework (maturity=built) explicitly notes scholar-desk hand-rolls connectors via safe_register_local_tool, bypassing the SDK, and that ConnectorService could back a Settings 'Connections' UI. The REST integrations are already in library.py \u2014 re-expressing them as ConnectorSpec YAML is the framework's lowest-effort path and was entirely absent from the proposals."
+      },
+      {
+        "title": "Constrained-decoding metadata extraction for the Library (drop-a-PDF -> guaranteed-valid fields)",
+        "whatUserGets": "Dropping a PDF auto-fills a fillable title/authors/venue/year/DOI form that always parses, and citation objects that never break \u2014 replacing the current 'AI reads page 1 as prose -> Crossref' enrich path with schema-constrained output.",
+        "why": "fwKernels structured output (maturity=built; CONSTRAINED_DECODING_KEY + output_json_schema, fail-open) has its clearest payoff exactly on the Library enrich/citation surface, an existing gap. The proposals only mention constrained decoding as an optional aside under task due-dates, missing the highest-value application."
+      },
+      {
+        "title": "Time-travel + related-facts knowledge graph over memory (as_of recall + EntityLinks panel)",
+        "whatUserGets": "A 'what did I believe as of <date>' view and a related-items panel that surfaces linked notes/papers/tasks for whatever the user is viewing \u2014 turning memory from a flat fact list into a navigable graph.",
+        "why": "fwKernels memory (built) ships bi-temporal recall (as_of/active_only), a typed MemoryLink graph, traverse_graph, and recall(max_hops=). The 'memory auto-injection' opportunity adopts only the adapter+consolidation and leaves these distinctive research-desk features on the table; the map's own appOpportunity describes exactly this."
+      },
+      {
+        "title": "Surface PDF highlights/annotations into the durable RAG index",
+        "whatUserGets": "ask_papers and Deep Research can cite the user's OWN margin highlights and notes, not just the raw paper text \u2014 the highest-signal content in the library becomes searchable and answerable.",
+        "why": "appBackend Highlights gap states highlights are NOT surfaced to RAG (only the item-level note is). With SqliteKnowledgeBackend persistence (proposal #2) landing, ingesting highlights as additional documents is a small change with outsized retrieval-quality impact, and no proposal covers it."
+      }
+    ]
+  },
+  "finalRoadmap": {
+    "headline": "Stand up himmy's already-built Routines scheduler inside the app FIRST \u2014 it's the one thing that lets anything fire on a timer (briefings, digests, reminders, upkeep), and the framework ships the whole subsystem so it's mostly wiring, not new engine. Sequence everything else by impact-to-effort, correcting the proposal where the work is already done: the privacy guardrail pipeline is ALREADY live (only the reversible DLP vault + a 'what was redacted' badge remain), and the RAG embedder is ALREADY semantic (the real win is just persisting the index). Add the capabilities the proposal missed: whole-workspace backup (today only papers are backed up \u2014 a real data-loss risk once routines/memory accumulate), proper connectors, drop-a-PDF metadata extraction, and feeding the user's own highlights into search.",
+    "buildFirst": "Wire himmy's in-process RoutineScheduler into the FastAPI app via a new lifespan in create_app() (server.py:175 \u2014 confirmed NO lifespan exists today; app=create_app() at server.py:826 is a plain FastAPI), pin HIMMY_ROUTINES_PATH into the .scholar-desk data dir in config.py (mirroring the existing HIMMY_STORE_PATH/HIMMY_MEMORY_PATH/HIMMY_TASKS_PATH/HIMMY_CONVERSATIONS_PATH setdefaults at config.py:73-84), add 'cron' + set HIMMY_TZ=Asia/Kathmandu, and add a thin Routines CRUD delegating to get_routines_store()/get_scheduler() (NOT the multi-tenant /v1 router). Nothing else in the automation chain can fire until this exists. PRECEDE it with a one-routine spike (an 'every 5 min' test) to verify resolve_canonical_storage() + studio_service.stream_agent_run actually run end-to-end through agent/agent.yaml inside this custom non-BFF app \u2014 that chain has never run here.",
+    "recommendedFirstSprint": [
+      "VERIFY-FIRST SPIKE: seed ONE Routine bound by agent_path to agent/agent.yaml on a kind='every', minutes=5 schedule and confirm it fires through the real agent (resolve_canonical_storage + studio_service.stream_agent_run) and lands a result \u2014 this de-risks the whole effort estimate before building UI.",
+      "FOUNDATION: add the FastAPI lifespan to create_app() (get_scheduler().start() + await catch_up_on_launch() on startup, await stop() on shutdown), pin HIMMY_ROUTINES_PATH into .scholar-desk in config.py, add 'cron' to the himmy extras in requirements.txt and set HIMMY_TZ=Asia/Kathmandu \u2014 all in ONE change. Then add ~5 endpoints (GET/POST /routines, PUT/DELETE /routines/{id}, POST /routines/{id}/run-now) calling notify_change() after every write, plus a Routines sub-tab in the Planner.",
+      "PARALLEL QUICK WIN (no scheduler dependency, effort=S): persist the RAG index by passing backend=SqliteKnowledgeBackend(<data_dir>/papers_index.db) in papers_rag.py:183-184 (change ONLY backend=None \u2014 do NOT touch the embedder; it already uses build_embedder_and_dim() so recall is already semantic). Kills the 2-3 min cold-start re-embed.",
+      "Widen backup() in library.py:558-568 to a whole-workspace zip (conversations.db, memory.db, tasks.db, usage.json, storage.db, and the new routines.db) and make restore non-destructive \u2014 do this BEFORE routines/memory state accumulates, so the first automation user isn't a data-loss case.",
+      "Build the native macOS notification + in-app inbox (electron Notification is confirmed unused in main.cjs) so the FIRST scheduled briefing is actually seen, not silently logged \u2014 this must precede any user-facing automation payoff."
+    ],
+    "schedulingFeatures": [
+      {
+        "title": "Wire the in-process RoutineScheduler into the app + a Routines CRUD (THE FOUNDATION)",
+        "whatUserGets": "The app can run saved automations on a schedule while it's open: 'every weekday 6:30am summarize my new arXiv papers', 'every 6 hours check for new citations', 'July 1 at 9am remind me to renew'. Until this exists, NOTHING in the app can fire on a timer \u2014 every other automation below sits on this.",
+        "frameworkCapabilityUsed": "himmy RoutineScheduler (get_scheduler().start()/stop()/notify_change()/catch_up_on_launch()/run_now) + RoutinesStore (get_routines_store().upsert/list/get/delete) + Routine/Schedule models, all already production-hardened in the framework",
+        "howItWorks": "Add a FastAPI lifespan to create_app() at server.py:175 (confirmed NO lifespan today; app=create_app() at :826 is plain FastAPI()). On startup: get_scheduler().start() + await catch_up_on_launch(); on shutdown: await stop(). Pin HIMMY_ROUTINES_PATH into .scholar-desk in config.py next to the existing setdefaults at config.py:73-84 (get_routines_store() resolves .himmy/routines.db relative to cwd, and the Electron-spawned backend's cwd is not guaranteed stable, so without this pin saved automations silently 'disappear' across launches). Add ~5 thin endpoints delegating to get_routines_store() and (for run-now) await get_scheduler().run_now(id); call notify_change() after every CRUD write. Copy the start/notify/catch_up wiring from himmy's studio_routines.py _wake_scheduler helper but do NOT mount /v1 (RBAC/multi-tenant machinery the single-user app doesn't use). INTEGRATION RISK to verify first (routines.py:1140-1210): the single-user agent_path path runs through studio_service.stream_agent_run + resolve_canonical_storage(), NOT the durable RunDispatcher, so it can skip the worker \u2014 but that chain has never run inside scholar-desk's custom non-BFF app, so spike one test routine first. load_studio_spec honors tools_module so the app's custom tools (ask_papers, calendar_*) WILL be available.",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/config.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/lib/api.ts",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ],
+        "effort": "M",
+        "impact": "high"
+      },
+      {
+        "title": "Add the 'cron' extra + Kathmandu timezone (PREREQUISITE, not a footnote)",
+        "whatUserGets": "Schedules expressed as real calendar rules ('weekdays at 6:30am', 'the 1st of every month') actually fire \u2014 and they fire at Nepal local time, and a job missed while the Mac slept fires exactly once on wake instead of being skipped or backfilled in a storm.",
+        "frameworkCapabilityUsed": "himmy Schedule(kind='cron', expr=..., timezone=, missed='coalesce'); the cronsim extra is what makes cron strings fire (they parse at create-time but only ERROR at fire-time without it \u2014 a silent footgun)",
+        "howItWorks": "requirements.txt today is himmy[toolkit,api,openai,embeddings] \u2014 NO cron (confirmed). Add 'cron' to the extras. Set HIMMY_TZ=Asia/Kathmandu (the user is in Nepal) so '30 6 * * 1-5' and 'daily 07:00' mean local time. Rely on missed='coalesce' for laptop-sleep safety. This must land in the SAME change as the foundation, because the briefing/reminder routines below would otherwise be seeded with cron strings that never fire. (kind='every'/'daily' work with zero extra deps, so the reminders routine is safe even without this \u2014 but any cron grammar exposed in the UI needs the extra.)",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/requirements.txt",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/config.py"
+        ],
+        "effort": "S",
+        "impact": "high"
+      },
+      {
+        "title": "Native macOS notification + in-app inbox for routine results",
+        "whatUserGets": "When a scheduled briefing/digest/reminder finishes, the user gets a real macOS notification and an inbox badge in-app \u2014 so automations are actually SEEN, not silently logged. Build this BEFORE reminders/upkeep, or those run invisibly. Also surfaces 'routine needs approval' when an automation hits a gated tool, parking it safely instead of acting unattended.",
+        "frameworkCapabilityUsed": "himmy routine result delivery + lifecycle notifications; built-in deliver kinds are only none/telegram/email (delivery maturity=partial) so the desktop channel is added by post-processing the result. Plus the framework's approval-gating which auto-parks gated tools as awaiting_approval.",
+        "howItWorks": "Routines write their result into a new 'inbox' table; expose GET /notifications. In main.cjs add ipcMain.handle('notify:show', ...) using electron's Notification (confirmed UNUSED today \u2014 main.cjs only spawns/kills the backend) + a preload.cjs method (window.himmy.notify). The renderer polls /notifications (mirroring the existing 5s/15s polls in App.tsx) and on a new entry calls window.himmy.notify(...) and shows a toolbar badge. Approval-gated runs park as awaiting_approval and route into the existing HITL UI (ApprovalCard, /ask/resume).",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/electron/main.cjs",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/electron/preload.cjs",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ],
+        "effort": "M",
+        "impact": "high"
+      },
+      {
+        "title": "Scheduled morning briefing + daily news digest routine (the flagship experience)",
+        "whatUserGets": "A 'Daily Briefing' that runs unattended (weekdays 6:30 Kathmandu time): new papers in the library, top saved news, today's calendar, open/overdue tasks \u2014 ready and waiting when the user opens the app. The signature recurring experience for a personal research workspace.",
+        "frameworkCapabilityUsed": "himmy Routine + Schedule(kind='cron', timezone=, missed='coalesce') firing through the same agent/agent.yaml pipeline the chat already uses; the existing news.py feed + tasks store + calendar endpoints as the data the prompt pulls",
+        "howItWorks": "Seed a built-in 'Daily Briefing' Routine via get_routines_store().upsert() pointing at agent/agent.yaml with a prompt that uses existing tools (ask_papers, list_tasks, gmail_inbox, calendar_find). Use Schedule(kind='cron', expr='30 6 * * 1-5', timezone='Asia/Kathmandu', missed='coalesce'). REQUIRES the 'cron' extra (above). Persist each result into the inbox table so the Today home grid renders the latest in a Card (Today() around App.tsx:340).",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/news.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ],
+        "effort": "M",
+        "impact": "high"
+      },
+      {
+        "title": "Real task due-dates + reminder routine (act on the dead `due` column)",
+        "whatUserGets": "Tasks get a real date picker and the app actually reminds the user when something is due or overdue \u2014 today the `due` column exists in the store and is returned to the UI but NOTHING reads or fires on it, and add_task only accepts a title.",
+        "frameworkCapabilityUsed": "himmy recurring Routine (Schedule kind='every', hours=1 \u2014 SAFE without the cron extra) that scans the tasks store and emits a notification; optionally constrained decoding to parse 'tomorrow 3pm' into a guaranteed-valid ISO date",
+        "howItWorks": "(a) add_task takes only `title` (agent_tools.py) and there's no /tasks edit endpoint \u2014 add a due param to the create path and a PUT /tasks/{id} reschedule endpoint, plus a date picker in TaskRow (App.tsx ~1819; isOverdue at App.tsx:559 already best-effort parses, waiting for real data). (b) Seed a 'Reminders' Routine (kind='every', hours=1) that lists tasks and flags due/overdue ones, delivering via the inbox/notification channel. Use kind='every' (NOT cron) so it fires with zero extra deps.",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/agent_tools.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ],
+        "effort": "M",
+        "impact": "med"
+      },
+      {
+        "title": "Periodic library enrichment + new-citation routine",
+        "whatUserGets": "The library quietly keeps itself tidy: papers missing metadata get auto-enriched and the user is periodically alerted to new arXiv recommendations matching their interests \u2014 set-and-forget upkeep instead of manual per-paper enrich clicks.",
+        "frameworkCapabilityUsed": "himmy recurring Routine (Schedule kind='every', hours=6) running through the agent; reuses the existing library enrich endpoint and news recommendations surface",
+        "howItWorks": "Seed a 'Library upkeep' Routine (kind='every', hours=6) that scans library items lacking metadata and calls the existing enrich path (library.py POST /library/{id}/enrich), plus a leg pulling news recommendations (news.py / api.news.recommendations) to flag new arXiv candidates. Deliver via the inbox channel. enrich depends on OPENROUTER_API_KEY (silently no-ops without it), so the routine should skip gracefully when absent. Optionally add a save-to-library shortcut endpoint (recommendations currently have none and no dedup against existing items).",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/library.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/news.py"
+        ],
+        "effort": "M",
+        "impact": "med"
+      },
+      {
+        "title": "Always-on background worker (EITHER/OR upgrade, not an additive layer)",
+        "whatUserGets": "Scheduled briefings/digests/reminders keep firing even when the app window is closed (e.g. an overnight digest is ready at 7am whether or not the window was open), because timing no longer depends on the FastAPI process staying alive.",
+        "frameworkCapabilityUsed": "himmy standalone `himmy worker` (brings up its OWN durable substrate + RoutineScheduler, no API server) OR a launchd OS-cron bridge `himmy routines run-now <id>` (flock-guarded against double-fire)",
+        "howItWorks": "IMPORTANT \u2014 this is an ALTERNATIVE firing mechanism, not a consumer of the in-process scheduler: the worker brings up its OWN RoutineScheduler, so it's worker OR the in-process loop, not both stacked. Option A: spawn `.venv/bin/python -m himmy worker --store <data-dir>/runs.db` in main.cjs next to the existing backend spawn (main.cjs:77), kill on before-quit (main.cjs:135). Option B (survives full quit): a macOS launchd job running `himmy routines run-now <id>`; the cross-process flock prevents collision. The in-process scheduler (foundation) already covers 'app is open', so this is the 'machine asleep / app closed' upgrade \u2014 lower priority.",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/electron/main.cjs",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/requirements.txt"
+        ],
+        "effort": "M",
+        "impact": "med"
+      }
+    ],
+    "otherFeatures": [
+      {
+        "title": "Persist the papers RAG index with SqliteKnowledgeBackend (kill the cold-start rebuild)",
+        "whatUserGets": "'Ask my library' works instantly on launch instead of spinning 2-3 minutes re-embedding every PDF. The knowledge base survives restarts; only genuinely new/changed papers get embedded thanks to content-hash dedup.",
+        "frameworkCapabilityUsed": "himmy KnowledgeBase backend=SqliteKnowledgeBackend(path) \u2014 the offline twin of pgvector; its docstring explicitly names this Daybook ~2-min re-embed problem",
+        "howItWorks": "CORRECTION to the proposal: papers_rag.py:177/183-184 ALREADY uses ToolkitConfig.from_env().build_embedder_and_dim() (NOT a hardcoded DeterministicEmbedder), and himmy[...,embeddings] ships fastembed, so recall is already semantic \u2014 do NOT swap the embedder (risk of regression for no gain). The ONLY accurate change is backend=None -> SqliteKnowledgeBackend(<data_dir>/papers_index.db) so embeddings+chunks+fingerprint persist and content-addressed ingest skips unchanged papers next launch. KB_WORKSPACE_ID/KB_CLIENT_ID/KB_NAME already keep the KB stable by name. Optionally bind api.index(force) (already in api.ts:223 but UNwired) to a 'Rebuild knowledge base' button.",
+        "frameworkCapabilityUsed_2": "",
+        "effort": "S",
+        "impact": "high",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/connectors/papers_rag.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ]
+      },
+      {
+        "title": "Whole-workspace backup + restore (NOT just library.db + PDFs) \u2014 MISSED by the proposal",
+        "whatUserGets": "A real 'back up everything' that protects conversations, durable memory, tasks, usage history, and saved routines \u2014 not just papers. Today backup() zips ONLY library.db + library_files/ (verified library.py:558-568) and restore is destructive, so a sync mishap silently loses chat history, remembered facts, and the task board.",
+        "frameworkCapabilityUsed": "None \u2014 pure app-side change, no framework dependency, high-trust payoff",
+        "howItWorks": "Widen backup() (library.py:565-568 currently writes only library.db + library_files/*) to also include conversations.db, memory.db, tasks.db, usage.json, storage.db, and the new routines.db. Make restore() non-destructive (back up current state before overwrite). SEQUENCE THIS EARLY \u2014 the moment Routines/self-learning/memory-consolidation start accumulating valuable durable state, the library-only backup becomes a real data-loss risk; the first scheduled-automation user should not be a data-loss case.",
+        "effort": "S",
+        "impact": "high",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/library.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ]
+      },
+      {
+        "title": "Memory auto-injection + consolidation (silent cross-session recall)",
+        "whatUserGets": "Himmy stops being a stateless palette and quietly recalls the user's projects, preferences, and prior conclusions every turn \u2014 without being asked to recall \u2014 and stops storing duplicate facts.",
+        "frameworkCapabilityUsed": "himmy MemoryContextAdapter (auto-injects recalled memories with a noise floor) + MemoryConsolidator (ADD/UPDATE/DELETE/NOOP instead of blind append). The app already wires register_memory_pack but uses neither.",
+        "howItWorks": "The memory pack is already registered in agent_tools.py against .scholar-desk/memory.db (HIMMY_MEMORY_PATH set in config.py). (1) construct MemoryContextAdapter(memory, top_k=, tiers=) and register it on the ContextService in cli.py's runtime build so the agent sees relevant prior facts each turn with no explicit recall call; set memory_subject per-workspace. (2) Enable memory_consolidate in ToolkitConfig so re-stating a fact updates rather than duplicates. Both offline and fail-open.",
+        "effort": "S",
+        "impact": "med",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/agent_tools.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/cli.py"
+        ]
+      },
+      {
+        "title": "Constrained-decoding metadata extraction for the Library (drop-a-PDF -> guaranteed-valid fields) \u2014 MISSED by the proposal",
+        "whatUserGets": "Dropping a PDF auto-fills a fillable title/authors/venue/year/DOI form that always parses, and citation objects that never break \u2014 replacing the current 'AI reads page 1 as prose' enrich path with schema-constrained output.",
+        "frameworkCapabilityUsed": "himmy structured output (CONSTRAINED_DECODING_KEY + output_json_schema, fail-open, maturity=built)",
+        "howItWorks": "library enrich currently has the model read page 1 and parse prose. Add output_json_schema + metadata={'constrained_decoding':true} to the enrich call so title/authors/venue/year/DOI come back as a guaranteed-valid object instead of fragile free text. This is the highest-value application of constrained decoding (the proposal buried it as an aside under task due-dates). Pairs with a fillable form in the library detail UI.",
+        "effort": "S",
+        "impact": "med",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/library.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ]
+      },
+      {
+        "title": "Surface PDF highlights/annotations into the durable RAG index \u2014 MISSED by the proposal",
+        "whatUserGets": "ask_papers and Deep Research can cite the user's OWN margin highlights and notes \u2014 the highest-signal text in the library \u2014 not just raw paper text.",
+        "frameworkCapabilityUsed": "himmy KnowledgeBase ingest (on the now-durable SqliteKnowledgeBackend)",
+        "howItWorks": "Today highlights are NOT surfaced to RAG (only the item-level note is). Once the durable backend lands, ingest each highlight/annotation as an additional document (tagged to its paper) in papers_rag.py. Small change, outsized retrieval-quality impact. Depends on the RAG-persistence feature.",
+        "effort": "S",
+        "impact": "med",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/connectors/papers_rag.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/library.py"
+        ]
+      },
+      {
+        "title": "Thumbs up/down on answers feeding self-learning",
+        "whatUserGets": "A simple thumbs up/down on each assistant answer measurably shifts which tools Himmy prefers next time \u2014 flaky tools/connectors get deprioritized and the assistant adapts to this one user.",
+        "frameworkCapabilityUsed": "himmy OutcomeRecorder.record(score, source=USER_FEEDBACK) feeding the already-ON self-learning loop (LearningService + ToolReputationProvider)",
+        "howItWorks": "CLARIFICATION: the self-learning ENGINE is already on (self_learning: true confirmed at agent.yaml:156; LearningService/ToolReputationProvider/LearnedHintsContextAdapter already mine TOOL_FAILED/TOOL_COMPLETED). The genuinely-unwired delta is only the OUTCOME_SCORED user signal: set outcome_weight>0 in agent.yaml, add POST /feedback {session_id,turn,score} calling OutcomeRecorder.record(score, source=OutcomeSource.USER_FEEDBACK) against the same SqliteSessionStore the app uses, and add a thumbs control to the chat Bubble (App.tsx ~2882).",
+        "effort": "S",
+        "impact": "med",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/agent/agent.yaml",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ]
+      },
+      {
+        "title": "Reversible DLP vault + 'what was redacted' badge (RESCOPED \u2014 guardrails are ALREADY live)",
+        "whatUserGets": "The user sees a small 'redacted N items' indicator and can recover the original text \u2014 peace of mind that personal info handling is visible and reversible.",
+        "frameworkCapabilityUsed": "himmy SqliteTokenVaultBackend (local, reversible DLP) + surfacing GuardrailTriggers",
+        "howItWorks": "MAJOR CORRECTION to the proposal: PII redaction, injection screening, AND tool-arg redaction are ALREADY ACTIVE TODAY. Verified at from_spec.py:281-298 \u2014 build_runtime_for_spec already constructs input/output guardrail pipelines from spec.guardrails plus pre/post tool-execution hooks (build_guardrail_pre_hook/post_hook at lines 510-511), and agent.yaml:142-144 declares guardrails: [pii, injection]. The proposal's 'redact before prompts leave for the cloud' work is DONE. The genuinely-unwired delta is ONLY: (a) the reversible DLP TokenVault \u2014 use SqliteTokenVaultBackend(<data_dir>/vault.db); and (b) a UI 'what was redacted' indicator surfacing GuardrailTriggers in the chat. Much smaller than the proposal implied.",
+        "effort": "S",
+        "impact": "med",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/cli.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ]
+      },
+      {
+        "title": "Declare paper APIs as ConnectorSpec YAML + a managed 'Connections' settings panel \u2014 MISSED by the proposal",
+        "whatUserGets": "A trustworthy Connections settings surface (enable/test/status per integration) where paper-API and side-effecting tools get SSRF guarding, secrets-layer credentials, rate limiting, idempotency, and requires_approval HITL for free \u2014 instead of today's ad-hoc hand-rolled connectors.",
+        "frameworkCapabilityUsed": "himmy CONNECTORS framework (ConnectorSpec YAML / OutboundToolConnector SDK + ConnectorService catalog, maturity=built)",
+        "howItWorks": "scholar-desk hand-rolls connectors via safe_register_local_tool, bypassing the SDK and losing SSRF/secrets/rate-limit/idempotency/HITL. The arXiv/Crossref/Semantic-Scholar/Unpaywall REST integrations already in library.py can be re-expressed as ConnectorSpec YAML, and ConnectorService can back a 'Connections' Settings UI. Lowest-effort framework-native path; entirely absent from the proposals.",
+        "effort": "M",
+        "impact": "med",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/library.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/agent_tools.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ]
+      },
+      {
+        "title": "Deep Research council (multi-agent gather->draft->critique->revise)",
+        "whatUserGets": "A more capable 'Deep Research' mode that fans a question across specialist sub-agents and shows intermediate reasoning, plus long reports that survive an app restart and can be resumed.",
+        "frameworkCapabilityUsed": "himmy MultiAgentOrchestrator (handoff/delegate teams) + StateGraph (durable interrupt/resume on the already-wired SqliteCheckpointStore)",
+        "howItWorks": "research.py already runs PlannerOrchestrator + reflect via _build_runtime. Upgrade to a MultiAgentOrchestrator AgentTeam: a 'searcher' (ask_papers + web), an 'analyst' synthesizer, and a 'critic'. Model long reports as a StateGraph with NodeInterrupt so partials persist across restarts. The web leg is keyless DuckDuckGo and usually empty without HIMMY_SEARCH_API_KEY \u2014 pair with a search-key setting. Persist briefs (currently saved nowhere) so past research is browsable.",
+        "effort": "L",
+        "impact": "med",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/research.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ]
+      },
+      {
+        "title": "Time-travel + related-facts knowledge graph over memory \u2014 MISSED by the proposal",
+        "whatUserGets": "A 'what did I believe as of <date>' view and a related-items panel surfacing linked notes/papers/tasks for whatever the user is viewing \u2014 turning memory from a flat fact list into a navigable graph.",
+        "frameworkCapabilityUsed": "himmy memory bi-temporal recall (as_of/active_only) + typed MemoryLink graph + traverse_graph + recall(max_hops=)",
+        "howItWorks": "The memory-auto-injection feature adopts only the adapter + consolidation; this adds the temporal/graph layer. Use as_of point-in-time recall for the time-travel view and MemoryLink/traverse_graph for a related-facts panel (paper->note->task). A distinctive research-desk feature; build after memory auto-injection.",
+        "effort": "M",
+        "impact": "low",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/agent_tools.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ]
+      },
+      {
+        "title": "In-library full-text/semantic search surface (distinct from the chat agent)",
+        "whatUserGets": "A 'search everything I've read' surface over the durable knowledge base \u2014 direct semantic/full-text search of the library, not just chat. Today list() filters only title/author/venue/tags; full-text is ONLY via the RAG agent.",
+        "frameworkCapabilityUsed": "himmy KnowledgeBase.search over the now-durable SqliteKnowledgeBackend",
+        "howItWorks": "Once the RAG index is persisted, expose a GET /library/search endpoint backed by KnowledgeBase.search and a search box in the Library tab \u2014 nearly free given the durable backend. Depends on the RAG-persistence feature.",
+        "effort": "S",
+        "impact": "low",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/connectors/papers_rag.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ]
+      },
+      {
+        "title": "Activity & Provenance timeline (EntityRecord/RunEvent audit spine)",
+        "whatUserGets": "A trustworthy 'what Himmy did' timeline: tools called, what it read, what it remembered, why it chose an answer, with per-answer source links.",
+        "frameworkCapabilityUsed": "himmy EntityRecord audit spine + RunEvent stream (TOOL_*, OUTCOME_SCORED, MEMORY_*, LEARNING_APPLIED) read off the storage.db the app already has",
+        "howItWorks": "storage.db already exists in .scholar-desk and SqliteSessionStore is wired. Pass an EntityRegistry into MemoryService so memory writes project onto the spine, read the RunEvent stream to build GET /activity, render as a read-only Planner sub-tab (the sub-tab array at App.tsx:1415). EntityLinks relate a derived note to its source paper and the run that produced it. Mostly observability over data already being generated.",
+        "effort": "M",
+        "impact": "low",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/server.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/src/himmy_app/agent_tools.py",
+          "/Users/samriddhagc/LocalProjects/scholar-desk/desktop/src/App.tsx"
+        ]
+      },
+      {
+        "title": "Regression benchmark suite for the research agent (internal eng gate)",
+        "whatUserGets": "Confidence that any prompt/model/tool change actually improves the assistant before it ships, plus a principled way to pick the smallest local model that still answers well (matters for an offline-first desktop app).",
+        "frameworkCapabilityUsed": "himmy BenchmarkRunner + graders (arg-level/trajectory) + judge + stats (`himmy bench`) or AgentEvalHarness.evaluate_agent",
+        "howItWorks": "Author a small in-repo YAML suite (ask_papers retrieval, citation formatting, calendar/gmail tool selection, 'should NOT call a tool' irrelevance cases) and run BenchmarkRunner against the app's configured model. Use as a check before changing agent.yaml/prompts/tools and to compare candidate local models. Not user-facing \u2014 high developer-velocity value, cheap to stand up.",
+        "effort": "M",
+        "impact": "low",
+        "filesToTouch": [
+          "/Users/samriddhagc/LocalProjects/scholar-desk/agent/agent.yaml"
+        ]
+      }
+    ],
+    "notes": "All critique corrections verified against the codebase: (1) requirements.txt is himmy[toolkit,api,openai,embeddings] with NO cron extra; (2) server.py has create_app() at :175 and app=create_app() at :826 with NO lifespan and zero scheduling code; (3) config.py:73-84 has the existing HIMMY_STORE/MEMORY/TASKS/CONVERSATIONS_PATH setdefaults but NO routines pin; (4) papers_rag.py:177/183-184 ALREADY uses build_embedder_and_dim() with backend=None (so the proposal's embedder-swap is wrong \u2014 only backend persistence is needed); (5) agent.yaml:142-144 declares guardrails: [pii, injection] and :156 self_learning: true (so the privacy pipeline is already live \u2014 only the DLP vault + redaction badge remain); (6) library.py:558-568 backup() zips only library.db + library_files/ and restore is destructive (the missed whole-workspace-backup risk). Two things I could not fully verify without deeper inspection and flagged as VERIFY-FIRST in the roadmap: that resolve_canonical_storage() + studio_service.stream_agent_run run end-to-end through agent_path inside this custom non-BFF app (the spike in sprint item 1 de-risks the foundation's effort estimate), and that electron's Notification import works in main.cjs (confirmed unused, not confirmed importable). The worker (always-on) feature was re-labeled as an EITHER/OR alternative to the in-process scheduler, not an additive dependsOn layer, per the critique \u2014 running both means two schedulers (flock-guarded but redundant)."
+  }
+}

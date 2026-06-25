@@ -1,0 +1,15 @@
+# Runtime requirements for scholar-desk.
+#
+# himmy is the framework, consumed AS A LIBRARY. It is NOT on PyPI — install it from the
+# local himmy repo FIRST (editable), then install this project on top. From this directory:
+#
+#   uv venv --python 3.12 .venv && source .venv/bin/activate
+#   uv pip install -e '../himmy-agent-test[toolkit,api,openai,embeddings,cron]'   # framework + extras
+#   uv pip install -e '.[dev]'                                               # this project
+#
+# A cold install against PyPI will fail because himmy is not published — install it editable.
+# The `cron` extra (cronsim) powers wall-clock routine schedules ("weekdays 06:30"); without it
+# cron-kind routines are created but silently never fire — see src/himmy_app/routines.py.
+himmy[toolkit,api,openai,embeddings,cron]
+httpx>=0.27
+pypdf>=4

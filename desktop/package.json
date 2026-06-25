@@ -1,0 +1,53 @@
+{
+  "name": "himmy-app",
+  "version": "0.1.0",
+  "description": "Himmy — your personal research & productivity assistant (Mac app).",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k -n VITE,ELECTRON -c cyan,magenta \"vite\" \"wait-on tcp:127.0.0.1:5173 && electron .\"",
+    "vite": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "electron .",
+    "dist": "vite build && electron-builder --mac"
+  },
+  "dependencies": {
+    "@blueprintjs/core": "^5.16.0",
+    "@blueprintjs/icons": "^5.13.0",
+    "lucide-react": "^1.21.0",
+    "pdfjs-dist": "^4.7.76",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.3",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.himmy.app",
+    "productName": "Himmy",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.education",
+      "target": "dir"
+    }
+  }
+}

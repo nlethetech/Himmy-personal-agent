@@ -1,0 +1,143 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+/* Translucent dark tint that sits OVER the window's native vibrancy material, so the frosted
+   glass reads through. (~0.62 alpha keeps text crisp while letting the blur breathe.) */
+body {
+  background: rgba(22, 23, 28, 0.62);
+  color: rgba(255, 255, 255, 0.92);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  letter-spacing: -0.003em;
+}
+
+::selection {
+  background: rgba(10, 132, 255, 0.32);
+}
+
+.titlebar-drag {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Quiet overlay scrollbars, macOS-style. */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.26);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* On-brand focus ring (system blue), keyboard only. */
+*:focus-visible {
+  outline: 2px solid rgba(10, 132, 255, 0.6);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+:focus:not(:focus-visible) {
+  outline: none;
+}
+/* Text fields show focus via the caret — no heavy ring box (keeps the command palette clean). */
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+/* PDF.js text layer — transparent, selectable text positioned over the page canvas. */
+.textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  text-align: initial;
+  forced-color-adjust: none;
+  z-index: 2;
+}
+.textLayer span,
+.textLayer br {
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+  color: transparent;
+}
+.textLayer span::selection {
+  background: rgba(10, 132, 255, 0.4);
+}
+.pdf-hl-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* iOS-Messages-style typing indicator — three dots rising in a gentle wave. */
+@keyframes himmy-typing {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.32; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+.himmy-typing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: himmy-typing 1.3s infinite ease-in-out;
+}
+
+/* Command palette enters with a soft scale/translate — native, not modal-jarring. */
+@keyframes himmy-pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes himmy-slide-right {
+  from { opacity: 0; transform: translateX(16px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.himmy-enter-center { animation: himmy-pop 0.18s cubic-bezier(0.22, 1, 0.36, 1); }
+.himmy-enter-right { animation: himmy-slide-right 0.2s cubic-bezier(0.22, 1, 0.36, 1); }
+
+/* A freshly-arrived chat bubble settles in like an iMessage send. */
+@keyframes himmy-bubble-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.himmy-bubble-in { animation: himmy-bubble-in 0.22s cubic-bezier(0.22, 1, 0.36, 1); }
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
