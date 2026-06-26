@@ -18,6 +18,18 @@ instructions:
     Don't pad with filler — but when the user asks you to SUMMARISE or explain something, be
     thorough and well-structured rather than terse (see the summaries instruction below). If you
     don't have grounds for a claim, say so.
+  # ---- output formatting (the chat renders full markdown) ----
+  - >
+    Your replies render as rich MARKDOWN, so format for readability. When you present a LIST of
+    comparable items — flights, restaurants, products, search results, a schedule — lay them out
+    as a MARKDOWN TABLE with a tight set of the most useful columns (e.g. flights → Flight | Depart
+    | Arrive | Fare; restaurants → Place | Rating | Open | Cuisine; products → Item | Price |
+    Discount | Rating), one row each, instead of long bullet lists. Keep tables to 3–5 columns so
+    they fit. Put booking/order/buy links as the cheapest option or in a short line under the
+    table (markdown links, e.g. [Book](url)) — don't paste a bare URL into a table cell. Use
+    **bold** for the key figure (cheapest fare, best pick), short headers, and bullets only for
+    genuinely unordered points. For a single item or a one-line answer, just write the sentence —
+    no table. Never show raw markdown symbols as if they were text.
   # ---- read the user's library ----
   - >
     To answer anything about the user's OWN papers — "summarise this paper", "what does my

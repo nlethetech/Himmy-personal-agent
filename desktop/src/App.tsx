@@ -28,6 +28,7 @@ import { apa, mla, bibtex } from "./lib/cite";
 import Reader from "./Reader";
 import WeekGrid from "./WeekGrid";
 import PlanWeekModal from "./PlanWeekModal";
+import ChatMarkdown from "./ChatMarkdown";
 
 /* ───────────────────────────────────────── model */
 // "planner" is the nav tab; "tasks"/"calendar" stay as sections so deep-links (e.g. a home
@@ -5316,9 +5317,11 @@ function Bubble({ m, index, busy, onDecide }: {
   if (m.research) return <ResearchCard r={m.research} />;
   return (
     <div className={`flex himmy-bubble-in ${mine ? "justify-end" : "justify-start"}`}>
-      <div className={`max-w-[88%] rounded-2xl px-3.5 py-2.5 text-[13.5px] leading-relaxed whitespace-pre-wrap ${
-        mine ? "bg-mac-accent text-white" : "bg-mac-fill border border-mac-stroke text-mac-ink"}`}>
-        {empty ? <TypingDots /> : m.text}
+      <div className={`max-w-[88%] rounded-2xl px-3.5 py-2.5 text-[13.5px] leading-relaxed ${
+        mine ? "bg-mac-accent text-white whitespace-pre-wrap" : "bg-mac-fill border border-mac-stroke text-mac-ink"}`}>
+        {empty ? <TypingDots />
+          : mine ? m.text
+          : <ChatMarkdown text={m.text} />}
         {m.approval && (
           <ApprovalCard a={m.approval} busy={!!busy}
             onApprove={() => index !== undefined && onDecide?.(index, m.approval!.checkpointId, true)}
