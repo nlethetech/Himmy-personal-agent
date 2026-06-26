@@ -10,7 +10,7 @@ import {
   Gauge, Coins, Zap, CalendarClock, Bell, Play, Flag,
   Star, BellOff, Users, TrendingUp, Cpu, Sparkle,
   Info, StickyNote, Highlighter,
-  ShoppingBag, Plane, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart, ArrowRight,
+  ShoppingBag, Plane, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart, ArrowRight, ConciergeBell,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -39,7 +39,7 @@ const NAV: { id: Section; label: string; icon: LucideIcon }[] = [
   { id: "today", label: "Today", icon: Sun },
   { id: "news", label: "News", icon: Newspaper },
   { id: "library", label: "Library", icon: BookOpen },
-  { id: "do", label: "Do", icon: Sparkles },
+  { id: "do", label: "Concierge", icon: ConciergeBell },
   { id: "mail", label: "Mail", icon: Mail },
 ];
 
@@ -469,17 +469,11 @@ function DoTab() {
   const cartCount = cart?.count || 0;
 
   return (
-    <div className="relative h-full flex flex-col">
-      {/* ambient depth — a soft glow behind the header */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-72 bg-[radial-gradient(120%_100%_at_50%_0%,rgba(64,156,255,0.07),transparent_70%)]" />
+    <div className="h-full flex flex-col">
       {/* header */}
       <div className="relative shrink-0 px-9 pt-8 pb-4 mx-auto w-full max-w-[1180px]">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-mac-accentHi mb-2">
-              <Sparkles size={12} strokeWidth={2.2} />
-              {board?.ai ? "Picked for you" : board?.stale ? "Personalizing…" : "Your Nepal concierge"}
-            </div>
             <h1 className="font-display text-[28px] font-semibold leading-[1.1] tracking-[-0.025em] bg-gradient-to-b from-white to-white/75 bg-clip-text text-transparent">
               {board?.headline || "What can I get you?"}
             </h1>
