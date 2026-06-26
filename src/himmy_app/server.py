@@ -1017,6 +1017,11 @@ def create_app() -> FastAPI:
         # Live Buddha Air tickets (times + fares) for a route + date, so the user can SEE flights.
         return await do.flights(origin, to, date)
 
+    @app.get("/do/trip")
+    async def do_trip(dest: str, days: int = 2) -> dict[str, Any]:
+        # A day-by-day roadmap of places/activities for a destination (grounded in real OSM spots).
+        return await do.trip(dest, days)
+
     # the tray — a Himmy-side cart the user checks out themselves (opening the place's page)
     @app.get("/do/cart")
     async def do_cart_view() -> dict[str, Any]:

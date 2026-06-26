@@ -401,6 +401,133 @@ class DoConcierge:
             "origin": o or origin, "destination": d or destination, "date": date,
         })
 
+    # ---- trips: a day-by-day roadmap of places/activities (grounded in real OSM spots) -------
+    async def _geocode(self, place: str) -> tuple[float, float] | None:
+        """Resolve a place name to coords via OpenStreetMap Nominatim (keyless, best-effort)."""
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "HimmyApp/1.0 (concierge)"}) as c:
+                r = await c.get("https://nominatim.openstreetmap.org/search",
+                                params={"q": place, "format": "json", "limit": 1})
+            d = r.json()
+            if d:
+                return float(d[0]["lat"]), float(d[0]["lon"])
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    async def _pois(self, lat: float, lon: float) -> list[dict[str, str]]:
+        """Real nearby attractions/viewpoints/historic/natural spots via OSM Overpass."""
+        import httpx
+
+        q = (f'[out:json][timeout:25];('
+             f'node["tourism"~"attraction|viewpoint|museum|theme_park"](around:8000,{lat},{lon});'
+             f'node["historic"](around:8000,{lat},{lon});'
+             f'node["leisure"="park"](around:8000,{lat},{lon});'
+             f'node["natural"="peak"](around:12000,{lat},{lon}););out body 40;')
+        try:
+            async with httpx.AsyncClient(timeout=35, headers={"User-Agent": "HimmyApp/1.0 (concierge)"}) as c:
+                r = await c.post("https://overpass-api.de/api/interpreter", data={"data": q})
+            out: list[dict[str, str]] = []
+            seen: set[str] = set()
+            for e in r.json().get("elements", []):
+                t = e.get("tags", {})
+                name = (t.get("name") or "").strip()
+                if not name or name.lower() in seen or name.isdigit():
+                    continue
+                seen.add(name.lower())
+                out.append({"name": name, "kind": t.get("tourism") or t.get("historic")
+                            or t.get("leisure") or t.get("natural") or "spot"})
+            return out[:25]
+        except Exception:  # noqa: BLE001
+            return []
+
+    async def trip(self, destination: str, days: int = 2) -> dict[str, Any]:
+        destination = (destination or "").strip()
+        if not destination:
+            return {"ok": False, "message": "Where would you like to go?"}
+        days = max(1, min(int(days or 2), 7))
+        cache_key = f"{destination.lower()}|{days}"
+        cached = self._trip_cache().get(cache_key)
+        if cached:
+            return cached
+        # Ground the plan in REAL local spots so Himmy curates rather than invents.
+        geo = await self._geocode(destination)
+        pois = await self._pois(*geo) if geo else []
+        poi_str = "; ".join(f"{p['name']} ({p['kind']})" for p in pois) or "(none found — use your own knowledge)"
+        # Optional "getting there" — a Buddha Air flight from the user's home airport.
+        getting_there = None
+        if self._on("flights"):
+            code = await self._resolve_airport(destination)
+            home = _home_airport(_vault(self.cfg))
+            if code and code != home:
+                try:
+                    from himmy_app.connectors.buddha_air import buddha_air_flights
+
+                    date = (datetime.date.today() + datetime.timedelta(days=14)).isoformat()
+                    fr = await buddha_air_flights({"origin": home, "destination": code, "date": date})
+                    if fr.get("ok") and fr.get("cheapest"):
+                        getting_there = {"from": home, "to": code, "cheapest": fr["cheapest"],
+                                         "booking_link": fr.get("booking_link")}
+                except Exception:  # noqa: BLE001
+                    pass
+        roadmap = await self._plan_trip(destination, days, poi_str)
+        if not roadmap:
+            return {"ok": False, "message": "Couldn't build a plan just now — try again."}
+        out = {"ok": True, "destination": destination, "days": days,
+               "getting_there": getting_there, **roadmap}
+        self._trip_cache_write(cache_key, out)
+        return out
+
+    async def _plan_trip(self, destination: str, days: int, poi_str: str) -> dict[str, Any] | None:
+        from himmy_app import user_profile
+        from himmy.cli.provider import build_inference_for
+        from himmy.services.inference.models import InferenceMessage, InferenceRequest
+
+        profile = user_profile.render_for_prompt(cfg=self.cfg) or "(no saved profile)"
+        system = (
+            "You are Himmy, a sharp Nepal travel planner. Build a realistic DAY-BY-DAY roadmap of "
+            "places to visit and things to do — no maps, just a clear plan. Ground it in your real "
+            "knowledge of the destination AND the verified local spots provided; never invent places "
+            "that don't exist. Tailor to the user's profile where relevant. Reply with ONLY JSON: "
+            '{"summary":"<one warm sentence>","itinerary":[{"day":1,"title":"<short theme>",'
+            '"items":[{"name":"<place/activity>","category":"<Nature|Culture|Food|Adventure|Relax|'
+            'Shopping>","desc":"<one sentence>","tip":"<short optional tip>"}]}],"tips":["<short '
+            'practical tip>"]}. 2-4 items per day; be specific and local.'
+        )
+        user = (f"Destination: {destination}\nDays: {days}\nVerified local spots (OSM): {poi_str}\n\n"
+                f"About the traveller:\n{profile}\n\nBuild the roadmap.")
+        try:
+            svc = build_inference_for(self.cfg.provider, self.cfg.model)
+            resp = await svc.run(InferenceRequest(
+                messages=[InferenceMessage(role="system", content=system),
+                          InferenceMessage(role="user", content=user)],
+                generation_params={"temperature": 0.4}, timeout_seconds=70.0))
+            data = _extract_json(resp.output_text or "")
+            if isinstance(data, dict) and data.get("itinerary"):
+                return {"summary": str(data.get("summary") or "").strip(),
+                        "itinerary": data.get("itinerary") or [], "tips": data.get("tips") or []}
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _trip_cache(self) -> dict[str, Any]:
+        try:
+            return json.loads((self.cfg.data_dir / "trips_cache.json").read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _trip_cache_write(self, key: str, value: dict[str, Any]) -> None:
+        cache = self._trip_cache()
+        cache[key] = value
+        # keep the cache small
+        if len(cache) > 30:
+            cache = dict(list(cache.items())[-30:])
+        with contextlib.suppress(Exception):
+            (self.cfg.data_dir / "trips_cache.json").write_text(json.dumps(cache, ensure_ascii=False),
+                                                                encoding="utf-8")
+
     # ---- inline search over food (Foodmandu) + shopping (Daraz) ------------------------------
     async def search(self, query: str, kind: str = "food") -> dict[str, Any]:
         query = (query or "").strip()
