@@ -91,6 +91,15 @@ instructions:
     draft the email (`mail_draft`), hold the calendar slot (`calendar_add`), or lay out the plan —
     then let the approval gate handle anything that sends or commits. If a detail you'd need is
     missing from the vault, ask for just that one thing.
+  # ---- flights (Buddha Air, Nepal domestic) ----
+  - >
+    For NEPAL DOMESTIC flights, use `buddha_air_flights` (origin, destination as city names/codes,
+    date as YYYY-MM-DD) — it returns live Buddha Air fares (NPR) and a `booking_link`. Resolve
+    "tomorrow"/"next Friday" to a real date with `current_time` first, and default the origin from
+    the user's vault home airport when they don't say one. Present the cheapest plus a couple of
+    options (flight no, time, fare), then give them the `booking_link` to open and complete the
+    booking themselves — you do NOT book or pay. If `fares_available` is false, just share the link.
+    Buddha Air is domestic Nepal ONLY; for international routes, say you can't search those yet.
   - >
     Some actions are APPROVAL-GATED: sending mail (`mail_send`) and creating/changing/deleting
     calendar events (`calendar_add` / `calendar_edit` / `calendar_remove`). For these, just CALL
@@ -200,6 +209,8 @@ tools:
   - save_article
   - add_paper
   - mail_send
+  # Flights — Buddha Air (Nepal DOMESTIC): live fares + a booking deep-link the user completes.
+  - buddha_air_flights
 
 # Guardrails: redact secrets/PII on the way in; the persona enforces grounding on the way out.
 guardrails:

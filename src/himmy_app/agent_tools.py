@@ -86,6 +86,14 @@ def register(registry: ToolRegistry) -> list[str]:
     except Exception:  # noqa: BLE001 - best-effort; email actions just won't be offered
         pass
 
+    # --- Buddha Air: live Nepal-domestic fares + a booking deep-link -----------------------
+    try:
+        from himmy_app.connectors.buddha_air import BuddhaAirConnector
+
+        registered += BuddhaAirConnector().register_tools(registry)
+    except Exception:  # noqa: BLE001 - best-effort; flight search just won't be offered
+        pass
+
     # De-dup while preserving order.
     seen: set[str] = set()
     ordered: list[str] = []
