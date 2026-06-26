@@ -7,7 +7,7 @@ import {
   Bookmark, BookmarkCheck, ArrowLeft, FolderPlus, Globe, Circle, CheckCircle2,
   MessageSquare, SquarePen, PanelLeft, PanelRight, Telescope, ListChecks, BookText, Link2,
   Inbox, MapPin, KeyRound, ShieldCheck, Minus, ChevronLeft, ChevronRight, Repeat,
-  Gauge, Coins, Zap, CalendarCheck, CalendarClock, Bell, Play, Flag,
+  Gauge, Coins, Zap, CalendarClock, Bell, Play, Flag,
   Star, BellOff, Users, TrendingUp, Cpu, Sparkle,
   Info, StickyNote, Highlighter,
   type LucideIcon,
@@ -34,8 +34,6 @@ const NAV: { id: Section; label: string; icon: LucideIcon }[] = [
   { id: "today", label: "Today", icon: Sun },
   { id: "news", label: "News", icon: Newspaper },
   { id: "library", label: "Library", icon: BookOpen },
-  { id: "planner", label: "Planner", icon: CalendarCheck },
-  { id: "routines", label: "Routines", icon: Repeat },
   { id: "mail", label: "Mail", icon: Mail },
 ];
 
@@ -164,8 +162,10 @@ export default function App() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+  const [routinesOpen, setRoutinesOpen] = useState(false);
   const [notifs, setNotifs] = useState<NotificationItem[]>([]);
   const [unread, setUnread] = useState(0);
+  const { status: account } = useGoogle();   // drives the account-button avatar (connected email)
   // Track which notification ids we've already seen so we fire a native macOS notification
   // exactly once per new item — and never for the backlog present on first load.
   const seenRef = useRef<Set<string>>(new Set());
@@ -257,29 +257,46 @@ export default function App() {
           else setSection(s);
         }}
         online={!!health && !err} onSettings={() => setSettingsOpen(true)}
-        unread={unread} onBell={() => setNotifOpen(true)} />
+        unread={unread} onBell={() => setNotifOpen(true)} accountEmail={account?.email} />
       <main className="flex-1 min-h-0 overflow-auto">
         {openId && section === "library"
           ? <Reader id={openId} onClose={() => setOpenId(null)} />
           : <Content section={section} health={health} onOpen={setOpenId} />}
       </main>
       <CommandBar />
-      {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <AccountPanel onClose={() => setSettingsOpen(false)} />}
       {notifOpen && (
         <NotificationsPanel
           notifs={notifs}
           onRefresh={loadNotifs}
           onClose={() => { setNotifOpen(false); loadNotifs(); }}
+          onRoutines={() => { setNotifOpen(false); setRoutinesOpen(true); }}
         />
       )}
+      {routinesOpen && <RoutinesModal onClose={() => setRoutinesOpen(false)} />}
+    </div>
+  );
+}
+
+/* Routines live behind the bell now — a roomy modal so the full manager has space. */
+function RoutinesModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="absolute inset-0 z-50 bg-black/30 grid place-items-center p-6" onMouseDown={onClose}>
+      <div onMouseDown={(e) => e.stopPropagation()}
+        className="w-[820px] max-w-full h-[82%] max-h-[720px] rounded-2xl bg-[rgba(30,31,37,0.98)] backdrop-blur-xl border border-mac-strokeHi shadow-pop overflow-hidden flex flex-col">
+        <div className="h-11 px-3 flex items-center justify-end border-b border-mac-stroke shrink-0">
+          <button onClick={onClose} className="h-7 w-7 grid place-items-center rounded-[7px] text-mac-ink3 hover:text-mac-ink hover:bg-mac-fill transition-colors"><X size={16} /></button>
+        </div>
+        <div className="flex-1 min-h-0"><Routines /></div>
+      </div>
     </div>
   );
 }
 
 /* ───────────────────────────────────────── toolbar */
-function Toolbar({ section, onSelect, online, onSettings, unread, onBell }:
+function Toolbar({ section, onSelect, online, onSettings, unread, onBell, accountEmail }:
   { section: Section; onSelect: (s: Section) => void; online: boolean; onSettings: () => void;
-    unread: number; onBell: () => void }) {
+    unread: number; onBell: () => void; accountEmail?: string | null }) {
   return (
     <header className="titlebar-drag h-[52px] shrink-0 grid grid-cols-[1fr_auto_1fr] items-center px-3 border-b border-mac-stroke">
       {/* left cell — intentionally empty (just clears the macOS traffic lights) so the nav stays centered */}
@@ -289,7 +306,7 @@ function Toolbar({ section, onSelect, online, onSettings, unread, onBell }:
       <nav className="no-drag justify-self-center flex items-center gap-0.5 p-0.5 rounded-[11px] bg-mac-fill border border-mac-stroke">
         {NAV.map((n) => {
           const active = section === n.id ||
-            (n.id === "planner" && (section === "tasks" || section === "calendar"));
+            (n.id === "today" && (section === "planner" || section === "tasks" || section === "calendar"));
           const Ico = n.icon;
           return (
             <button key={n.id} onClick={() => onSelect(n.id)}
@@ -313,9 +330,9 @@ function Toolbar({ section, onSelect, online, onSettings, unread, onBell }:
             </span>
           )}
         </button>
-        <button onClick={onSettings} title="Settings · Backup & Sync"
-          className="h-8 w-8 grid place-items-center rounded-[9px] text-mac-ink2 hover:text-mac-ink hover:bg-mac-fill transition-colors">
-          <Settings size={15} strokeWidth={2} />
+        <button onClick={onSettings} title="Account"
+          className="h-8 w-8 grid place-items-center rounded-[9px] hover:bg-mac-fill transition-colors">
+          <AccountAvatar email={accountEmail} size={22} />
         </button>
       </div>
     </header>
@@ -326,12 +343,12 @@ function Toolbar({ section, onSelect, online, onSettings, unread, onBell }:
 function Content({ section, health, onOpen }:
   { section: Section; health: Health | null; onOpen: (id: string) => void }) {
   switch (section) {
-    case "today": return <Today health={health} />;
+    case "today": return <HomeTab health={health} />;
     case "library": return <Library onOpen={onOpen} />;
     case "news": return <News />;
-    case "planner": return <Planner />;
-    case "tasks": return <Planner initial="tasks" />;
-    case "calendar": return <Planner initial="calendar" />;
+    case "planner": return <HomeTab health={health} initialView="plan" />;
+    case "tasks": return <HomeTab health={health} initialView="plan" initialPlan="tasks" />;
+    case "calendar": return <HomeTab health={health} initialView="plan" initialPlan="calendar" />;
     case "routines": return <Routines />;
     case "mail": return <MailTab />;
   }
@@ -527,6 +544,44 @@ function LiveClock() {
   );
 }
 
+/* The home tab now holds two views — the Today cockpit and the Planner — switched by a
+   segmented control, so Planner no longer needs its own top-bar slot. */
+function HomeTab({ health, initialView = "today", initialPlan = "tasks" }: {
+  health: Health | null; initialView?: "today" | "plan"; initialPlan?: "tasks" | "calendar";
+}) {
+  const [view, setView] = useState<"today" | "plan">(initialView);
+  const [plan, setPlan] = useState<"tasks" | "calendar">(initialPlan);
+  // Deep-links (the Today / To-do cards, an agenda row) set the section → keep in sync.
+  useEffect(() => { setView(initialView); }, [initialView]);
+  useEffect(() => { setPlan(initialPlan); }, [initialPlan]);
+
+  // The cockpit fills the tab on its own. The Plan view is reached from the Today / To-do
+  // cards and carries just its Tasks/Calendar switch; the top "Today" tab returns home.
+  if (view === "today") return <Today health={health} />;
+
+  const seg = "flex items-center gap-0.5 p-0.5 rounded-[10px] bg-mac-fill border border-mac-stroke";
+  const btn = (on: boolean) =>
+    `flex items-center gap-1.5 h-[30px] px-3.5 rounded-[8px] text-[12.5px] transition-colors ${
+      on ? "bg-mac-fillHi text-mac-ink shadow-tab" : "text-mac-ink2 hover:text-mac-ink"}`;
+
+  return (
+    <div className="h-full flex flex-col">
+      <div className="shrink-0 h-[52px] px-6 flex items-center">
+        <div className={seg}>
+          {([["tasks", "Tasks", CheckSquare], ["calendar", "Calendar", Calendar]] as const).map(([id, label, Ico]) => (
+            <button key={id} onClick={() => setPlan(id)} className={btn(plan === id)}>
+              <Ico size={14} strokeWidth={2} className={plan === id ? "text-mac-accentHi" : ""} />{label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="flex-1 min-h-0">
+        {plan === "tasks" ? <Tasks embedded /> : <CalendarTab embedded />}
+      </div>
+    </div>
+  );
+}
+
 function Today({ health }: { health: Health | null }) {
   void health;
   // Live clock + greeting — re-tick each half-minute so "morning"→"afternoon" flips on its own.
@@ -634,6 +689,7 @@ function Today({ health }: { health: Health | null }) {
       <div className="flex-1 min-h-0 grid grid-cols-12 grid-rows-1 gap-4">
         {/* Today — one time-sorted agenda merging calendar events + scheduled/due tasks */}
         <Card className="col-span-12 md:col-span-4 min-h-0" icon={CalendarClock} title="Today"
+          onOpen={() => nav("calendar")}
           hint={agenda.length ? `${agenda.length} ${agenda.length === 1 ? "item" : "items"}` : undefined}>
           <div className="flex flex-col h-full">
             <div className="flex-1 min-h-0 overflow-auto flex flex-col gap-1.5">
@@ -660,6 +716,7 @@ function Today({ health }: { health: Health | null }) {
 
         {/* To do — complete on hover, add inline */}
         <Card className="col-span-12 md:col-span-4 min-h-0" icon={ListChecks} title="To do"
+          onOpen={() => nav("tasks")}
           hint={taskCount.total ? `${taskCount.open} open` : undefined}>
           <div className="flex flex-col h-full">
             <div className="flex-1 min-h-0 overflow-auto -mt-1">
@@ -1588,11 +1645,108 @@ function ProfileSettings() {
   );
 }
 
-function SettingsPanel({ onClose }: { onClose: () => void }) {
+/* A small account avatar — initial of the connected email on a deterministic color. */
+function AccountAvatar({ email, size = 22 }: { email?: string | null; size?: number }) {
+  return (
+    <div className="rounded-full grid place-items-center text-white font-semibold shrink-0"
+      style={{ width: size, height: size, background: avatarColor(email || "you"), fontSize: Math.round(size * 0.42) }}>
+      {avatarInitial(email || "You")}
+    </div>
+  );
+}
+
+function SectionHeader({ title, sub }: { title: string; sub: string }) {
+  return (
+    <div className="mb-1">
+      <h3 className="text-[14.5px] font-semibold text-mac-ink">{title}</h3>
+      <p className="text-[12px] text-mac-ink3 mt-1 leading-relaxed max-w-[52ch]">{sub}</p>
+    </div>
+  );
+}
+
+function ConnectionsSection({ g }: { g: ReturnType<typeof useGoogle> }) {
+  const s = g.status;
+  if (!s?.connected) {
+    return (
+      <div className="space-y-4">
+        <SectionHeader title="Connections" sub="Connect accounts so Himmy can work across your mail and calendar." />
+        <GoogleConnect icon={Link2} title="Connect Google"
+          blurb="Connect a Google account to read your inbox and manage your calendar from Himmy." g={g} />
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-4">
+      <SectionHeader title="Connections" sub="Accounts Himmy is connected to." />
+      <div className="rounded-xl border border-mac-stroke bg-mac-fill p-4 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <AccountAvatar email={s.email} size={36} />
+          <div className="min-w-0">
+            <div className="text-[13px] text-mac-ink font-medium">Google</div>
+            <div className="text-[12px] text-mac-ink3 truncate">{s.email} · Gmail &amp; Calendar</div>
+          </div>
+        </div>
+        <button onClick={g.disconnect}
+          className="shrink-0 h-8 px-3 rounded-[9px] bg-mac-fill border border-mac-stroke text-[12.5px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">Disconnect</button>
+      </div>
+    </div>
+  );
+}
+
+function PreferencesSection({ health, dir, onReveal }: { health: Health | null; dir: string; onReveal: () => void }) {
+  return (
+    <div className="space-y-4">
+      <SectionHeader title="Preferences" sub="How Himmy runs on this Mac." />
+      <SettingRow title="Model" sub="The AI model Himmy uses for chat, summaries, and actions.">
+        <span className="text-[12px] text-mac-ink2 font-mono">{health?.model || "—"}</span>
+      </SettingRow>
+      <SettingRow title="Provider" sub="Where Himmy sends its requests.">
+        <span className="text-[12px] text-mac-ink2 font-mono">{health?.provider || "—"}</span>
+      </SettingRow>
+      <SettingRow title="Data folder" sub="Everything you create lives here on this Mac. Keep it in iCloud Drive or Dropbox to use Himmy on another computer.">
+        <button onClick={onReveal}
+          className="h-8 px-3.5 rounded-[9px] bg-mac-fill border border-mac-stroke text-[12.5px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors flex items-center gap-1.5">
+          <Folder size={13} /> Reveal in Finder
+        </button>
+      </SettingRow>
+      {dir && <p className="text-[11px] font-mono text-mac-ink3 truncate">{dir}</p>}
+    </div>
+  );
+}
+
+function PlanSection() {
+  return (
+    <div className="space-y-4">
+      <SectionHeader title="Plan &amp; Billing" sub="Your Himmy plan." />
+      <div className="rounded-xl border border-mac-stroke bg-mac-fill p-6 text-center">
+        <Coins size={22} className="text-mac-accentHi mx-auto mb-2.5" />
+        <p className="text-[13px] text-mac-ink font-medium">Himmy is free while in development</p>
+        <p className="text-[12px] text-mac-ink3 mt-1.5 max-w-[42ch] mx-auto leading-relaxed">
+          Plans &amp; billing will live here when Himmy becomes a paid product — nothing to manage yet.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+type AccountTab = "you" | "connections" | "backup" | "preferences" | "plan";
+const ACCOUNT_SECTIONS: { id: AccountTab; label: string; icon: LucideIcon }[] = [
+  { id: "you", label: "You", icon: Sparkles },
+  { id: "connections", label: "Connections", icon: Link2 },
+  { id: "backup", label: "Backup & Sync", icon: FileDown },
+  { id: "preferences", label: "Preferences", icon: Settings },
+  { id: "plan", label: "Plan & Billing", icon: Coins },
+];
+
+function AccountPanel({ onClose }: { onClose: () => void }) {
+  const [tab, setTab] = useState<AccountTab>("you");
   const [dir, setDir] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [health, setHealth] = useState<Health | null>(null);
+  const g = useGoogle();
   useEffect(() => { api.dataDir().then((r) => setDir(r.path)).catch(() => {}); }, []);
+  useEffect(() => { api.health().then(setHealth).catch(() => {}); }, []);
 
   const backup = async () => {
     setBusy("backup"); setMsg(null);
@@ -1613,45 +1767,54 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
   return (
     <div className="absolute inset-0 z-50 grid place-items-center bg-black/45" onMouseDown={onClose}>
       <div onMouseDown={(e) => e.stopPropagation()}
-        className="w-[560px] max-w-[calc(100%-3rem)] rounded-2xl bg-[rgba(30,31,37,0.97)] backdrop-blur-xl border border-mac-strokeHi shadow-pop overflow-hidden">
-        <div className="h-12 px-4 flex items-center justify-between border-b border-mac-stroke">
+        className="w-[800px] max-w-[calc(100%-3rem)] h-[80vh] max-h-[660px] rounded-2xl bg-[rgba(30,31,37,0.97)] backdrop-blur-xl border border-mac-strokeHi shadow-pop overflow-hidden flex flex-col">
+        <div className="h-12 px-4 flex items-center justify-between border-b border-mac-stroke shrink-0">
           <div className="flex items-center gap-2 text-[13px]">
-            <Settings size={14} className="text-mac-accentHi" />
-            <span className="font-medium text-mac-ink">Settings</span>
+            <AccountAvatar email={g.status?.email} size={20} />
+            <span className="font-medium text-mac-ink">Account</span>
           </div>
           <button onClick={onClose} className="text-mac-ink3 hover:text-mac-ink"><X size={16} /></button>
         </div>
-        <div className="p-5 space-y-5 max-h-[78vh] overflow-auto">
-          <ProfileSettings />
-          <div className="h-px bg-mac-stroke" />
-          <div className="text-[11px] uppercase tracking-wide text-mac-ink3 font-medium">Backup &amp; Sync</div>
-          <SettingRow title="Back up everything"
-            sub="One .zip with your whole workspace — papers & PDFs, notes & highlights, chats, tasks, routines, and what Himmy has learned — saved to Downloads.">
-            <button onClick={backup} disabled={busy === "backup"}
-              className="h-8 px-3.5 rounded-[9px] bg-mac-accent text-white text-[12.5px] font-medium hover:bg-mac-accentHi transition-colors flex items-center gap-1.5 disabled:opacity-60">
-              {busy === "backup" ? <Loader2 size={13} className="animate-spin" /> : <FileDown size={13} />} Back up now
-            </button>
-          </SettingRow>
-          <SettingRow title="Restore from a backup"
-            sub="Replace your whole workspace from a backup .zip — e.g. from another Mac. Your current data is safely copied aside first, so a restore can't lose it.">
-            <button onClick={restore} disabled={busy === "restore"}
-              className="h-8 px-3.5 rounded-[9px] bg-mac-fill border border-mac-stroke text-[12.5px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors flex items-center gap-1.5 disabled:opacity-60">
-              {busy === "restore" ? <Loader2 size={13} className="animate-spin" /> : <FileUp size={13} />} Choose backup…
-            </button>
-          </SettingRow>
-          <SettingRow title="Library folder"
-            sub="Keep this folder in iCloud Drive or Dropbox to back it up and open Himmy on another Mac.">
-            <button onClick={reveal}
-              className="h-8 px-3.5 rounded-[9px] bg-mac-fill border border-mac-stroke text-[12.5px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors flex items-center gap-1.5">
-              <Folder size={13} /> Reveal in Finder
-            </button>
-          </SettingRow>
-          {dir && <p className="text-[11px] font-mono text-mac-ink3 truncate">{dir}</p>}
-          {msg && <p className="text-[12px] text-mac-ink2 bg-mac-fill border border-mac-stroke rounded-md px-3 py-2 break-all">{msg}</p>}
-          <p className="text-[11px] text-mac-ink3 leading-relaxed">
-            Real-time phone sync isn't available in a local Mac app — backups plus a cloud-synced
-            folder cover safe backup and using Himmy on another computer.
-          </p>
+        <div className="flex-1 min-h-0 flex">
+          <nav className="w-[178px] shrink-0 border-r border-mac-stroke p-2.5 flex flex-col gap-0.5">
+            {ACCOUNT_SECTIONS.map((sct) => (
+              <button key={sct.id} onClick={() => setTab(sct.id)}
+                className={`flex items-center gap-2.5 h-9 px-2.5 rounded-[9px] text-[12.5px] transition-colors ${
+                  tab === sct.id ? "bg-mac-fillHi text-mac-ink" : "text-mac-ink2 hover:text-mac-ink hover:bg-mac-fill"}`}>
+                <sct.icon size={14} className={tab === sct.id ? "text-mac-accentHi" : "text-mac-ink3"} /> {sct.label}
+              </button>
+            ))}
+          </nav>
+          <div className="flex-1 min-h-0 overflow-auto p-5">
+            {tab === "you" && <ProfileSettings />}
+            {tab === "connections" && <ConnectionsSection g={g} />}
+            {tab === "preferences" && <PreferencesSection health={health} dir={dir} onReveal={reveal} />}
+            {tab === "plan" && <PlanSection />}
+            {tab === "backup" && (
+              <div className="space-y-4">
+                <SectionHeader title="Backup & Sync" sub="Keep a copy of your whole workspace, or move it to another Mac." />
+                <SettingRow title="Back up everything"
+                  sub="One .zip with your whole workspace — papers & PDFs, notes & highlights, chats, tasks, routines, and what Himmy has learned — saved to Downloads.">
+                  <button onClick={backup} disabled={busy === "backup"}
+                    className="h-8 px-3.5 rounded-[9px] bg-mac-accent text-white text-[12.5px] font-medium hover:bg-mac-accentHi transition-colors flex items-center gap-1.5 disabled:opacity-60">
+                    {busy === "backup" ? <Loader2 size={13} className="animate-spin" /> : <FileDown size={13} />} Back up now
+                  </button>
+                </SettingRow>
+                <SettingRow title="Restore from a backup"
+                  sub="Replace your whole workspace from a backup .zip — e.g. from another Mac. Your current data is safely copied aside first, so a restore can't lose it.">
+                  <button onClick={restore} disabled={busy === "restore"}
+                    className="h-8 px-3.5 rounded-[9px] bg-mac-fill border border-mac-stroke text-[12.5px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors flex items-center gap-1.5 disabled:opacity-60">
+                    {busy === "restore" ? <Loader2 size={13} className="animate-spin" /> : <FileUp size={13} />} Choose backup…
+                  </button>
+                </SettingRow>
+                {msg && <p className="text-[12px] text-mac-ink2 bg-mac-fill border border-mac-stroke rounded-md px-3 py-2 break-all">{msg}</p>}
+                <p className="text-[11px] text-mac-ink3 leading-relaxed">
+                  Real-time phone sync isn't available in a local Mac app — backups plus a cloud-synced
+                  folder cover safe backup and using Himmy on another computer.
+                </p>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -3401,8 +3564,8 @@ function RoutineForm({ editing, name, setName, prompt, setPrompt, sched, setSche
 }
 
 /* ── notifications inbox (routine results · errors · approval parks) ───────── */
-function NotificationsPanel({ notifs, onRefresh, onClose }:
-  { notifs: NotificationItem[]; onRefresh: () => void; onClose: () => void }) {
+function NotificationsPanel({ notifs, onRefresh, onClose, onRoutines }:
+  { notifs: NotificationItem[]; onRefresh: () => void; onClose: () => void; onRoutines: () => void }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const markRead = async (id: string) => { try { await api.notifications.read(id); } finally { onRefresh(); } };
   const remove = async (id: string) => { try { await api.notifications.remove(id); } finally { onRefresh(); } };
@@ -3424,6 +3587,10 @@ function NotificationsPanel({ notifs, onRefresh, onClose }:
             <span className="font-medium text-mac-ink">Notifications</span>
           </div>
           <div className="flex items-center gap-1">
+            <button onClick={onRoutines} title="Manage routines"
+              className="flex items-center gap-1.5 text-[11.5px] text-mac-ink2 hover:text-mac-ink px-2 h-7 rounded-[7px] hover:bg-mac-fill transition-colors">
+              <Repeat size={13} /> Routines
+            </button>
             {notifs.some((n) => !n.read) && (
               <button onClick={readAll}
                 className="text-[11.5px] text-mac-ink3 hover:text-mac-ink px-2 h-7 rounded-[7px] hover:bg-mac-fill transition-colors">Mark all read</button>
@@ -4372,19 +4539,27 @@ function NewsReader({ target, onClose, isSaved, folders, onSave, onUnsave }: {
 }
 
 /* ───────────────────────────────────────── card primitives */
-function Card({ icon: Ico, title, hint, action, className = "", children }:
+function Card({ icon: Ico, title, hint, action, onOpen, className = "", children }:
   { icon: LucideIcon; title: string; hint?: string;
-    action?: { label: string; onClick: () => void }; className?: string; children: React.ReactNode }) {
+    action?: { label: string; onClick: () => void }; onOpen?: () => void;
+    className?: string; children: React.ReactNode }) {
+  const head = (
+    <>
+      <div className="h-6 w-6 shrink-0 rounded-[7px] grid place-items-center bg-mac-fillHi">
+        <Ico size={13} strokeWidth={2.25} className="text-mac-ink2" />
+      </div>
+      <span className="text-[13.5px] font-semibold text-mac-ink truncate">{title}</span>
+      {hint && <span className="text-[12px] text-mac-ink3 truncate">· {hint}</span>}
+      {onOpen && <ChevronRight size={14} strokeWidth={2} className="text-mac-ink3 shrink-0 group-hover:text-mac-ink transition-colors" />}
+    </>
+  );
   return (
     <section className={`rounded-2xl bg-mac-fill border border-mac-stroke shadow-mac p-5 flex flex-col ${className}`}>
       <div className="flex items-center justify-between mb-3.5">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="h-6 w-6 shrink-0 rounded-[7px] grid place-items-center bg-mac-fillHi">
-            <Ico size={13} strokeWidth={2.25} className="text-mac-ink2" />
-          </div>
-          <h2 className="text-[13.5px] font-semibold text-mac-ink truncate">{title}</h2>
-          {hint && <span className="text-[12px] text-mac-ink3 truncate">· {hint}</span>}
-        </div>
+        {onOpen
+          ? <button onClick={onOpen} title={`Open ${title}`}
+              className="group flex items-center gap-2.5 min-w-0 -ml-1 -my-1 pl-1 pr-2 py-1 rounded-lg hover:bg-mac-fillHi transition-colors">{head}</button>
+          : <div className="flex items-center gap-2.5 min-w-0">{head}</div>}
         {action && (
           <button onClick={action.onClick}
             className="shrink-0 text-[12.5px] text-mac-accentHi hover:underline">{action.label}</button>
