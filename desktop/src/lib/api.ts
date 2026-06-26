@@ -577,6 +577,11 @@ export const api = {
     get: (limit = 60) => jget<{ ok: boolean; items: ActivityItem[] }>(`/activity?limit=${limit}`),
     clear: () => jdelete<{ ok: boolean }>("/activity"),
   },
+
+  // The daily brief — Himmy's proactive "here's your day", shown on Today.
+  brief: (force = false) =>
+    jget<{ ok: boolean; text: string; generated_at?: string; stale?: boolean; generating?: boolean }>(
+      `/brief${force ? "?force=true" : ""}`),
   tasks: {
     list: () => jget<{ ok: boolean; tasks: Task[]; open: number; total: number }>("/tasks"),
     add: (title: string, opts?: { due?: string | null; priority?: number }) =>

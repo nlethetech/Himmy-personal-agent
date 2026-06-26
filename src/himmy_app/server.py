@@ -984,6 +984,15 @@ def create_app() -> FastAPI:
     async def news_saved_remove(nid: str) -> dict[str, Any]:
         return saved_news.remove(nid)
 
+    # ---- daily brief: Himmy's proactive "here's your day" on the Today page --------------
+    from himmy_app.brief import DailyBrief
+
+    brief = DailyBrief(cfg)
+
+    @app.get("/brief")
+    async def brief_get(force: bool = False) -> dict[str, Any]:
+        return await brief.get(force=force)
+
     # ---- "Do" hub: a smart Nepal concierge over flights / food / shopping ----------------
     from himmy_app.do_concierge import DoCart, DoConcierge
 

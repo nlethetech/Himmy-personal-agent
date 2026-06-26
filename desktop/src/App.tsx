@@ -1485,6 +1485,70 @@ function LiveClock() {
 
 /* The home tab now holds two views — the Today cockpit and the Planner — switched by a
    segmented control, so Planner no longer needs its own top-bar slot. */
+// Himmy's proactive daily brief — the first thing you see on Today. Served from a daily cache
+// (instant); a stale or cold brief generates in the background and we poll until it lands.
+function TodayBrief() {
+  const [brief, setBrief] = useState<{ text: string; generating?: boolean; stale?: boolean; generated_at?: string } | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const load = async (force = false) => {
+    try { const r = force ? await api.brief(true) : await api.brief(); setBrief(r); return r; }
+    catch { return null; }
+  };
+  useEffect(() => {
+    let alive = true; let tries = 0;
+    const poll = async () => {
+      if (!alive || tries >= 8) return;
+      tries += 1;
+      const r = await load();
+      if (alive && r && (r.generating || r.stale || !r.text)) setTimeout(poll, 5000);
+    };
+    (async () => {
+      const r = await load();
+      if (r && (r.generating || r.stale || !r.text)) setTimeout(poll, 5000);
+    })();
+    return () => { alive = false; };
+    /* eslint-disable-next-line */
+  }, []);
+  const refresh = async () => {
+    setRefreshing(true);
+    await load(true);
+    // poll a few times for the freshly-regenerated brief
+    let tries = 0;
+    const spin = async () => {
+      tries += 1;
+      const r = await load();
+      if ((r?.stale || r?.generating) && tries < 8) setTimeout(spin, 5000); else setRefreshing(false);
+    };
+    setTimeout(spin, 5000);
+  };
+
+  const generating = !brief || (!brief.text && (brief.generating || brief.stale));
+  if (brief && !brief.text && !generating) return null;  // no brief and not generating → hide
+
+  return (
+    <div className="relative mt-4 rounded-2xl border border-mac-stroke bg-gradient-to-b from-white/[0.045] to-white/[0.012] p-4">
+      <div className="flex items-center justify-between mb-2.5">
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-mac-accentHi">
+          <Sparkles size={12} strokeWidth={2.2} /> Your brief
+        </div>
+        <button onClick={refresh} disabled={refreshing} title="Refresh brief"
+          className="h-7 w-7 grid place-items-center rounded-[8px] text-mac-ink3 hover:text-mac-ink hover:bg-mac-fill transition-colors disabled:opacity-60">
+          <RefreshCw size={12.5} className={refreshing ? "animate-spin" : ""} />
+        </button>
+      </div>
+      {generating ? (
+        <div className="flex items-center gap-2 text-[12.5px] text-mac-ink3 py-1">
+          <Loader2 size={14} className="animate-spin text-mac-accentHi" /> Putting together your day…
+        </div>
+      ) : (
+        <div className="max-h-[168px] overflow-y-auto pr-1 text-[13px] text-mac-ink2 [&_strong]:text-mac-ink">
+          <ChatMarkdown text={brief!.text} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function HomeTab({ health, initialView = "today", initialPlan = "tasks" }: {
   health: Health | null; initialView?: "today" | "plan"; initialPlan?: "tasks" | "calendar";
 }) {
@@ -1610,19 +1674,22 @@ function Today({ health }: { health: Health | null }) {
   return (
     // One screen, no page scroll: hero (fixed) · three cards fill the height · slim usage strip.
     <div className="h-full flex flex-col mx-auto w-full max-w-[1180px] px-9 pt-7 pb-6">
-      {/* hero — glowing time-of-day orb · greeting · date · live clock */}
-      <div className="relative shrink-0 flex items-center justify-between gap-4 mb-5">
+      {/* hero — glowing time-of-day orb · greeting · date · live clock + Himmy's brief */}
+      <div className="relative shrink-0 mb-5">
         <div className="pointer-events-none absolute -top-10 -left-8 h-32 w-64 rounded-full bg-mac-accent/10 blur-3xl" />
-        <div className="relative flex items-center gap-4">
-          <div className="relative h-12 w-12 shrink-0 rounded-full grid place-items-center bg-gradient-to-br from-mac-accentHi to-mac-accent shadow-[0_5px_18px_-3px_rgba(10,132,255,0.55)] ring-1 ring-inset ring-white/15">
-            <GreetIcon size={21} strokeWidth={2} className="text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.25)]" />
+        <div className="relative flex items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className="relative h-12 w-12 shrink-0 rounded-full grid place-items-center bg-gradient-to-br from-mac-accentHi to-mac-accent shadow-[0_5px_18px_-3px_rgba(10,132,255,0.55)] ring-1 ring-inset ring-white/15">
+              <GreetIcon size={21} strokeWidth={2} className="text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.25)]" />
+            </div>
+            <div>
+              <h1 className="font-display text-[28px] font-semibold tracking-[-0.02em] leading-none">{part}</h1>
+              <p className="text-[13.5px] text-mac-ink2 mt-1.5">{dateStr}</p>
+            </div>
           </div>
-          <div>
-            <h1 className="font-display text-[28px] font-semibold tracking-[-0.02em] leading-none">{part}</h1>
-            <p className="text-[13.5px] text-mac-ink2 mt-1.5">{dateStr}</p>
-          </div>
+          <LiveClock />
         </div>
-        <LiveClock />
+        <TodayBrief />
       </div>
 
       <div className="flex-1 min-h-0 grid grid-cols-12 grid-rows-1 gap-4">
