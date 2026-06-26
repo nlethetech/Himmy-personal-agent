@@ -162,6 +162,17 @@ export type RecResult = {
   stale?: boolean; cached?: boolean;
 };
 
+// The "Do" concierge — smart Nepal picks across food / shopping / flights, each with a deep-link.
+export type DoPick = {
+  key: string; title: string; subtitle?: string; meta?: string; why?: string;
+  link?: string; rating?: number; open_now?: boolean;
+  discount?: string; was?: string; tag?: string; date?: string;
+};
+export type DoBoard = {
+  ok: boolean; headline: string; ai?: boolean; stale?: boolean; generated_at?: string;
+  food: DoPick[]; deals: DoPick[]; flights: DoPick[];
+};
+
 // "What Himmy knows about you" — a user-authored layer + a layer Himmy learns from activity.
 export type ProfileLayer = {
   about: string; projects: string[]; people: string[]; topics: string[]; preferences: string[];
@@ -473,6 +484,15 @@ export const api = {
     updateHighlight: (hid: string, patch: { note?: string; color?: string }) =>
       jput<{ ok: boolean }>(`/news/highlights/${hid}`, patch),
     removeHighlight: (hid: string) => jdelete<{ ok: boolean }>(`/news/highlights/${hid}`),
+  },
+
+  // The "Do" concierge — flights / food / shopping picks. board() is cheap (served from a warm
+  // cache; the one AI pass runs in the background), refresh() forces a regenerate.
+  do: {
+    board: (force = false) => jget<DoBoard>(`/do${force ? "?force=true" : ""}`),
+    refresh: () => jpost<DoBoard>("/do/refresh", {}),
+    feedback: (p: { kind: "up" | "down"; key: string; rail?: string; tags?: string[] }) =>
+      jpost<{ ok: boolean }>("/do/feedback", { rail: "", tags: [], ...p }),
   },
   tasks: {
     list: () => jget<{ ok: boolean; tasks: Task[]; open: number; total: number }>("/tasks"),

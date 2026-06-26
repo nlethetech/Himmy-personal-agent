@@ -10,6 +10,7 @@ import {
   Gauge, Coins, Zap, CalendarClock, Bell, Play, Flag,
   Star, BellOff, Users, TrendingUp, Cpu, Sparkle,
   Info, StickyNote, Highlighter,
+  ShoppingBag, Plane, UtensilsCrossed, ThumbsDown,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -21,6 +22,7 @@ import {
   type Routine, type RoutineSchedule, type NotificationItem, type ReadingStats,
   type RecThread, type TaskExtras, type Subtask,
   type UserProfile, type ProfileLayer,
+  type DoBoard, type DoPick,
 } from "./lib/api";
 import { apa, mla, bibtex } from "./lib/cite";
 import Reader from "./Reader";
@@ -30,11 +32,12 @@ import PlanWeekModal from "./PlanWeekModal";
 /* ───────────────────────────────────────── model */
 // "planner" is the nav tab; "tasks"/"calendar" stay as sections so deep-links (e.g. a home
 // card) can open the Planner on the right sub-tab.
-type Section = "today" | "news" | "library" | "planner" | "tasks" | "calendar" | "mail" | "routines";
+type Section = "today" | "news" | "library" | "do" | "planner" | "tasks" | "calendar" | "mail" | "routines";
 const NAV: { id: Section; label: string; icon: LucideIcon }[] = [
   { id: "today", label: "Today", icon: Sun },
   { id: "news", label: "News", icon: Newspaper },
   { id: "library", label: "Library", icon: BookOpen },
+  { id: "do", label: "Do", icon: Sparkles },
   { id: "mail", label: "Mail", icon: Mail },
 ];
 
@@ -347,12 +350,201 @@ function Content({ section, health, onOpen }:
     case "today": return <HomeTab health={health} />;
     case "library": return <Library onOpen={onOpen} />;
     case "news": return <News />;
+    case "do": return <DoTab />;
     case "planner": return <HomeTab health={health} initialView="plan" />;
     case "tasks": return <HomeTab health={health} initialView="plan" initialPlan="tasks" />;
     case "calendar": return <HomeTab health={health} initialView="plan" initialPlan="calendar" />;
     case "routines": return <Routines />;
     case "mail": return <MailTab />;
   }
+}
+
+/* ───────────────────────────────────────── do (concierge) */
+// The "Do" tab — a smart Nepal concierge. Rails of food / shopping / flight picks come from the
+// /do board: free, instant rules picks render right away; the one cheap AI pass (personal "why" +
+// re-rank) lands a beat later in the background, so glancing at the page costs no model usage.
+const DO_RAILS: { key: "food" | "deals" | "flights"; label: string; icon: LucideIcon;
+  action: string; verb: string }[] = [
+  { key: "food", label: "Eat", icon: UtensilsCrossed, action: "Order", verb: "order food on Foodmandu" },
+  { key: "deals", label: "Deals", icon: ShoppingBag, action: "Buy", verb: "shop on Daraz" },
+  { key: "flights", label: "Fly", icon: Plane, action: "Book", verb: "find a Buddha Air flight" },
+];
+const DO_CHIPS = ["Order momos", "Find a gift under Rs 2000", "Flights to Pokhara next weekend", "Best headphone deals"];
+
+function DoTab() {
+  const [board, setBoard] = useState<DoBoard | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [, tick] = useState(0);
+
+  const load = async (force = false) => {
+    try {
+      const b = force ? await api.do.refresh() : await api.do.board();
+      setBoard(b);
+      return b;
+    } catch { return null; }
+  };
+
+  useEffect(() => {
+    let alive = true;
+    let tries = 0;
+    (async () => {
+      setLoading(true);
+      const b = await load();
+      setLoading(false);
+      // If the board is still the free (stale) one, the AI pass is warming behind it — poll a few
+      // times so it flips to the personalized board on its own without the user lifting a finger.
+      const poll = async () => {
+        if (!alive || tries >= 4) return;
+        tries += 1;
+        const nb = await load();
+        if (alive && nb && nb.stale) setTimeout(poll, 3500);
+      };
+      if (b && b.stale) setTimeout(poll, 3500);
+    })();
+    const clock = setInterval(() => tick((n) => n + 1), 30000);
+    return () => { alive = false; clearInterval(clock); };
+  }, []);
+
+  const refresh = async () => {
+    setRefreshing(true);
+    await load(true);
+    setRefreshing(false);
+  };
+
+  const dismiss = (rail: "food" | "deals" | "flights", p: DoPick) => {
+    setBoard((b) => b ? { ...b, [rail]: b[rail].filter((x) => x.key !== p.key) } : b);
+    api.do.feedback({ kind: "down", key: p.key, rail, tags: p.tag ? [p.tag] : [] }).catch(() => {});
+  };
+
+  const empty = board && !board.food.length && !board.deals.length && !board.flights.length;
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* header */}
+      <div className="shrink-0 px-9 pt-7 pb-4 mx-auto w-full max-w-[1180px]">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-[11px] font-medium text-mac-accentHi mb-1.5">
+              <Sparkles size={12} strokeWidth={2.2} />
+              {board?.ai ? "Picked for you" : board?.stale ? "Personalizing…" : "Your Nepal concierge"}
+            </div>
+            <h1 className="font-display text-[24px] font-semibold leading-tight tracking-[-0.02em] text-mac-ink">
+              {board?.headline || "What can I get you?"}
+            </h1>
+            {board?.generated_at && (
+              <p className="text-[11.5px] text-mac-ink3 mt-1.5">Updated {relativeAgo(board.generated_at)}</p>
+            )}
+          </div>
+          <button onClick={refresh} disabled={refreshing} title="Refresh picks"
+            className="shrink-0 h-9 px-3.5 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors disabled:opacity-60">
+            <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} /> Refresh
+          </button>
+        </div>
+        {/* quick asks — hand a specific request straight to Himmy */}
+        <div className="flex flex-wrap items-center gap-1.5 mt-4">
+          {DO_CHIPS.map((c) => (
+            <button key={c} onClick={() => ask(c)}
+              className="h-7 px-2.5 rounded-full text-[11.5px] bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">
+              {c}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* rails */}
+      <div className="flex-1 min-h-0 overflow-y-auto pb-12">
+        <div className="mx-auto w-full max-w-[1180px] px-9">
+          {loading && !board ? (
+            <div className="h-64 grid place-items-center text-mac-ink3">
+              <Loader2 size={20} className="animate-spin" />
+            </div>
+          ) : empty ? (
+            <div className="h-64 grid place-items-center text-center">
+              <div>
+                <Sparkles size={22} className="text-mac-accentHi mx-auto mb-3" />
+                <p className="text-[13px] text-mac-ink2">No picks right now — try Refresh, or ask Himmy directly.</p>
+              </div>
+            </div>
+          ) : (
+            DO_RAILS.map((rail) => {
+              const picks = board?.[rail.key] || [];
+              if (!picks.length) return null;
+              const Ico = rail.icon;
+              return (
+                <section key={rail.key} className="mt-7 first:mt-1">
+                  <div className="flex items-center gap-2 mb-3">
+                    <div className="h-7 w-7 grid place-items-center rounded-[8px] bg-mac-fill border border-mac-stroke">
+                      <Ico size={14} strokeWidth={2} className="text-mac-accentHi" />
+                    </div>
+                    <h2 className="font-display text-[15px] font-semibold text-mac-ink tracking-[-0.01em]">{rail.label}</h2>
+                    <button onClick={() => ask(rail.verb)} title={`Ask Himmy to ${rail.verb}`}
+                      className="text-[11.5px] text-mac-ink3 hover:text-mac-accentHi transition-colors">More →</button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2.5">
+                    {picks.map((p) => (
+                      <DoPickCard key={p.key} p={p} rail={rail.key} action={rail.action}
+                        onDismiss={() => dismiss(rail.key, p)} />
+                    ))}
+                  </div>
+                </section>
+              );
+            })
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DoPickCard({ p, rail, action, onDismiss }: {
+  p: DoPick; rail: "food" | "deals" | "flights"; action: string; onDismiss: () => void;
+}) {
+  return (
+    <div className="group relative flex flex-col rounded-xl bg-mac-fill border border-mac-stroke hover:border-mac-strokeHi hover:shadow-mac transition-all p-3.5">
+      <button onClick={onDismiss} title="Not for me — show less like this"
+        className="absolute top-1.5 right-1.5 z-10 h-6 w-6 grid place-items-center rounded-full bg-mac-fill/80 backdrop-blur text-mac-ink3 hover:text-mac-ink hover:bg-mac-fillHi opacity-0 group-hover:opacity-100 transition-opacity">
+        <ThumbsDown size={12} />
+      </button>
+      {/* badges */}
+      <div className="flex items-center gap-1.5 text-[11px] mb-1.5 pr-6">
+        {rail === "deals" && p.discount && (
+          <span className="font-semibold text-mac-green">{p.discount}</span>
+        )}
+        {typeof p.rating === "number" && p.rating > 0 && (
+          <span className="inline-flex items-center gap-0.5 text-mac-ink3">
+            <Star size={10} className="text-mac-accentHi fill-mac-accentHi" /> {p.rating.toFixed(1)}
+          </span>
+        )}
+        {rail === "food" && (
+          <span className={`inline-flex items-center gap-1 ${p.open_now ? "text-mac-green" : "text-mac-ink3"}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${p.open_now ? "bg-mac-green" : "bg-mac-ink3"}`} />
+            {p.open_now ? "Open" : "Closed"}
+          </span>
+        )}
+      </div>
+      <div className="text-[14px] text-mac-ink font-medium leading-snug line-clamp-2">{p.title}</div>
+      {/* price line for deals/flights */}
+      {(p.subtitle && rail !== "food") && (
+        <div className="flex items-baseline gap-1.5 mt-1">
+          <span className="text-[14px] font-semibold text-mac-ink">{p.subtitle}</span>
+          {rail === "deals" && p.was && <span className="text-[11.5px] text-mac-ink3 line-through">{p.was}</span>}
+        </div>
+      )}
+      {p.why && (
+        <div className="flex items-start gap-1 mt-2">
+          <Sparkles size={11} strokeWidth={2} className="text-mac-accentHi shrink-0 mt-0.5" />
+          <p className="text-[12px] text-mac-ink2 leading-snug line-clamp-2">{p.why}</p>
+        </div>
+      )}
+      <div className="mt-auto pt-3">
+        <a href={p.link || "#"} target="_blank" rel="noreferrer"
+          className="h-8 w-full px-3 rounded-[9px] text-[12px] font-medium inline-flex items-center justify-center gap-1.5 bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">
+          {action} <ArrowUpRight size={13} strokeWidth={2.5} />
+        </a>
+      </div>
+    </div>
+  );
 }
 
 /* ───────────────────────────────────────── today */

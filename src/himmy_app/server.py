@@ -216,6 +216,13 @@ class DismissRequest(BaseModel):
     concepts: list[str] = []
 
 
+class DoFeedbackRequest(BaseModel):
+    kind: str           # "up" | "down"
+    key: str
+    rail: str = ""      # "food" | "deals" | "flights"
+    tags: list[str] = []
+
+
 def _advance_due(due: str | None, recur: str) -> str:
     """Next due date for a recurring task: advance from its due (or today) by the repeat interval."""
     import calendar
@@ -955,6 +962,24 @@ def create_app() -> FastAPI:
     @app.delete("/news/saved/{nid}")
     async def news_saved_remove(nid: str) -> dict[str, Any]:
         return saved_news.remove(nid)
+
+    # ---- "Do" hub: a smart Nepal concierge over flights / food / shopping ----------------
+    from himmy_app.do_concierge import DoConcierge
+
+    do = DoConcierge(cfg)
+
+    @app.get("/do")
+    async def do_board(force: bool = False) -> dict[str, Any]:
+        # Serves the warm cache instantly (free); regenerates + runs the one AI pass behind it.
+        return await do.board(force=force)
+
+    @app.post("/do/refresh")
+    async def do_refresh() -> dict[str, Any]:
+        return await do.board(force=True)
+
+    @app.post("/do/feedback")
+    async def do_feedback(body: DoFeedbackRequest) -> dict[str, Any]:
+        return do.feedback(body.kind, body.key, body.rail, body.tags)
 
     # ---- tasks: the SAME board Himmy reads/writes (himmy tasks pack, shared SQLite) -------
     # config.load_config() pinned HIMMY_TASKS_PATH to .scholar-desk/tasks.db, so the agent's
