@@ -4870,9 +4870,15 @@ function NotifRow({ n, busy, onRead, onRemove, onDecide }:
           <div className="text-[13px] text-mac-ink truncate">{n.title}</div>
           <div className="text-[11px] text-mac-ink3 mt-0.5 truncate">{n.routine_name} · {fmtAgo(n.created_at)}</div>
           {n.body && (
-            <div className={`text-[12px] text-mac-ink2 mt-1 whitespace-pre-wrap leading-relaxed ${open ? "" : "line-clamp-2"}`}>
-              {n.body}
-            </div>
+            open ? (
+              <div className="mt-1.5 text-[12px] text-mac-ink2">
+                <ChatMarkdown text={n.body} />
+              </div>
+            ) : (
+              <div className="text-[12px] text-mac-ink2 mt-1 leading-relaxed line-clamp-2">
+                {n.body.replace(/\*\*/g, "").replace(/^\s*[-*]\s+/gm, "")}
+              </div>
+            )
           )}
         </div>
         <button onClick={onRemove} title="Dismiss"
