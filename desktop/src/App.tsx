@@ -17,6 +17,7 @@ import {
   type NewsArticle, type SavedArticle, type ArticleContent, type NewsFolder, type NewsHighlight, type RecPaper,
   type Task, type ChatSession, type ResearchResult, type Pending,
   type GoogleStatus, type MailMessage, type MailFull, type CalendarEvent, type Usage, type UsageTotals,
+  type ModelProvider,
   type Routine, type RoutineSchedule, type NotificationItem, type ReadingStats,
   type RecThread, type TaskExtras, type Subtask,
   type UserProfile, type ProfileLayer,
@@ -1553,6 +1554,12 @@ function LearnedList({ label, items }: { label: string; items: string[] }) {
   );
 }
 
+/* The "vault" — labeled facts Himmy uses when acting for you (booking, drafting, planning). */
+const VAULT_FIELDS = [
+  "Home airport", "Preferred airline", "Seat preference", "Budget ceiling",
+  "Home address", "Dietary needs", "Loyalty numbers", "Spend limit per action",
+];
+
 function ProfileSettings() {
   const [prof, setProf] = useState<UserProfile | null>(null);
   const [saving, setSaving] = useState(false);
@@ -1566,6 +1573,11 @@ function ProfileSettings() {
 
   const u = prof.user;
   const setU = (patch: Partial<ProfileLayer>) => setProf({ ...prof, user: { ...prof.user, ...patch } });
+  const setDetail = (k: string, v: string) => {
+    const details = { ...(u.details || {}) };
+    if (v.trim()) details[k] = v; else delete details[k];
+    setU({ details });
+  };
 
   const save = async () => {
     setSaving(true); setSaved(false);
@@ -1607,6 +1619,24 @@ function ProfileSettings() {
       <ChipList label="Key people" items={u.people} onChange={(v) => setU({ people: v })} placeholder="add a name…" />
       <ChipList label="Topics you care about" items={u.topics} onChange={(v) => setU({ topics: v })} placeholder="add a topic…" />
       <ChipList label="How Himmy should help" items={u.preferences} onChange={(v) => setU({ preferences: v })} placeholder="add a preference…" />
+
+      {/* the vault — details Himmy uses to ACT for you (book, draft, plan) without re-asking */}
+      <div>
+        <span className="block text-[10.5px] uppercase tracking-wide text-mac-ink3 mb-2">Your details (for booking &amp; actions)</span>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-2.5">
+          {VAULT_FIELDS.map((f) => (
+            <label key={f} className="block">
+              <span className="block text-[10.5px] text-mac-ink3 mb-1">{f}</span>
+              <input value={u.details?.[f] || ""} onChange={(e) => setDetail(f, e.target.value)}
+                placeholder="—"
+                className="w-full h-8 rounded-lg bg-mac-fill border border-mac-stroke px-2.5 text-[12.5px] text-mac-ink outline-none focus:border-mac-accent placeholder:text-mac-ink3" />
+            </label>
+          ))}
+        </div>
+        <p className="text-[11px] text-mac-ink3 leading-snug mt-2">
+          Himmy uses these when it acts for you — so "book me a flight" already knows your airport, airline, and budget.
+        </p>
+      </div>
 
       <div className="flex items-center gap-2">
         <button onClick={save} disabled={saving}
@@ -1693,16 +1723,95 @@ function ConnectionsSection({ g }: { g: ReturnType<typeof useGoogle> }) {
   );
 }
 
-function PreferencesSection({ health, dir, onReveal }: { health: Health | null; dir: string; onReveal: () => void }) {
+function Pill({ tone, children }: { tone: "green" | "orange" | "neutral"; children: React.ReactNode }) {
+  const cls = tone === "green" ? "bg-mac-green/15 text-mac-green"
+    : tone === "orange" ? "bg-mac-orange/15 text-mac-orange" : "bg-mac-fillHi text-mac-ink3";
+  return <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${cls}`}>{children}</span>;
+}
+
+function PreferencesSection({ dir, onReveal }: { dir: string; onReveal: () => void }) {
+  const [providers, setProviders] = useState<ModelProvider[] | null>(null);
+  const [current, setCurrent] = useState<{ provider: string; model: string | null } | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const load = () => api.models.list().then((r) => { setProviders(r.providers); setCurrent(r.current); }).catch(() => {});
+  useEffect(() => { load(); }, []);
+
+  const pick = async (provider: string, model: string, baseUrl?: string | null) => {
+    setBusy(`${provider}:${model}`);
+    try {
+      const r = await api.models.set(provider, model, baseUrl);
+      if (r.ok && r.current) { setCurrent(r.current); emitRefresh("tasks"); }
+    } finally { setBusy(null); }
+  };
+
   return (
-    <div className="space-y-4">
-      <SectionHeader title="Preferences" sub="How Himmy runs on this Mac." />
-      <SettingRow title="Model" sub="The AI model Himmy uses for chat, summaries, and actions.">
-        <span className="text-[12px] text-mac-ink2 font-mono">{health?.model || "—"}</span>
-      </SettingRow>
-      <SettingRow title="Provider" sub="Where Himmy sends its requests.">
-        <span className="text-[12px] text-mac-ink2 font-mono">{health?.provider || "—"}</span>
-      </SettingRow>
+    <div className="space-y-5">
+      <SectionHeader title="Preferences" sub="The AI model Himmy runs on, and where your data lives." />
+
+      <div>
+        <div className="flex items-center justify-between mb-2.5">
+          <span className="text-[11px] uppercase tracking-[0.06em] font-semibold text-mac-ink3">Model</span>
+          {current && <span className="text-[11px] font-mono text-mac-ink3 truncate max-w-[16rem]">now · {current.model || current.provider}</span>}
+        </div>
+
+        {providers === null ? (
+          <div className="h-20 grid place-items-center rounded-xl border border-mac-stroke"><Loader2 size={15} className="animate-spin text-mac-ink3" /></div>
+        ) : (
+          <div className="rounded-xl border border-mac-stroke overflow-hidden">
+            {providers.map((p, gi) => (
+              <div key={p.id}>
+                <div className={`flex items-center justify-between gap-2 px-3 h-8 bg-mac-fill ${gi > 0 ? "border-t border-mac-stroke" : ""} ${p.available ? "" : "opacity-60"}`}>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-[11px] font-semibold uppercase tracking-[0.04em] text-mac-ink2 truncate">{p.label}</span>
+                    <Pill tone={p.free ? "green" : "neutral"}>{p.free ? "Free" : "Paid"}</Pill>
+                    {!p.tools && <Pill tone="orange">chat-only</Pill>}
+                  </div>
+                  {!p.available && <span className="text-[10.5px] text-mac-ink3 shrink-0 truncate">{p.status}</span>}
+                </div>
+                {p.available ? (
+                  p.models.length === 0 ? (
+                    <div className="px-3 py-2.5 border-t border-mac-stroke text-[12px] text-mac-ink3">No models installed yet.</div>
+                  ) : (
+                    p.models.map((m) => {
+                      const active = current?.provider === p.id && current?.model === m.id;
+                      const loading = busy === `${p.id}:${m.id}`;
+                      return (
+                        <button key={m.id} onClick={() => pick(p.id, m.id, m.base_url)} disabled={loading || active}
+                          className={`group w-full flex items-center justify-between gap-3 px-3 h-10 border-t border-mac-stroke text-left transition-colors ${
+                            active ? "bg-mac-accentDim" : "hover:bg-mac-fillHi"}`}>
+                          <span className="flex items-center gap-2.5 min-w-0">
+                            <span className={`h-4 w-4 rounded-full grid place-items-center shrink-0 transition-colors ${
+                              active ? "bg-mac-accent" : "border border-mac-stroke group-hover:border-mac-strokeHi"}`}>
+                              {active ? <Check size={10} className="text-white" /> : loading ? <Loader2 size={9} className="animate-spin text-mac-ink3" /> : null}
+                            </span>
+                            <span className={`text-[12.5px] truncate ${active ? "text-mac-ink font-medium" : "text-mac-ink2"}`}>{m.id}</span>
+                          </span>
+                          <span className="text-[10.5px] font-mono text-mac-ink3 shrink-0">{m.cost}</span>
+                        </button>
+                      );
+                    })
+                  )
+                ) : (
+                  <div className="px-3 py-2.5 border-t border-mac-stroke text-[11.5px] text-mac-ink3 leading-relaxed">
+                    {p.id === "anthropic" ? "Add an Anthropic API key to enable Claude."
+                      : p.id === "ollama" ? "Run Ollama (ollama serve) and pull a model to use it."
+                      : p.id === "openai-compatible" ? "Start the HimalayaGPT gemma4 server on :8400."
+                      : p.status}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        <p className="text-[11px] text-mac-ink3 leading-relaxed mt-3">
+          Cost is tracked live in Today → Usage, so the meter always matches what's running. Local & on-device models
+          are free; API models are billed per token. Himmy's tools (mail, tasks, search) work best with a tool-calling
+          model — OpenRouter or the Claude API.
+        </p>
+      </div>
+
+      <div className="h-px bg-mac-stroke" />
       <SettingRow title="Data folder" sub="Everything you create lives here on this Mac. Keep it in iCloud Drive or Dropbox to use Himmy on another computer.">
         <button onClick={onReveal}
           className="h-8 px-3.5 rounded-[9px] bg-mac-fill border border-mac-stroke text-[12.5px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors flex items-center gap-1.5">
@@ -1743,10 +1852,8 @@ function AccountPanel({ onClose }: { onClose: () => void }) {
   const [dir, setDir] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
-  const [health, setHealth] = useState<Health | null>(null);
   const g = useGoogle();
   useEffect(() => { api.dataDir().then((r) => setDir(r.path)).catch(() => {}); }, []);
-  useEffect(() => { api.health().then(setHealth).catch(() => {}); }, []);
 
   const backup = async () => {
     setBusy("backup"); setMsg(null);
@@ -1788,7 +1895,7 @@ function AccountPanel({ onClose }: { onClose: () => void }) {
           <div className="flex-1 min-h-0 overflow-auto p-5">
             {tab === "you" && <ProfileSettings />}
             {tab === "connections" && <ConnectionsSection g={g} />}
-            {tab === "preferences" && <PreferencesSection health={health} dir={dir} onReveal={reveal} />}
+            {tab === "preferences" && <PreferencesSection dir={dir} onReveal={reveal} />}
             {tab === "plan" && <PlanSection />}
             {tab === "backup" && (
               <div className="space-y-4">

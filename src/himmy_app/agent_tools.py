@@ -25,7 +25,10 @@ from himmy_app.connectors import PapersRagConnector
 #: gcal_events) — registering the pack also exposes gmail_send/gcal_create, but the agent
 #: spec's tools allowlist only admits the two READ-ONLY ones (no HITL layer is built yet).
 #: When no Google account is connected the tools return a friendly hint, never crash.
-_BUILTIN_PACKS = ["utils", "web", "tasks", "google"]
+#: ``data-sources`` is himmy's KEYLESS public-data pack — ``weather``, ``geocode``,
+#: ``wikipedia`` — so Himmy can check the forecast, locate a place, and look up quick facts
+#: with no API key.
+_BUILTIN_PACKS = ["utils", "web", "data-sources", "tasks", "google"]
 
 
 def register(registry: ToolRegistry) -> list[str]:

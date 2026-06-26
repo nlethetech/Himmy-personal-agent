@@ -7,6 +7,11 @@ export type Health = {
   provider: string;
   model: string | null;
 };
+export type ModelOption = { id: string; label: string; cost: string; base_url?: string | null };
+export type ModelProvider = {
+  id: string; label: string; available: boolean; status: string;
+  tools: boolean; free: boolean; models: ModelOption[];
+};
 
 export type AskResult = { ok: boolean; reply: string; tools: string[] };
 
@@ -160,6 +165,7 @@ export type RecResult = {
 // "What Himmy knows about you" — a user-authored layer + a layer Himmy learns from activity.
 export type ProfileLayer = {
   about: string; projects: string[]; people: string[]; topics: string[]; preferences: string[];
+  details: Record<string, string>;
 };
 export type UserProfile = { user: ProfileLayer; learned: ProfileLayer; learned_at: number };
 
@@ -421,6 +427,11 @@ export const api = {
   restore: (path: string) =>
     jpost<{ ok: boolean; restored?: number; message?: string }>("/restore", { path }),
   dataDir: () => jget<{ ok: boolean; path: string }>("/datadir"),
+  models: {
+    list: () => jget<{ ok: boolean; current: { provider: string; model: string | null }; providers: ModelProvider[] }>("/models"),
+    set: (provider: string, model: string | null, base_url?: string | null) =>
+      jput<{ ok: boolean; current?: { provider: string; model: string | null }; message?: string }>("/models", { provider, model, base_url: base_url ?? null }),
+  },
   news: {
     interests: () => jget<{ ok: boolean; interests: string[] }>("/news/interests"),
     setInterests: (interests: string[]) =>

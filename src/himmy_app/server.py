@@ -115,6 +115,8 @@ class ProfileUpdate(BaseModel):
     people: list[str] = []
     topics: list[str] = []
     preferences: list[str] = []
+    # The vault: label→value facts Himmy uses when acting (home airport, budget, address, …).
+    details: dict[str, str] = {}
 
 
 def _compose_prompt(message: str, context: str | None) -> str:
@@ -188,6 +190,12 @@ class NewsNoteRequest(BaseModel):
 class NewsSummaryRequest(BaseModel):
     url: str
     summary: str = ""
+
+
+class ModelSetRequest(BaseModel):
+    provider: str
+    model: str | None = None
+    base_url: str | None = None
 
 
 class NewsHighlightRequest(BaseModel):
@@ -469,6 +477,15 @@ def create_app() -> FastAPI:
     _load_dotenv(_ENV)
     cfg = load_config()
 
+    # A turn must not hang forever when a (usually local) model stalls. /ask gets an overall cap;
+    # /ask/stream gets an IDLE cap (resets on each token, so a slow-but-working stream is fine).
+    _turn_timeout = float(os.environ.get("HIMMY_APP_TURN_TIMEOUT") or "120")
+    _stream_idle = float(os.environ.get("HIMMY_APP_STREAM_IDLE") or "45")
+    _slow_model_msg = (
+        "The model didn't respond in time — a local model may be slow or stalled. "
+        "Switch to a faster one in Account → Preferences (OpenRouter is quickest)."
+    )
+
     from himmy_app import routines as routines_mod
 
     @asynccontextmanager
@@ -543,8 +560,9 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        # Himmy owns its library now — no Zotero dependency.
-        return {"ok": True, "provider": cfg.provider, "model": cfg.model}
+        # Read fresh so it reflects a model switched in Account → Preferences (per-request config).
+        live = load_config()
+        return {"ok": True, "provider": live.provider, "model": live.model}
 
     @app.post("/ask")
     async def ask(body: AskRequest) -> dict[str, Any]:
@@ -553,7 +571,9 @@ def create_app() -> FastAPI:
             return {"ok": False, "reply": "Ask me something.", "tools": []}
         prompt = _compose_prompt(message, body.context)
         try:
-            r = await ask_turn(prompt, session_id=body.session_id)
+            r = await asyncio.wait_for(ask_turn(prompt, session_id=body.session_id), timeout=_turn_timeout)
+        except (asyncio.TimeoutError, TimeoutError):
+            return {"ok": True, "reply": _slow_model_msg, "tools": []}
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "reply": f"Error: {type(exc).__name__}: {exc}", "tools": []}
         return {"ok": True, **r}
@@ -585,13 +605,29 @@ def create_app() -> FastAPI:
                 ) + "\n\n"
                 return
             prompt = _compose_prompt(message, body.context)
+            ait = answer_stream(prompt, session_id=body.session_id).__aiter__()
             try:
-                async for ev in answer_stream(prompt, session_id=body.session_id):
+                while True:
+                    try:
+                        ev = await asyncio.wait_for(ait.__anext__(), timeout=_stream_idle)
+                    except StopAsyncIteration:
+                        break
+                    except (asyncio.TimeoutError, TimeoutError):
+                        # No token for _stream_idle seconds → the model has stalled. Fail gracefully.
+                        yield "data: " + json.dumps(
+                            {"type": "done", "reply": _slow_model_msg, "tools": []}
+                        ) + "\n\n"
+                        return
                     yield "data: " + json.dumps(ev) + "\n\n"
             except Exception as exc:  # noqa: BLE001
                 yield "data: " + json.dumps(
                     {"type": "error", "message": f"{type(exc).__name__}: {exc}"}
                 ) + "\n\n"
+            finally:
+                try:
+                    await ait.aclose()
+                except Exception:  # noqa: BLE001 - best-effort cleanup of a stalled stream
+                    pass
 
         return StreamingResponse(
             _gen(),
@@ -1545,10 +1581,112 @@ p{{font-size:14px;line-height:1.5;color:#aeaeb2;margin:0}}
 
         return {
             "ok": True,
-            "model": cfg.model,
+            "model": load_config().model,   # the live model, so the meter matches what's running
             "session": _pack(session),
             "lifetime": _pack(lifetime),
         }
+
+    # ---- model picker: switch provider/model (Account → Preferences) -----------------------
+    # REUSES himmy's own provider detection + pricing — nothing reinvented here.
+    @app.get("/models")
+    async def models_catalog() -> dict[str, Any]:
+        live = load_config()
+        configured: dict[str, Any] = {}
+        try:
+            from himmy.api.routers import studio_models as _sm
+            det = await _sm.providers()
+            configured = {p.name: p for p in det.providers}
+        except Exception:  # noqa: BLE001 - detection is best-effort
+            configured = {}
+
+        _price_for = None
+        _cost_label_fn = None
+        free_set: set[str] = {"ollama", "claude-cli", "stub"}
+        try:
+            from himmy.cli.model_picker import _FREE_PROVIDERS, _cost_label
+            from himmy.services.inference.pricing import price_for
+            _price_for, _cost_label_fn, free_set = price_for, _cost_label, set(_FREE_PROVIDERS)
+        except Exception:  # noqa: BLE001
+            pass
+
+        def _cost(provider: str, model: str) -> str:
+            if _cost_label_fn and _price_for:
+                try:
+                    return _cost_label_fn(provider, model, _price_for)
+                except Exception:  # noqa: BLE001
+                    return ""
+            return ""
+
+        ollama_models: list[str] = []
+        try:
+            from himmy.api.routers import studio_models as _sm2
+            tags = await _sm2._fetch_ollama_tags(_sm2._ollama_base_url())
+            ollama_models = [str(t.get("name")) for t in tags if t.get("name")]
+        except Exception:  # noqa: BLE001
+            ollama_models = []
+
+        curated = {
+            "openrouter": ["google/gemini-2.5-flash", "google/gemini-2.5-pro",
+                           "openai/gpt-4o-mini", "openai/gpt-4o", "anthropic/claude-sonnet-4"],
+            "anthropic": ["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-8"],
+            "claude-cli": ["haiku", "sonnet", "opus"],
+        }
+
+        def _entry(pid: str, label: str, tools: bool, models: list[str]) -> dict[str, Any]:
+            info = configured.get(pid)
+            return {
+                "id": pid, "label": label,
+                "available": bool(getattr(info, "configured", False)),
+                "status": getattr(info, "status", "not detected") if info else "not detected",
+                "tools": tools, "free": pid in free_set,
+                "models": [{"id": m, "label": m, "cost": _cost(pid, m), "base_url": None} for m in models],
+            }
+
+        # HimalayaGPT (Gemma 4) — your own model, served by the local OpenAI-compatible
+        # gemma4 shim (default :8400), reached via himmy's "openai-compatible" provider.
+        himalaya_base = (os.environ.get("HIMMY_OPENAI_COMPAT_BASE_URL") or "http://127.0.0.1:8400/v1").strip()
+        himalaya_up = False
+        try:
+            import httpx as _httpx
+            himalaya_up = _httpx.get(himalaya_base.rstrip("/") + "/models", timeout=1.5).status_code == 200
+        except Exception:  # noqa: BLE001
+            himalaya_up = False
+        himalaya = {
+            "id": "openai-compatible", "label": "HimalayaGPT (Gemma 4)",
+            "available": himalaya_up, "tools": True, "free": True,
+            "status": "running" if himalaya_up else "server not running — start the gemma4 shim on :8400",
+            "models": [{"id": "himalaya-ai/himalaya-gemma-4-e2b-it", "label": "himalaya-gemma-4-e2b-it",
+                        "cost": "free · local", "base_url": himalaya_base}],
+        }
+
+        providers = [
+            _entry("openrouter", "OpenRouter", True, curated["openrouter"]),
+            _entry("anthropic", "Claude (API)", True, curated["anthropic"]),
+            himalaya,
+            _entry("claude-cli", "Claude (CLI)", False, curated["claude-cli"]),
+            _entry("ollama", "Local (Ollama)", False, ollama_models),
+        ]
+        return {"ok": True, "current": {"provider": live.provider, "model": live.model},
+                "providers": providers}
+
+    @app.put("/models")
+    async def models_set(body: ModelSetRequest) -> dict[str, Any]:
+        from himmy_app.config import set_active_model
+        if body.provider == "openai-compatible":
+            # self-hosted endpoint (e.g. HimalayaGPT) — needs a base_url; the picker only offers it when up.
+            ok_provider = bool(body.base_url)
+        else:
+            try:
+                from himmy.api.routers import studio_models as _sm
+                det = await _sm.providers()
+                ok_provider = any(p.name == body.provider and p.configured for p in det.providers)
+            except Exception:  # noqa: BLE001 - detection unavailable → trust the caller
+                ok_provider = True
+        if not ok_provider:
+            return {"ok": False, "message": f"{body.provider} isn't set up on this Mac yet."}
+        set_active_model(body.provider, body.model, body.base_url)
+        live = load_config()
+        return {"ok": True, "current": {"provider": live.provider, "model": live.model}}
 
     return app
 

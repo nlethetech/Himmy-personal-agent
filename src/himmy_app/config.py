@@ -7,6 +7,7 @@ actually fires our Zotero / RAG tools — the local claude-cli text protocol doe
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,6 +74,49 @@ class HimmyConfig:
         return f"{self.zotero_api_base.rstrip('/')}/{self.zotero_library.strip('/')}/collections"
 
 
+def _model_choice_path(data_dir: Path) -> Path:
+    return data_dir / "model.json"
+
+
+def read_model_choice(data_dir: Path) -> dict[str, str | None]:
+    """The provider+model (+ optional base_url for openai-compatible) the user picked, if any."""
+    try:
+        d = json.loads(_model_choice_path(data_dir).read_text(encoding="utf-8"))
+        prov = (str(d.get("provider") or "")).strip()
+        if prov:
+            return {"provider": prov, "model": (str(d.get("model") or "")).strip() or None,
+                    "base_url": (str(d.get("base_url") or "")).strip() or None}
+    except Exception:  # noqa: BLE001 - missing/corrupt file → no override
+        pass
+    return {}
+
+
+def set_active_model(provider: str, model: str | None, base_url: str | None = None) -> dict[str, str | None]:
+    """Persist the chosen inference provider+model so load_config (per request) picks it up.
+
+    ``base_url`` is for self-hosted ``openai-compatible`` endpoints (e.g. the local
+    HimalayaGPT Gemma-4 server) — load_config exports it to HIMMY_OPENAI_COMPAT_BASE_URL.
+    """
+    data_dir = Path(os.environ.get("HIMMY_APP_DATA_DIR") or str(DEFAULT_DATA_DIR)).expanduser()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    choice: dict[str, str | None] = {
+        "provider": (provider or "").strip(),
+        "model": (model or "").strip() or None,
+        "base_url": (base_url or "").strip() or None,
+    }
+    _model_choice_path(data_dir).write_text(json.dumps(choice), encoding="utf-8")
+    return choice
+
+
+def clear_active_model() -> None:
+    """Forget the app-chosen model → revert to the env/default provider + model."""
+    data_dir = Path(os.environ.get("HIMMY_APP_DATA_DIR") or str(DEFAULT_DATA_DIR)).expanduser()
+    try:
+        _model_choice_path(data_dir).unlink()
+    except FileNotFoundError:
+        pass
+
+
 def load_config() -> HimmyConfig:
     """Build :class:`HimmyConfig` from the environment and export himmy's durable paths."""
     data_dir = Path(os.environ.get("HIMMY_APP_DATA_DIR") or str(DEFAULT_DATA_DIR)).expanduser()
@@ -81,6 +125,18 @@ def load_config() -> HimmyConfig:
     provider = (os.environ.get("HIMMY_APP_PROVIDER") or DEFAULT_PROVIDER).strip()
     model = (os.environ.get("HIMMY_APP_MODEL") or DEFAULT_MODEL).strip() or None
     max_turns = int(os.environ.get("HIMMY_APP_MAX_TURNS") or "8")
+
+    # A model chosen in the app (Account → Preferences) overrides the env default — read per
+    # request, so a switch takes effect on the next message with no restart.
+    _picked = read_model_choice(data_dir)
+    if _picked.get("provider"):
+        provider = str(_picked["provider"])
+        model = _picked.get("model")
+        # Self-hosted openai-compatible endpoints (e.g. the local HimalayaGPT Gemma-4 server)
+        # need their base_url — and a (possibly dummy) key — exported for the provider to attach.
+        if _picked.get("base_url"):
+            os.environ["HIMMY_OPENAI_COMPAT_BASE_URL"] = str(_picked["base_url"])
+            os.environ.setdefault("HIMMY_OPENAI_COMPAT_API_KEY", "local")
 
     zotero_api_base = (os.environ.get("ZOTERO_API_BASE") or DEFAULT_ZOTERO_API_BASE).strip()
     zotero_library = (os.environ.get("ZOTERO_LIBRARY") or DEFAULT_ZOTERO_LIBRARY).strip()
@@ -126,6 +182,9 @@ def load_config() -> HimmyConfig:
 __all__ = [
     "HimmyConfig",
     "load_config",
+    "read_model_choice",
+    "set_active_model",
+    "clear_active_model",
     "DEFAULT_PROVIDER",
     "DEFAULT_MODEL",
     "DEFAULT_DATA_DIR",

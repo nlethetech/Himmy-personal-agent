@@ -30,10 +30,11 @@ _LIST_SECTIONS = ("projects", "people", "topics", "preferences")
 _MAX_ITEMS = 12            # cap list length per section (keeps the injected block small)
 _MAX_ABOUT_CHARS = 600
 _MAX_BLOCK_CHARS = 1800    # hard cap on the prompt block we inject every turn
+_MAX_DETAILS = 24          # cap the label→value "vault" (home airport, budget, …)
 
 
 def _empty_layer() -> dict[str, Any]:
-    return {"about": "", "projects": [], "people": [], "topics": [], "preferences": []}
+    return {"about": "", "projects": [], "people": [], "topics": [], "preferences": [], "details": {}}
 
 
 def _clean_layer(src: dict[str, Any] | None) -> dict[str, Any]:
@@ -51,6 +52,16 @@ def _clean_layer(src: dict[str, Any] | None) -> dict[str, Any]:
                 seen.add(key)
                 out.append(x)
         layer[k] = out[:_MAX_ITEMS]
+    # details: a small label→value vault Himmy uses when ACTING for the user (home airport,
+    # preferred airline, budget, home address, dietary, loyalty #, spend limit, …).
+    details: dict[str, str] = {}
+    raw = src.get("details")
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            kk, vv = str(k).strip()[:60], str(v).strip()[:200]
+            if kk and vv:
+                details[kk] = vv
+    layer["details"] = dict(list(details.items())[:_MAX_DETAILS])
     return layer
 
 
@@ -105,6 +116,7 @@ def _merge_layers(prof: dict[str, Any]) -> dict[str, Any]:
                     seen.add(key)
                     items.append(x)
         out[k] = items[:_MAX_ITEMS]
+    out["details"] = {**(l.get("details") or {}), **(u.get("details") or {})}  # user vault wins
     return out
 
 
@@ -123,6 +135,12 @@ def render_for_prompt(prof: dict[str, Any] | None = None, cfg: HimmyConfig | Non
     ):
         if m[k]:
             lines.append(f"{label}: " + "; ".join(m[k]))
+    if m.get("details"):
+        det = "; ".join(f"{k}: {v}" for k, v in m["details"].items())
+        lines.append(
+            "Their details (use these when acting on their behalf — booking, drafting, planning — "
+            "so you never have to re-ask): " + det
+        )
     if not lines:
         return ""
     block = (
