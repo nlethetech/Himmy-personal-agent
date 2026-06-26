@@ -111,6 +111,8 @@ class ReadingPosition(BaseModel):
 class ProfileUpdate(BaseModel):
     # The user-authored layer of the "what Himmy knows about you" profile (edited in Settings).
     about: str = ""
+    # How they write — Himmy matches this voice when drafting mail/messages on their behalf.
+    voice: str = ""
     projects: list[str] = []
     people: list[str] = []
     topics: list[str] = []
@@ -518,8 +520,10 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> Any:
-        # Seed the built-in Daily Briefing (idempotent), then start the in-process scheduler
-        # so saved automations fire while the backend runs. Stop it cleanly on shutdown.
+        # Seed the built-in Morning Brief (idempotent) — the rich daily brief, scheduled 07:00
+        # HIMMY_TZ and enabled by default so it pushes to the bell before the user opens the app —
+        # then start the in-process scheduler so saved automations fire while the backend runs.
+        # Stop it cleanly on shutdown.
         try:
             routines_mod.seed_default_routines()
         except Exception:  # noqa: BLE001 - a seed hiccup must never block startup
@@ -557,15 +561,51 @@ def create_app() -> FastAPI:
                 first = False
                 await asyncio.sleep(_REFRESH_SECS)
 
+        # Quietly deepen Himmy's model of YOU: every ~6h, if the learned layer is stale and there's
+        # fresh signal, distill people/projects/voice from real activity. maybe_auto_learn gates the
+        # actual model call to at most once a day; this loop is wrapped so a flaky call can NEVER
+        # crash the server (it mirrors _warm_recs / _refresh_news).
+        async def _auto_learn() -> None:
+            from himmy_app import user_profile
+
+            while True:
+                try:
+                    await user_profile.maybe_auto_learn(cfg)
+                except Exception:  # noqa: BLE001 - learning must never crash the server
+                    pass
+                await asyncio.sleep(6 * 3600)
+
+        # Smart Nudges: deterministically scan tasks/calendar/mail every few hours and drop
+        # deduped "needs you" notifications into the same bell. Mirrors _warm_recs — an initial
+        # pass shortly after startup, then on an interval, wrapped so a bad pass never kills the
+        # loop. It lives here (not as a himmy Routine) because it's deterministic and must NOT run
+        # through ask_turn / HITL (no model budget, no chat history).
+        async def _nudge_loop() -> None:
+            from himmy_app import nudges
+
+            await asyncio.sleep(20)  # let first-run indexing/Google settle before the first scan
+            while True:
+                try:
+                    await nudges.generate(cfg)
+                except Exception:  # noqa: BLE001 - a bad nudge pass must never crash the server
+                    pass
+                await asyncio.sleep(nudges.NUDGE_INTERVAL_S)
+
         warm_task = asyncio.create_task(_warm_recs())
         news_task = asyncio.create_task(_refresh_news())
+        learn_task = asyncio.create_task(_auto_learn())
+        nudge_task = asyncio.create_task(_nudge_loop())
         try:
             yield
         finally:
             warm_task.cancel()
             news_task.cancel()
+            learn_task.cancel()
+            nudge_task.cancel()
             # Await the cancelled tasks so in-flight I/O unwinds before we stop the scheduler.
-            await asyncio.gather(warm_task, news_task, return_exceptions=True)
+            await asyncio.gather(
+                warm_task, news_task, learn_task, nudge_task, return_exceptions=True
+            )
             await routines_mod.get_scheduler().stop()
 
     app = FastAPI(title="Himmy", version="0.1.0", lifespan=_lifespan)
@@ -1221,6 +1261,26 @@ def create_app() -> FastAPI:
     @app.delete("/notifications/{nid}")
     async def notifications_delete(nid: str) -> dict[str, Any]:
         return {"ok": routines_mod.get_inbox().delete(nid)}
+
+    # ---- nudges: deterministic "needs you" notifications (tasks/calendar/mail) --------------
+    # They land in the SAME inbox the bell reads (kind=='nudge'), so /notifications, read,
+    # read-all and delete all work on them unchanged. These two endpoints are for inspection
+    # and a manual "Check now" trigger.
+    @app.get("/nudges")
+    async def nudges_list(limit: int = 50) -> dict[str, Any]:
+        from himmy_app import nudges
+
+        return {
+            "ok": True,
+            "nudges": nudges.list_nudges(limit),
+            "unread": routines_mod.get_inbox().unread_count(),
+        }
+
+    @app.post("/nudges/run")
+    async def nudges_run() -> dict[str, Any]:
+        from himmy_app import nudges
+
+        return await nudges.generate(cfg)
 
     # ---- Google: read-only Mail + Calendar (himmy studio_google, OAuth2 loopback) --------
     # Sign-in flow: the UI opens /google/auth-url in the system browser; Google redirects

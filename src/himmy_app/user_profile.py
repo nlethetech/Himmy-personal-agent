@@ -29,18 +29,24 @@ from himmy_app.config import HimmyConfig, load_config
 _LIST_SECTIONS = ("projects", "people", "topics", "preferences")
 _MAX_ITEMS = 12            # cap list length per section (keeps the injected block small)
 _MAX_ABOUT_CHARS = 600
+_MAX_VOICE_CHARS = 400     # the "how they write" one-liner Himmy matches when drafting for them
 _MAX_BLOCK_CHARS = 1800    # hard cap on the prompt block we inject every turn
 _MAX_DETAILS = 24          # cap the label→value "vault" (home airport, budget, …)
 
+#: How fresh the learned layer must be before the background auto-learn re-runs (24h).
+LEARN_MIN_INTERVAL_S = 24 * 3600
+
 
 def _empty_layer() -> dict[str, Any]:
-    return {"about": "", "projects": [], "people": [], "topics": [], "preferences": [], "details": {}}
+    return {"about": "", "voice": "", "projects": [], "people": [], "topics": [],
+            "preferences": [], "details": {}}
 
 
 def _clean_layer(src: dict[str, Any] | None) -> dict[str, Any]:
     src = src or {}
     layer = _empty_layer()
     layer["about"] = (str(src.get("about") or "")).strip()[:_MAX_ABOUT_CHARS]
+    layer["voice"] = (str(src.get("voice") or "")).strip()[:_MAX_VOICE_CHARS]
     for k in _LIST_SECTIONS:
         items = [str(x).strip() for x in (src.get(k) or []) if str(x).strip()]
         # de-dup case-insensitively, preserve order
@@ -106,6 +112,7 @@ def _merge_layers(prof: dict[str, Any]) -> dict[str, Any]:
     u, l = prof.get("user", {}), prof.get("learned", {})
     out = _empty_layer()
     out["about"] = (u.get("about") or l.get("about") or "").strip()
+    out["voice"] = (u.get("voice") or l.get("voice") or "").strip()  # USER voice wins
     for k in _LIST_SECTIONS:
         seen: set[str] = set()
         items: list[str] = []
@@ -141,6 +148,11 @@ def render_for_prompt(prof: dict[str, Any] | None = None, cfg: HimmyConfig | Non
             "Their details (use these when acting on their behalf — booking, drafting, planning — "
             "so you never have to re-ask): " + det
         )
+    if m.get("voice"):
+        lines.append(
+            "How they write (match this voice when drafting mail or messages on their behalf): "
+            + m["voice"]
+        )
     if not lines:
         return ""
     block = (
@@ -151,12 +163,61 @@ def render_for_prompt(prof: dict[str, Any] | None = None, cfg: HimmyConfig | Non
 
 
 # ---- learning (distill the learned layer from real activity) ----------------------------
+#: Every source key gather_signals produces (so a partial collect still yields a full shape).
+_SIGNAL_KEYS = (
+    "papers", "tags", "notes", "tasks", "interests",
+    "correspondents", "task_notes", "chat_topics", "read_papers",
+)
+
+
+def _empty_signals() -> dict[str, list[str]]:
+    return {k: [] for k in _SIGNAL_KEYS}
+
+
+def _looks_human(addr: str) -> bool:
+    """Filter obvious non-human addresses (no-reply@, news@, deals@, …) so 'people' stays clean."""
+    a = (addr or "").strip().lower()
+    if not a or "@" not in a:
+        return False
+    local = a.split("@", 1)[0]
+    bad = ("no-reply", "noreply", "no_reply", "donotreply", "do-not-reply", "do_not_reply",
+           "notifications", "notification", "notify", "mailer-daemon", "postmaster", "bounce",
+           "support", "automated", "news", "newsletter", "info", "hello", "team", "updates",
+           "update", "marketing", "promo", "offers", "deals", "store", "shop", "account",
+           "accounts", "billing", "invoice", "receipt", "welcome", "alert", "digest", "members",
+           "membership", "rewards", "orders", "service", "feedback", "survey", "care", "customer",
+           "sales", "contact", "help")
+    return not any(b in local for b in bad)
+
+
+#: Display-name / domain hints that mark a sender as a brand/newsletter rather than a person.
+_BRAND_NAME_WORDS = ("deals", "team", "newsletter", "updates", "store", "shop", "offers", "rewards",
+                     "no-reply", "noreply", "notifications", "support", "sales", "alerts", "digest",
+                     "official", " inc", " llc", " ltd", "the ")
+_BRAND_DOMAINS = ("tiktok", "walmart", "amazon", "facebookmail", "meta.com", "instagram", "linkedin",
+                  "twitter", "netflix", "spotify", "uber", "paypal", "ebay", "aliexpress", "daraz",
+                  "booking.", "expedia", "mailchimp", "substack", "medium.com", "quora", "reddit",
+                  "youtube", "pinterest", "temu", "shein", "glassdoor", "indeed", "coursera")
+
+
+def _is_brandish(name: str, addr: str) -> bool:
+    """True if a sender looks like a company/newsletter (not a real individual)."""
+    n = (name or "").strip().lower()
+    if any(w in n for w in _BRAND_NAME_WORDS):
+        return True
+    domain = addr.split("@", 1)[-1] if "@" in addr else ""
+    return any(b in domain for b in _BRAND_DOMAINS)
+
+
 def gather_signals(cfg: HimmyConfig | None = None) -> dict[str, list[str]]:
-    """Collect the high-signal traces of what the user actually works on. All best-effort."""
+    """Collect the high-signal traces of what the user actually works on. All best-effort.
+
+    Synchronous: covers library, tasks (+ their sidecar notes/paper links), typed interests,
+    recent chat topics, and the papers they've read most. The async-only signal — email
+    correspondents — is folded in by :func:`gather_signals_async`; here it stays empty.
+    """
     cfg = cfg or load_config()
-    sig: dict[str, list[str]] = {
-        "papers": [], "tags": [], "notes": [], "tasks": [], "interests": []
-    }
+    sig = _empty_signals()
 
     try:  # library: titles, the tags they apply, and the notes they write (high signal)
         from himmy_app.library import Library
@@ -186,6 +247,19 @@ def gather_signals(cfg: HimmyConfig | None = None) -> dict[str, list[str]]:
     except Exception:  # noqa: BLE001
         pass
 
+    try:  # task sidecars — the notes they jotted on a task + the paper a task is about
+        from himmy_app.tasks_extra import TaskExtrasStore
+
+        for extra in TaskExtrasStore(cfg).all().values():
+            note = (extra.get("notes") or "").strip()
+            if note:
+                sig["task_notes"].append(note[:300])
+            ptitle = (extra.get("paper_title") or "").strip()
+            if ptitle:
+                sig["task_notes"].append(f"(working on paper) {ptitle}")
+    except Exception:  # noqa: BLE001
+        pass
+
     try:  # typed news interests
         from himmy_app.news import NewsService
 
@@ -193,9 +267,82 @@ def gather_signals(cfg: HimmyConfig | None = None) -> dict[str, list[str]]:
     except Exception:  # noqa: BLE001
         pass
 
+    try:  # recent chat topics — only thread titles / the first user message (privacy + tokens)
+        from himmy_app import cli
+
+        store = cli.session_store()
+        for info in store.list_sessions(limit=12):
+            thread = store.load(info.session_id)
+            if thread is None:
+                continue
+            for msg in getattr(thread, "messages", []):
+                if str(getattr(getattr(msg, "role", ""), "value", getattr(msg, "role", ""))) == "user":
+                    text = (getattr(msg, "content", "") or "").strip()
+                    if text:
+                        sig["chat_topics"].append(text[:160])
+                    break  # first user message only
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:  # the papers they've actually READ the most (reading-time, not just saved)
+        from himmy_app.library import Library
+        from himmy_app.reading import ReadingStore
+
+        totals = ReadingStore(cfg).totals_by_item()  # item_id -> seconds
+        lib = Library(cfg)
+        for iid, secs in sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:10]:
+            if secs < 60:  # ignore drive-by opens
+                continue
+            it = lib.get(iid)
+            title = (it.get("title") or "").strip() if it else ""
+            if title:
+                sig["read_papers"].append(title)
+    except Exception:  # noqa: BLE001
+        pass
+
     # de-dup + cap each source so the prompt stays lean
     for k in sig:
         sig[k] = list(dict.fromkeys(sig[k]))[:40]
+    return sig
+
+
+async def gather_signals_async(cfg: HimmyConfig | None = None) -> dict[str, list[str]]:
+    """:func:`gather_signals` plus the async-only email-correspondent signal.
+
+    Email is gated by Settings → Permissions (we never touch the inbox if Email is Off) and by an
+    actually-connected Google account. Each step is its own fail-open island so a flaky inbox can
+    never break the learn step or the scheduler.
+    """
+    cfg = cfg or load_config()
+    sig = gather_signals(cfg)
+
+    try:  # email correspondents — who recurs in the inbox (humans only, frequency-ranked)
+        from himmy_app import permissions
+
+        if permissions.level_of("mail", cfg) != "off":
+            from himmy.api import studio_google as g
+
+            if g.status().connected:
+                from email.utils import parseaddr
+
+                tally: dict[str, int] = {}
+                names: dict[str, str] = {}
+                for m in await g.gmail_list(30):
+                    name, addr = parseaddr(getattr(m, "sender", "") or "")
+                    addr = (addr or "").strip().lower()
+                    if not _looks_human(addr) or _is_brandish(name, addr):
+                        continue
+                    tally[addr] = tally.get(addr, 0) + 1
+                    if name.strip() and addr not in names:
+                        names[addr] = name.strip()
+                for addr, _n in sorted(tally.items(), key=lambda kv: kv[1], reverse=True)[:12]:
+                    if tally[addr] < 2:  # prefer senders that recur (cut newsletter noise)
+                        continue
+                    sig["correspondents"].append(names.get(addr) or addr)
+    except Exception:  # noqa: BLE001
+        pass
+
+    sig["correspondents"] = list(dict.fromkeys(sig["correspondents"]))[:40]
     return sig
 
 
@@ -212,21 +359,31 @@ def _build_learn_prompt(prof: dict[str, Any], sig: dict[str, list[str]]) -> str:
         "and brief.\n\n"
         "=== EVIDENCE ===\n"
         f"Papers in their library:\n{_bul(sig['papers'])}\n\n"
+        f"Papers they've actually read the most (by reading time):\n{_bul(sig['read_papers'])}\n\n"
         f"Tags they apply:\n{_bul(sig['tags'])}\n\n"
         f"Notes they wrote on papers:\n{_bul(sig['notes'])}\n\n"
         f"Their open tasks:\n{_bul(sig['tasks'])}\n\n"
+        f"Notes / linked papers on their tasks:\n{_bul(sig['task_notes'])}\n\n"
+        f"People who recur in their email:\n{_bul(sig['correspondents'])}\n\n"
+        f"What they've recently asked Himmy about:\n{_bul(sig['chat_topics'])}\n\n"
         f"Topics they said they're interested in:\n{_bul(sig['interests'])}\n\n"
         "=== WHAT YOU PREVIOUSLY INFERRED (refine/keep what still holds, drop the stale) ===\n"
         f"{json.dumps(learned, ensure_ascii=False)}\n\n"
         "=== OUTPUT ===\n"
         "Return ONLY a JSON object with these keys:\n"
         '  "about": a 1-2 sentence summary of who they are and what they focus on,\n'
+        '  "voice": 1-2 sentences on HOW they write (tone, length, formality, sign-off) inferred '
+        "ONLY from their own first-person writing (their notes, chat messages); use \"\" if there "
+        "is no first-person writing to judge from,\n"
         '  "projects": up to 6 concrete projects / research threads they are working on,\n'
-        '  "people": up to 6 named collaborators / authors / contacts that recur (name them),\n'
+        '  "people": up to 6 REAL INDIVIDUAL people the user actually corresponds or collaborates '
+        'with (co-authors, colleagues, friends, family), each as "Name — relationship" (e.g. '
+        '"Asha Rai — co-author"). NEVER include companies, brands, stores, apps, newsletters, or '
+        "automated senders; if no real person is clearly evidenced, use [],\n"
         '  "topics": up to 8 subjects they care about,\n'
         '  "preferences": up to 4 inferred preferences for how to help them (omit if unclear).\n'
-        "Each list is an array of short strings. Use [] for a section with no evidence. "
-        "Output the JSON object and nothing else."
+        "Each list is an array of short strings. Use [] for a section with no evidence and \"\" for "
+        'an empty "voice". Output the JSON object and nothing else.'
     )
 
 
@@ -247,7 +404,7 @@ async def learn(cfg: HimmyConfig | None = None) -> dict[str, Any]:
     """Refresh the learned layer from current activity. Fail-open; returns the profile + status."""
     cfg = cfg or load_config()
     prof = load(cfg)
-    sig = gather_signals(cfg)
+    sig = await gather_signals_async(cfg)
     if not any(sig.values()):
         return {"ok": False, "profile": prof,
                 "message": "Not enough to go on yet — save a few papers, add tags or notes, "
@@ -281,4 +438,25 @@ async def learn(cfg: HimmyConfig | None = None) -> dict[str, Any]:
     return {"ok": True, "profile": prof}
 
 
-__all__ = ["load", "save_user_layer", "render_for_prompt", "gather_signals", "learn"]
+async def maybe_auto_learn(cfg: HimmyConfig | None = None) -> dict[str, Any]:
+    """Background-driver entry: refresh the learned layer only when it's stale AND there's signal.
+
+    Bounds cost — at most one model call per :data:`LEARN_MIN_INTERVAL_S` — and is fully fail-open
+    so a hiccup never disturbs the scheduler that calls it. Returns ``{ok, profile, ...}`` like
+    :func:`learn`, with ``skipped`` set when nothing was done.
+    """
+    cfg = cfg or load_config()
+    prof = load(cfg)
+    if time.time() - float(prof.get("learned_at") or 0.0) <= LEARN_MIN_INTERVAL_S:
+        return {"ok": False, "skipped": "fresh", "profile": prof}
+    try:
+        sig = await gather_signals_async(cfg)
+    except Exception:  # noqa: BLE001 - signal collection must never break the loop
+        sig = {}
+    if not any(sig.values()):
+        return {"ok": False, "skipped": "no_signal", "profile": prof}
+    return await learn(cfg)
+
+
+__all__ = ["load", "save_user_layer", "render_for_prompt", "gather_signals",
+           "gather_signals_async", "learn", "maybe_auto_learn"]

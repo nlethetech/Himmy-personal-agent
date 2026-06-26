@@ -96,7 +96,7 @@ class Inbox:
                 id            TEXT PRIMARY KEY,
                 routine_id    TEXT,
                 routine_name  TEXT NOT NULL,
-                kind          TEXT NOT NULL DEFAULT 'result',  -- result | approval | error
+                kind          TEXT NOT NULL DEFAULT 'result',  -- result | approval | error | nudge
                 title         TEXT NOT NULL,
                 body          TEXT NOT NULL DEFAULT '',
                 status        TEXT NOT NULL DEFAULT 'ok',
@@ -106,7 +106,19 @@ class Inbox:
             )
             """
         )
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Idempotent, pragma-guarded additive migrations (same pattern as the himmy tasks store).
+
+        Adds the nullable ``nudge_key`` column that Smart Nudges dedup on — a stable per-nudge key
+        that :meth:`add_nudge` checks before inserting. The column is additive (existing rows get
+        NULL) so add()/list()/unread_count() behaviour is unchanged.
+        """
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(inbox)").fetchall()}
+        if "nudge_key" not in cols:
+            self._conn.execute("ALTER TABLE inbox ADD COLUMN nudge_key TEXT")
 
     def add(
         self,
@@ -128,6 +140,45 @@ class Inbox:
         )
         self._conn.commit()
         return self.get(nid) or {}
+
+    def add_nudge(
+        self,
+        *,
+        key: str,
+        title: str,
+        body: str = "",
+        routine_name: str = "Himmy",
+    ) -> dict[str, Any] | None:
+        """Insert a deduped ``kind='nudge'`` row, keyed by the stable ``key``.
+
+        SELECT-before-INSERT: if a row with this ``nudge_key`` already exists we no-op and return
+        ``None`` (so :func:`himmy_app.nudges.generate` is idempotent — running it twice in the same
+        window adds nothing new). A bare ``ALTER ADD COLUMN`` gives no uniqueness, and a UNIQUE
+        index can't be added retroactively over existing NULLs, so the explicit lookup IS the
+        dedup. Otherwise inserts a fresh nudge row and returns it.
+        """
+        existing = self._conn.execute(
+            "SELECT 1 FROM inbox WHERE nudge_key = ?", (key,)
+        ).fetchone()
+        if existing is not None:
+            return None
+        nid = uuid.uuid4().hex
+        created = _iso(_now())
+        self._conn.execute(
+            "INSERT INTO inbox (id, routine_id, routine_name, kind, title, body, status,"
+            " checkpoint_id, created_at, read, nudge_key) VALUES (?,?,?,?,?,?,?,?,?,0,?)",
+            (nid, None, routine_name, "nudge", title, body, "ok", None, created, key),
+        )
+        self._conn.commit()
+        return self.get(nid) or {}
+
+    def list_by_kind(self, kind: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """The most recent rows of one ``kind`` (e.g. the nudge feed), newest first."""
+        rows = self._conn.execute(
+            "SELECT * FROM inbox WHERE kind = ? ORDER BY created_at DESC LIMIT ?",
+            (kind, limit),
+        ).fetchall()
+        return [self._row(r) for r in rows]
 
     def _row(self, r: sqlite3.Row) -> dict[str, Any]:
         return {
@@ -391,8 +442,29 @@ class AppScheduler:
         Returns ``(status, preview, error)`` for the routine row. Uses ``ask_turn`` (HITL on)
         so an approval-gated tool PARKS as a 'needs approval' inbox item instead of firing
         unattended — the scheduler never auto-approves.
+
+        The seeded Morning Brief is special-cased through :class:`~himmy_app.brief.DailyBrief` so
+        its 07:00 generation populates ``brief_cache.json`` — the Today card then serves that same
+        cache instantly (one brief per morning, no double generation). The rich brief is read-only
+        (its prompt forbids any send/mutate), so this path never needs HITL. A user who RENAMES the
+        routine in the UI drops cache-sharing and falls back to ask_turn(prompt) below — still
+        correct, just may generate twice that day.
         """
         from himmy_app.cli import ask_turn
+
+        if routine.name == _BRIEFING_NAME:
+            from himmy_app.brief import DailyBrief
+
+            text = (await DailyBrief(load_config()).get_or_make(force=False)).strip()
+            get_inbox().add(
+                routine_id=routine.id,
+                routine_name=routine.name,
+                kind="result",
+                title=routine.name,
+                body=text or "(no output)",
+                status="ok",
+            )
+            return "ok", text, None
 
         res = await ask_turn(routine.prompt)  # no session_id: routines don't pollute chat history
         if res.get("awaiting_approval"):
@@ -457,44 +529,51 @@ def get_scheduler() -> AppScheduler:
 
 
 # ---------------------------------------------------------------------------------------
-# Built-in seed: the flagship "Daily Briefing".
+# Built-in seed: the flagship "Morning Brief" — the rich daily brief, pushed at ~07:00.
 # ---------------------------------------------------------------------------------------
-#: A marker so we seed the briefing exactly once (idempotent across restarts).
-_BRIEFING_NAME = "Daily Briefing"
-_BRIEFING_PROMPT = (
-    "Give me a concise weekday morning briefing for today. You MUST actually CALL each of these "
-    "tools once before writing — calendar_find, list_tasks, ask_papers — and base each section "
-    "ONLY on what they return (never say 'I don't have access' for a tool you were given; call it). "
-    "Write it in this order, each a short bold-header section; skip a section only if its tool "
-    "genuinely returned nothing.\n"
-    "1. **Today** — what's on my calendar today (use calendar_find); say 'nothing scheduled' if empty.\n"
-    "2. **Tasks** — my open and overdue tasks (use list_tasks); flag anything overdue or due today.\n"
-    "3. **From your library** — one interesting connection or reminder drawn from my saved papers "
-    "(use ask_papers tied to my recent interests), with its Source line.\n"
-    "Keep the whole thing tight and skimmable. READ-ONLY: do NOT add/change calendar events, do NOT "
-    "send mail. If a tool returns nothing, say so plainly rather than guessing."
-)
+#: A marker so we seed the briefing exactly once (idempotent across restarts). Bumped from the
+#: old "Daily Briefing" so existing installs are UPGRADED to the enabled 07:00 rich push (the old
+#: disabled-weekday-thin row would otherwise survive its name match — see the migration below).
+_BRIEFING_NAME = "Morning Brief"
+#: The previous seed's name — migrated away (deleted) on first seed so two briefing routines
+#: never coexist. The thin _BRIEFING_PROMPT it used is gone; the rich prompt now lives in
+#: brief._BRIEF_PROMPT, shared word-for-word with the Today card.
+_OLD_BRIEFING_NAME = "Daily Briefing"
 
 
 def seed_default_routines() -> None:
-    """Create the built-in Daily Briefing once, disabled by default (the user opts in).
+    """Create the built-in Morning Brief once — the rich daily brief, daily 07:00, ENABLED.
 
-    Idempotent: if a routine named 'Daily Briefing' already exists we leave it untouched, so
-    the user's edits/enabled-state survive restarts.
+    This is the "morning push": the rich brief (brief._BRIEF_PROMPT — the exact content the Today
+    card shows) fires at 07:00 in HIMMY_TZ and lands in the inbox the bell reads, so it reaches the
+    user before they open the app. ``missed="coalesce"`` means a backend that boots after 07:00
+    still fires once that morning (the catch-up a push wants).
+
+    Idempotent + don't-clobber: if a Morning Brief already exists we leave it untouched, so the
+    user's edits/enabled-state survive restarts. One-time migration: an existing install's old
+    'Daily Briefing' row (disabled, weekday 06:30, thin prompt) is deleted so it doesn't linger
+    alongside the new push.
     """
+    from himmy_app.brief import _BRIEF_PROMPT  # the rich prompt, shared with the Today card
+
     store = get_routines_store()
     if any(r.name == _BRIEFING_NAME for r in store.list()):
         return
+    # One-time upgrade: drop the superseded 'Daily Briefing' seed if it's still around.
+    for r in store.list():
+        if r.name == _OLD_BRIEFING_NAME:
+            store.delete(r.id)
     cfg = load_config()
     store.upsert(
         Routine(
             name=_BRIEFING_NAME,
             agent_path=str(_SPEC),
-            prompt=_BRIEFING_PROMPT,
-            # Weekdays 06:30 in the configured timezone (HIMMY_TZ → Asia/Kathmandu).
-            schedule=Schedule(kind="cron", expr="30 6 * * 1-5", missed="coalesce"),
+            prompt=_BRIEF_PROMPT,
+            # Daily 07:00 in the configured timezone (HIMMY_TZ → Asia/Kathmandu); coalesce so a
+            # late boot still pushes once that morning.
+            schedule=Schedule(kind="cron", expr="0 7 * * *", missed="coalesce"),
             provider=cfg.provider,
             model=cfg.model,
-            enabled=False,  # opt-in: the user flips it on in the Routines panel
+            enabled=True,  # the morning push is on by default
         )
     )

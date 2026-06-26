@@ -56,6 +56,24 @@ class DailyBrief:
             return {"ok": True, "text": cached["text"], "generated_at": cached["iso"], "stale": True}
         return {"ok": True, "text": "", "generated_at": "", "stale": True, "generating": True}
 
+    async def get_or_make(self, *, force: bool = False) -> str:
+        """Return today's brief text, generating (and caching) it once if needed.
+
+        The morning-push routine calls this so its 07:00 generation POPULATES brief_cache.json —
+        the Today card then serves that same cache instantly, with no second generation that day
+        (one brief per morning). Unlike :meth:`get`, this awaits the generation inline (the
+        scheduler wants the finished text to drop into the inbox) and writes the cache so the two
+        surfaces share one call. A blank generation is not cached (so a hiccup retries next time).
+        """
+        cached = self._read()
+        today = datetime.date.today().isoformat()
+        if cached and cached.get("date") == today and not force:
+            return str(cached.get("text") or "")
+        text = await self._generate()
+        if text:
+            self._write(text)
+        return text
+
     async def _generate(self) -> str:
         from himmy_app.cli import ask_turn
 

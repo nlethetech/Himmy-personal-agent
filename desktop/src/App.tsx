@@ -2600,7 +2600,7 @@ function ProfileSettings() {
   };
 
   const l = prof.learned;
-  const learnedEmpty = !(l.about || l.projects.length || l.people.length || l.topics.length || l.preferences.length);
+  const learnedEmpty = !(l.about || l.voice || l.projects.length || l.people.length || l.topics.length || l.preferences.length);
   const ago = prof.learned_at ? fmtAgo(new Date(prof.learned_at * 1000).toISOString()) : null;
 
   return (
@@ -2619,6 +2619,13 @@ function ProfileSettings() {
         <textarea value={u.about} onChange={(e) => setU({ about: e.target.value })} rows={2}
           placeholder="e.g. I'm a founder researching agricultural economics and conflict; I prefer concise, specific answers."
           className="w-full resize-none rounded-lg bg-mac-fill border border-mac-stroke px-2.5 py-1.5 text-[13px] text-mac-ink outline-none focus:border-mac-accent placeholder:text-mac-ink3" />
+      </label>
+      <label className="block">
+        <span className="block text-[10.5px] uppercase tracking-wide text-mac-ink3 mb-1">How you write</span>
+        <textarea value={u.voice} onChange={(e) => setU({ voice: e.target.value })} rows={2}
+          placeholder="e.g. Concise and direct, lowercase, warm but to the point; I sign off with “thanks”."
+          className="w-full resize-none rounded-lg bg-mac-fill border border-mac-stroke px-2.5 py-1.5 text-[13px] text-mac-ink outline-none focus:border-mac-accent placeholder:text-mac-ink3" />
+        <span className="block text-[11px] text-mac-ink3 leading-snug mt-1">Himmy matches this voice when it drafts mail or messages for you.</span>
       </label>
       <ChipList label="Current projects" items={u.projects} onChange={(v) => setU({ projects: v })} placeholder="add a project…" />
       <ChipList label="Key people" items={u.people} onChange={(v) => setU({ people: v })} placeholder="add a name…" />
@@ -2668,6 +2675,7 @@ function ProfileSettings() {
         ) : (
           <div className="space-y-1.5">
             {l.about && <p className="text-[12px] text-mac-ink2 leading-snug">{l.about}</p>}
+            {l.voice && <p className="text-[11.5px] text-mac-ink3 leading-snug"><span className="text-mac-ink2">How you write:</span> {l.voice}</p>}
             <LearnedList label="Projects" items={l.projects} />
             <LearnedList label="People" items={l.people} />
             <LearnedList label="Topics" items={l.topics} />

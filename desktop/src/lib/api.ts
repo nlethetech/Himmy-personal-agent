@@ -228,7 +228,7 @@ export type DoTrip = {
 
 // "What Himmy knows about you" — a user-authored layer + a layer Himmy learns from activity.
 export type ProfileLayer = {
-  about: string; projects: string[]; people: string[]; topics: string[]; preferences: string[];
+  about: string; voice: string; projects: string[]; people: string[]; topics: string[]; preferences: string[];
   details: Record<string, string>;
 };
 export type UserProfile = { user: ProfileLayer; learned: ProfileLayer; learned_at: number };
