@@ -10,7 +10,7 @@ import {
   Gauge, Coins, Zap, CalendarClock, Bell, Play, Flag,
   Star, BellOff, Users, TrendingUp, Cpu, Sparkle,
   Info, StickyNote, Highlighter,
-  ShoppingBag, Plane, UtensilsCrossed, ThumbsDown,
+  ShoppingBag, Plane, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -22,7 +22,8 @@ import {
   type Routine, type RoutineSchedule, type NotificationItem, type ReadingStats,
   type RecThread, type TaskExtras, type Subtask,
   type UserProfile, type ProfileLayer,
-  type DoBoard, type DoPick,
+  type DoBoard, type DoPick, type DoRestaurant, type DoMenuItem,
+  type DoCartView, type DoCartAdd,
 } from "./lib/api";
 import { apa, mla, bibtex } from "./lib/cite";
 import Reader from "./Reader";
@@ -364,19 +365,35 @@ function Content({ section, health, onOpen }:
 // The "Do" tab — a smart Nepal concierge. Rails of food / shopping / flight picks come from the
 // /do board: free, instant rules picks render right away; the one cheap AI pass (personal "why" +
 // re-rank) lands a beat later in the background, so glancing at the page costs no model usage.
-const DO_RAILS: { key: "food" | "deals" | "flights"; label: string; icon: LucideIcon;
-  action: string; verb: string }[] = [
+type DoRailKey = "food" | "deals" | "foryou" | "flights";
+const DO_RAILS: { key: DoRailKey; label: string; icon: LucideIcon; action: string; verb: string }[] = [
   { key: "food", label: "Eat", icon: UtensilsCrossed, action: "Order", verb: "order food on Foodmandu" },
   { key: "deals", label: "Deals", icon: ShoppingBag, action: "Buy", verb: "shop on Daraz" },
+  { key: "foryou", label: "For You", icon: Heart, action: "Buy", verb: "shop for your interests" },
   { key: "flights", label: "Fly", icon: Plane, action: "Book", verb: "find a Buddha Air flight" },
 ];
 const DO_CHIPS = ["Order momos", "Find a gift under Rs 2000", "Flights to Pokhara next weekend", "Best headphone deals"];
+
+function doPriceNum(s?: string): number {
+  const m = (s || "").replace(/,/g, "").match(/(\d+(\.\d+)?)/);
+  return m ? parseFloat(m[1]) : 0;
+}
 
 function DoTab() {
   const [board, setBoard] = useState<DoBoard | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [, tick] = useState(0);
+  // tray
+  const [cart, setCart] = useState<DoCartView | null>(null);
+  const [trayOpen, setTrayOpen] = useState(false);
+  // restaurant menu modal
+  const [detail, setDetail] = useState<DoPick | null>(null);
+  // inline search
+  const [searchQ, setSearchQ] = useState("");
+  const [searchKind, setSearchKind] = useState<"food" | "shop">("food");
+  const [results, setResults] = useState<DoPick[] | null>(null);
+  const [searching, setSearching] = useState(false);
 
   const load = async (force = false) => {
     try {
@@ -385,6 +402,7 @@ function DoTab() {
       return b;
     } catch { return null; }
   };
+  const loadCart = async () => { try { setCart(await api.do.cart.view()); } catch { /* warming */ } };
 
   useEffect(() => {
     let alive = true;
@@ -393,8 +411,7 @@ function DoTab() {
       setLoading(true);
       const b = await load();
       setLoading(false);
-      // If the board is still the free (stale) one, the AI pass is warming behind it — poll a few
-      // times so it flips to the personalized board on its own without the user lifting a finger.
+      loadCart();
       const poll = async () => {
         if (!alive || tries >= 4) return;
         tries += 1;
@@ -407,18 +424,34 @@ function DoTab() {
     return () => { alive = false; clearInterval(clock); };
   }, []);
 
-  const refresh = async () => {
-    setRefreshing(true);
-    await load(true);
-    setRefreshing(false);
-  };
+  const refresh = async () => { setRefreshing(true); await load(true); setRefreshing(false); };
 
-  const dismiss = (rail: "food" | "deals" | "flights", p: DoPick) => {
+  const dismiss = (rail: DoRailKey, p: DoPick) => {
     setBoard((b) => b ? { ...b, [rail]: b[rail].filter((x) => x.key !== p.key) } : b);
     api.do.feedback({ kind: "down", key: p.key, rail, tags: p.tag ? [p.tag] : [] }).catch(() => {});
   };
 
-  const empty = board && !board.food.length && !board.deals.length && !board.flights.length;
+  // add a Daraz product (deals / foryou / shop search) to the tray
+  const addProduct = async (p: DoPick) => {
+    try {
+      const v = await api.do.cart.add({
+        key: p.key, name: p.title, price: doPriceNum(p.subtitle), source: "shop",
+        place: "Daraz", image: p.image, link: p.link, checkout_link: p.link,
+      });
+      setCart(v); setTrayOpen(true);
+    } catch { /* ignore */ }
+  };
+
+  const runSearch = async (q = searchQ, kind = searchKind) => {
+    const term = q.trim();
+    if (!term) { setResults(null); return; }
+    setSearching(true);
+    try { const r = await api.do.search(term, kind); setResults(r.results || []); }
+    catch { setResults([]); } finally { setSearching(false); }
+  };
+
+  const empty = board && !board.food.length && !board.deals.length && !board.foryou.length && !board.flights.length;
+  const cartCount = cart?.count || 0;
 
   return (
     <div className="h-full flex flex-col">
@@ -437,29 +470,83 @@ function DoTab() {
               <p className="text-[11.5px] text-mac-ink3 mt-1.5">Updated {relativeAgo(board.generated_at)}</p>
             )}
           </div>
-          <button onClick={refresh} disabled={refreshing} title="Refresh picks"
-            className="shrink-0 h-9 px-3.5 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors disabled:opacity-60">
-            <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} /> Refresh
-          </button>
-        </div>
-        {/* quick asks — hand a specific request straight to Himmy */}
-        <div className="flex flex-wrap items-center gap-1.5 mt-4">
-          {DO_CHIPS.map((c) => (
-            <button key={c} onClick={() => ask(c)}
-              className="h-7 px-2.5 rounded-full text-[11.5px] bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">
-              {c}
+          <div className="shrink-0 flex items-center gap-1.5">
+            <button onClick={() => { loadCart(); setTrayOpen(true); }} title="Your tray"
+              className="relative h-9 px-3.5 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">
+              <ShoppingCart size={14} /> Tray
+              {cartCount > 0 && (
+                <span className="min-w-[17px] h-[17px] px-1 rounded-full bg-mac-accent text-white text-[10px] font-semibold grid place-items-center">{cartCount}</span>
+              )}
             </button>
-          ))}
+            <button onClick={refresh} disabled={refreshing} title="Refresh picks"
+              className="h-9 px-3.5 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors disabled:opacity-60">
+              <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} /> Refresh
+            </button>
+          </div>
         </div>
+
+        {/* search — food (Foodmandu) or products (Daraz) */}
+        <div className="flex items-center gap-2 mt-4">
+          <div className="flex items-center p-0.5 rounded-[9px] bg-mac-fill border border-mac-stroke">
+            {(["food", "shop"] as const).map((k) => (
+              <button key={k} onClick={() => { setSearchKind(k); if (searchQ.trim()) runSearch(searchQ, k); }}
+                className={`h-7 px-2.5 rounded-[7px] text-[12px] font-medium transition-colors ${
+                  searchKind === k ? "bg-mac-fillHi text-mac-ink" : "text-mac-ink3 hover:text-mac-ink"}`}>
+                {k === "food" ? "Food" : "Products"}
+              </button>
+            ))}
+          </div>
+          <div className="flex-1 flex items-center gap-2 h-9 px-3 rounded-[10px] bg-mac-fill border border-mac-stroke focus-within:border-mac-strokeHi transition-colors">
+            <Search size={14} className="text-mac-ink3 shrink-0" />
+            <input value={searchQ} onChange={(e) => setSearchQ(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") runSearch(); }}
+              placeholder={searchKind === "food" ? "Search restaurants or dishes on Foodmandu…" : "Search products on Daraz…"}
+              className="flex-1 bg-transparent text-[13px] text-mac-ink placeholder:text-mac-ink3 outline-none" />
+            {searchQ && (
+              <button onClick={() => { setSearchQ(""); setResults(null); }} className="text-mac-ink3 hover:text-mac-ink">
+                <X size={14} />
+              </button>
+            )}
+          </div>
+        </div>
+        {/* quick asks */}
+        {!results && (
+          <div className="flex flex-wrap items-center gap-1.5 mt-3">
+            {DO_CHIPS.map((c) => (
+              <button key={c} onClick={() => ask(c)}
+                className="h-7 px-2.5 rounded-full text-[11.5px] bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">
+                {c}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* rails */}
+      {/* body — search results OR the picked-for-you rails */}
       <div className="flex-1 min-h-0 overflow-y-auto pb-12">
         <div className="mx-auto w-full max-w-[1180px] px-9">
-          {loading && !board ? (
-            <div className="h-64 grid place-items-center text-mac-ink3">
-              <Loader2 size={20} className="animate-spin" />
-            </div>
+          {results ? (
+            <section className="mt-2">
+              <div className="flex items-center gap-2 mb-3">
+                <h2 className="font-display text-[15px] font-semibold text-mac-ink">
+                  {searching ? "Searching…" : `${results.length} result${results.length === 1 ? "" : "s"} for "${searchQ}"`}
+                </h2>
+              </div>
+              {searching ? (
+                <div className="h-40 grid place-items-center text-mac-ink3"><Loader2 size={18} className="animate-spin" /></div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2.5">
+                  {results.map((p) => (
+                    <DoPickCard key={p.key} p={p} rail={searchKind === "food" ? "food" : "deals"}
+                      action={searchKind === "food" ? "View menu" : "Buy"}
+                      onOpen={searchKind === "food" ? () => setDetail(p) : undefined}
+                      onAdd={searchKind === "shop" ? () => addProduct(p) : undefined} />
+                  ))}
+                </div>
+              )}
+            </section>
+          ) : loading && !board ? (
+            <div className="h-64 grid place-items-center text-mac-ink3"><Loader2 size={20} className="animate-spin" /></div>
           ) : empty ? (
             <div className="h-64 grid place-items-center text-center">
               <div>
@@ -485,7 +572,9 @@ function DoTab() {
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2.5">
                     {picks.map((p) => (
                       <DoPickCard key={p.key} p={p} rail={rail.key} action={rail.action}
-                        onDismiss={() => dismiss(rail.key, p)} />
+                        onDismiss={() => dismiss(rail.key, p)}
+                        onOpen={rail.key === "food" ? () => setDetail(p) : undefined}
+                        onAdd={(rail.key === "deals" || rail.key === "foryou") ? () => addProduct(p) : undefined} />
                     ))}
                   </div>
                 </section>
@@ -494,17 +583,27 @@ function DoTab() {
           )}
         </div>
       </div>
+
+      {detail && (
+        <RestaurantModal pick={detail} onClose={() => setDetail(null)}
+          onAdded={(v) => { setCart(v); }} onOpenTray={() => { setDetail(null); setTrayOpen(true); }} />
+      )}
+      {trayOpen && (
+        <DoTray cart={cart} onClose={() => setTrayOpen(false)} onChange={setCart} />
+      )}
     </div>
   );
 }
 
-function DoPickCard({ p, rail, action, onDismiss }: {
-  p: DoPick; rail: "food" | "deals" | "flights"; action: string; onDismiss: () => void;
+function DoPickCard({ p, rail, action, onDismiss, onOpen, onAdd }: {
+  p: DoPick; rail: DoRailKey; action: string;
+  onDismiss?: () => void; onOpen?: () => void; onAdd?: () => void;
 }) {
   const isFlight = rail === "flights";
   const RailIcon = rail === "food" ? UtensilsCrossed : ShoppingBag;
   return (
-    <div className="group relative flex flex-col rounded-xl bg-mac-fill border border-mac-stroke hover:border-mac-strokeHi hover:shadow-mac transition-all overflow-hidden">
+    <div onClick={onOpen}
+      className={`group relative flex flex-col rounded-xl bg-mac-fill border border-mac-stroke hover:border-mac-strokeHi hover:shadow-mac transition-all overflow-hidden ${onOpen ? "cursor-pointer" : ""}`}>
       {/* media — a photo for food/deals, a route banner for flights */}
       <div className="relative h-28 w-full overflow-hidden bg-mac-fillHi">
         {isFlight ? (
@@ -519,10 +618,12 @@ function DoPickCard({ p, rail, action, onDismiss }: {
         ) : (
           <div className="h-full w-full grid place-items-center text-mac-ink3"><RailIcon size={20} /></div>
         )}
-        <button onClick={onDismiss} title="Not for me — show less like this"
-          className="absolute top-1.5 right-1.5 z-10 h-6 w-6 grid place-items-center rounded-full bg-black/45 backdrop-blur text-white/80 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity">
-          <ThumbsDown size={11} />
-        </button>
+        {onDismiss && (
+          <button onClick={(e) => { e.stopPropagation(); onDismiss(); }} title="Not for me — show less like this"
+            className="absolute top-1.5 right-1.5 z-10 h-6 w-6 grid place-items-center rounded-full bg-black/45 backdrop-blur text-white/80 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity">
+            <ThumbsDown size={11} />
+          </button>
+        )}
         {rail === "deals" && p.discount && (
           <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-mac-green text-white text-[10.5px] font-semibold shadow-mac">{p.discount}</span>
         )}
@@ -566,12 +667,239 @@ function DoPickCard({ p, rail, action, onDismiss }: {
             <p className={`text-[11.5px] leading-snug line-clamp-2 ${p.ai ? "text-mac-ink2" : "text-mac-ink3"}`}>{p.why}</p>
           </div>
         )}
-        <div className="mt-auto pt-2.5">
-          <a href={p.link || "#"} target="_blank" rel="noreferrer"
-            className="h-8 w-full px-3 rounded-[9px] text-[12px] font-medium inline-flex items-center justify-center gap-1.5 bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">
-            {action} <ArrowUpRight size={13} strokeWidth={2.5} />
+        <div className="mt-auto pt-2.5 flex items-center gap-1.5">
+          {onOpen ? (
+            <button onClick={(e) => { e.stopPropagation(); onOpen(); }}
+              className="h-8 flex-1 px-3 rounded-[9px] text-[12px] font-medium inline-flex items-center justify-center gap-1.5 bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">
+              {action} <ArrowUpRight size={13} strokeWidth={2.5} />
+            </button>
+          ) : (
+            <a href={p.link || "#"} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
+              className="h-8 flex-1 px-3 rounded-[9px] text-[12px] font-medium inline-flex items-center justify-center gap-1.5 bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">
+              {action} <ArrowUpRight size={13} strokeWidth={2.5} />
+            </a>
+          )}
+          {onAdd && (
+            <button onClick={(e) => { e.stopPropagation(); onAdd(); }} title="Add to tray"
+              className="h-8 w-8 shrink-0 grid place-items-center rounded-[9px] bg-mac-fillHi border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">
+              <Plus size={14} strokeWidth={2.5} />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────────────────────────────── do: restaurant menu modal + tray */
+function RestaurantModal({ pick, onClose, onAdded, onOpenTray }: {
+  pick: DoPick; onClose: () => void; onAdded: (v: DoCartView) => void; onOpenTray: () => void;
+}) {
+  const [data, setData] = useState<DoRestaurant | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [added, setAdded] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    api.do.restaurant({ id: pick.vendor_id, name: pick.vendor_id ? undefined : pick.title })
+      .then((d) => { if (alive) setData(d.ok ? d : null); })
+      .catch(() => { if (alive) setData(null); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [pick]);
+
+  const addDish = async (it: DoMenuItem) => {
+    try {
+      const v = await api.do.cart.add({
+        key: `f${data?.vendor_id}-${it.id}`, name: it.name, price: it.price || 0, source: "food",
+        place: data?.restaurant || pick.title, image: it.image,
+        link: data?.order_link, checkout_link: data?.order_link,
+      });
+      onAdded(v);
+      setAdded((m) => ({ ...m, [it.id]: true }));
+      setTimeout(() => setAdded((m) => ({ ...m, [it.id]: false })), 1200);
+    } catch { /* ignore */ }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()}
+        className="w-[760px] max-w-[calc(100%-2rem)] h-[80vh] max-h-[720px] flex flex-col rounded-2xl bg-[rgba(30,31,37,0.98)] backdrop-blur-xl border border-mac-strokeHi shadow-pop overflow-hidden">
+        {/* header */}
+        <div className="relative shrink-0 h-32 bg-mac-fillHi overflow-hidden">
+          {pick.image
+            ? <img src={pick.image} alt="" className="h-full w-full object-cover" onError={(e) => { e.currentTarget.style.display = "none"; }} />
+            : <div className="h-full w-full grid place-items-center text-mac-ink3"><UtensilsCrossed size={24} /></div>}
+          <div className="absolute inset-0 bg-gradient-to-t from-[rgba(20,21,26,0.96)] to-transparent" />
+          <button onClick={onClose} className="absolute top-2.5 right-2.5 h-7 w-7 grid place-items-center rounded-full bg-black/45 backdrop-blur text-white/85 hover:text-white">
+            <X size={15} />
+          </button>
+          <div className="absolute bottom-2.5 left-4 right-4">
+            <h2 className="font-display text-[19px] font-semibold text-white tracking-[-0.01em] drop-shadow">{data?.restaurant || pick.title}</h2>
+            <div className="flex items-center gap-2 text-[11.5px] text-white/80 mt-0.5">
+              {typeof pick.rating === "number" && pick.rating > 0 && (
+                <span className="inline-flex items-center gap-0.5"><Star size={10} className="fill-yellow-400 text-yellow-400" /> {pick.rating.toFixed(1)}</span>
+              )}
+              {data?.item_count ? <span>· {data.item_count} items</span> : null}
+              <span className={pick.open_now ? "text-mac-green" : "text-white/60"}>· {pick.open_now ? "Open now" : "Closed"}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* menu */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
+          {loading ? (
+            <div className="h-40 grid place-items-center text-mac-ink3"><Loader2 size={18} className="animate-spin" /></div>
+          ) : !data ? (
+            <div className="h-40 grid place-items-center text-center text-[13px] text-mac-ink2">Couldn't load this menu. <br />Open it on Foodmandu instead.</div>
+          ) : (
+            <>
+              {data.recommended.length > 0 && (
+                <section className="mb-5">
+                  <div className="flex items-center gap-1.5 mb-2 text-[12px] font-semibold text-mac-accentHi">
+                    <Sparkles size={12} /> Recommended for you
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {data.recommended.map((it) => (
+                      <MenuItemRow key={`r${it.id}`} it={it} added={!!added[it.id]} onAdd={() => addDish(it)} highlight />
+                    ))}
+                  </div>
+                </section>
+              )}
+              {data.categories.map((cat) => (
+                <section key={cat.category} className="mb-5">
+                  <h3 className="text-[13px] font-semibold text-mac-ink mb-2">{cat.category}</h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {cat.items.map((it) => (
+                      <MenuItemRow key={it.id} it={it} added={!!added[it.id]} onAdd={() => addDish(it)} />
+                    ))}
+                  </div>
+                </section>
+              ))}
+            </>
+          )}
+        </div>
+
+        {/* footer */}
+        <div className="shrink-0 flex items-center justify-between gap-3 px-4 py-3 border-t border-mac-stroke">
+          <button onClick={onOpenTray} className="text-[12.5px] text-mac-ink2 hover:text-mac-ink inline-flex items-center gap-1.5">
+            <ShoppingCart size={14} /> View tray
+          </button>
+          <a href={data?.order_link || pick.link || "#"} target="_blank" rel="noreferrer"
+            className="h-9 px-4 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">
+            Order on Foodmandu <ArrowUpRight size={14} strokeWidth={2.5} />
           </a>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function MenuItemRow({ it, added, onAdd, highlight }: {
+  it: DoMenuItem; added: boolean; onAdd: () => void; highlight?: boolean;
+}) {
+  return (
+    <div className={`flex items-center gap-2.5 p-2 rounded-lg border transition-colors ${
+      highlight ? "border-mac-accentHi/30 bg-[rgba(10,132,255,0.06)]" : "border-mac-stroke bg-mac-fill"}`}>
+      {it.image
+        ? <img src={it.image} alt="" loading="lazy" onError={(e) => { e.currentTarget.style.display = "none"; }}
+            className="h-11 w-11 shrink-0 rounded-md object-cover bg-mac-fillHi" />
+        : <div className="h-11 w-11 shrink-0 rounded-md grid place-items-center bg-mac-fillHi text-mac-ink3"><UtensilsCrossed size={15} /></div>}
+      <div className="min-w-0 flex-1">
+        <div className="text-[12.5px] text-mac-ink font-medium leading-snug line-clamp-1">{it.name}</div>
+        {it.desc && <div className="text-[11px] text-mac-ink3 leading-snug line-clamp-1">{it.desc}</div>}
+        <div className="flex items-baseline gap-1.5 mt-0.5">
+          <span className="text-[12.5px] font-semibold text-mac-ink">Rs {it.price}</span>
+          {it.was ? <span className="text-[10.5px] text-mac-ink3 line-through">Rs {it.was}</span> : null}
+        </div>
+      </div>
+      <button onClick={onAdd} title="Add to tray"
+        className={`h-7 w-7 shrink-0 grid place-items-center rounded-lg transition-colors ${
+          added ? "bg-mac-green/20 text-mac-green" : "bg-mac-accent text-white hover:bg-mac-accentHi"}`}>
+        {added ? <Check size={14} strokeWidth={2.5} /> : <Plus size={14} strokeWidth={2.5} />}
+      </button>
+    </div>
+  );
+}
+
+function DoTray({ cart, onClose, onChange }: {
+  cart: DoCartView | null; onClose: () => void; onChange: (v: DoCartView) => void;
+}) {
+  const groups = cart?.groups || [];
+  const setQty = async (key: string, qty: number) => { try { onChange(await api.do.cart.qty(key, qty)); } catch { /* */ } };
+  const clear = async () => { try { onChange(await api.do.cart.clear()); } catch { /* */ } };
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()}
+        className="w-[400px] max-w-[calc(100%-2rem)] h-full flex flex-col bg-[rgba(28,29,34,0.99)] backdrop-blur-xl border-l border-mac-strokeHi shadow-pop himmy-enter-right">
+        <div className="shrink-0 flex items-center justify-between px-4 h-14 border-b border-mac-stroke">
+          <div className="flex items-center gap-2 font-display text-[15px] font-semibold text-mac-ink">
+            <ShoppingCart size={16} className="text-mac-accentHi" /> Your tray
+            {(cart?.count || 0) > 0 && <span className="text-[12px] font-normal text-mac-ink3">· {cart?.count} item{cart?.count === 1 ? "" : "s"}</span>}
+          </div>
+          <button onClick={onClose} className="h-7 w-7 grid place-items-center rounded-lg text-mac-ink3 hover:text-mac-ink hover:bg-mac-fill"><X size={15} /></button>
+        </div>
+
+        <div className="flex-1 min-h-0 overflow-y-auto p-4">
+          {groups.length === 0 ? (
+            <div className="h-full grid place-items-center text-center">
+              <div>
+                <ShoppingCart size={24} className="text-mac-ink3 mx-auto mb-3" />
+                <p className="text-[13px] text-mac-ink2">Your tray is empty.</p>
+                <p className="text-[11.5px] text-mac-ink3 mt-1 max-w-[24ch] mx-auto">Add dishes from a restaurant or products from a deal, then check out on the site.</p>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {groups.map((g) => (
+                <div key={g.place} className="rounded-xl border border-mac-stroke bg-mac-fill overflow-hidden">
+                  <div className="flex items-center justify-between px-3 py-2 border-b border-mac-stroke">
+                    <span className="text-[12.5px] font-semibold text-mac-ink truncate">{g.place}</span>
+                    <span className="text-[12px] text-mac-ink2 shrink-0">Rs {g.subtotal}</span>
+                  </div>
+                  <div className="divide-y divide-mac-stroke/60">
+                    {g.items.map((it) => (
+                      <div key={it.key} className="flex items-center gap-2 px-3 py-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="text-[12px] text-mac-ink leading-snug line-clamp-1">{it.name}</div>
+                          <div className="text-[11px] text-mac-ink3">Rs {it.price}</div>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button onClick={() => setQty(it.key, it.qty - 1)} className="h-6 w-6 grid place-items-center rounded-md bg-mac-fillHi border border-mac-stroke text-mac-ink2 hover:text-mac-ink"><Minus size={12} /></button>
+                          <span className="w-5 text-center text-[12px] text-mac-ink tnum">{it.qty}</span>
+                          <button onClick={() => setQty(it.key, it.qty + 1)} className="h-6 w-6 grid place-items-center rounded-md bg-mac-fillHi border border-mac-stroke text-mac-ink2 hover:text-mac-ink"><Plus size={12} /></button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {g.checkout_link && (
+                    <a href={g.checkout_link} target="_blank" rel="noreferrer"
+                      className="flex items-center justify-center gap-1.5 h-9 text-[12px] font-medium text-mac-accentHi hover:bg-mac-fillHi border-t border-mac-stroke transition-colors">
+                      Checkout {g.source === "food" ? "on Foodmandu" : "on Daraz"} <ArrowUpRight size={13} strokeWidth={2.5} />
+                    </a>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {groups.length > 0 && (
+          <div className="shrink-0 px-4 py-3 border-t border-mac-stroke">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[12.5px] text-mac-ink2">Total</span>
+              <span className="text-[16px] font-semibold text-mac-ink">Rs {cart?.total}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={clear} className="h-8 px-3 rounded-[9px] text-[12px] text-mac-ink2 hover:text-mac-ink bg-mac-fill border border-mac-stroke inline-flex items-center gap-1.5">
+                <Trash2 size={13} /> Clear
+              </button>
+              <p className="flex-1 text-[10.5px] text-mac-ink3 leading-tight">Open each place to place the order — Himmy holds your list, you check out.</p>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

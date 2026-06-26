@@ -166,11 +166,29 @@ export type RecResult = {
 export type DoPick = {
   key: string; title: string; subtitle?: string; meta?: string; why?: string;
   link?: string; rating?: number; open_now?: boolean; image?: string; ai?: boolean;
-  discount?: string; was?: string; tag?: string; date?: string;
+  discount?: string; was?: string; tag?: string; date?: string; vendor_id?: string;
 };
 export type DoBoard = {
   ok: boolean; headline: string; ai?: boolean; stale?: boolean; generated_at?: string;
-  food: DoPick[]; deals: DoPick[]; flights: DoPick[];
+  food: DoPick[]; deals: DoPick[]; foryou: DoPick[]; flights: DoPick[];
+};
+// A restaurant's menu + the dishes recommended for the user.
+export type DoMenuItem = {
+  id: number; name: string; price: number; was?: number | null; desc?: string;
+  image?: string; popular?: boolean; tag?: string; recommended?: boolean; category?: string;
+};
+export type DoMenuCategory = { category: string; items: DoMenuItem[] };
+export type DoRestaurant = {
+  ok: boolean; vendor_id: string; restaurant: string; order_link: string;
+  item_count: number; categories: DoMenuCategory[]; recommended: DoMenuItem[]; message?: string;
+};
+// The tray — a Himmy-side cart, grouped by place.
+export type DoCartItem = { key: string; name: string; price: number; qty: number; image?: string; link?: string };
+export type DoCartGroup = { place: string; source: string; checkout_link: string; items: DoCartItem[]; subtotal: number };
+export type DoCartView = { ok?: boolean; groups: DoCartGroup[]; total: number; count: number };
+export type DoCartAdd = {
+  key: string; name: string; price: number; qty?: number; source?: string;
+  place?: string; image?: string; link?: string; checkout_link?: string;
 };
 
 // "What Himmy knows about you" — a user-authored layer + a layer Himmy learns from activity.
@@ -493,6 +511,22 @@ export const api = {
     refresh: () => jpost<DoBoard>("/do/refresh", {}),
     feedback: (p: { kind: "up" | "down"; key: string; rail?: string; tags?: string[] }) =>
       jpost<{ ok: boolean }>("/do/feedback", { rail: "", tags: [], ...p }),
+    restaurant: (opts: { id?: string; name?: string }) => {
+      const p = new URLSearchParams();
+      if (opts.id) p.set("id", opts.id);
+      if (opts.name) p.set("name", opts.name);
+      return jget<DoRestaurant>(`/do/restaurant?${p.toString()}`);
+    },
+    search: (q: string, kind: "food" | "shop") =>
+      jget<{ ok: boolean; kind: string; query: string; results: DoPick[] }>(
+        `/do/search?q=${encodeURIComponent(q)}&kind=${kind}`),
+    cart: {
+      view: () => jget<DoCartView>("/do/cart"),
+      add: (item: DoCartAdd) => jpost<DoCartView>("/do/cart/add", item),
+      qty: (key: string, qty: number) => jpost<DoCartView>("/do/cart/qty", { key, qty }),
+      remove: (key: string) => jpost<DoCartView>("/do/cart/remove", { key, qty: 0 }),
+      clear: () => jpost<DoCartView>("/do/cart/clear", {}),
+    },
   },
   tasks: {
     list: () => jget<{ ok: boolean; tasks: Task[]; open: number; total: number }>("/tasks"),
