@@ -111,6 +111,7 @@ export type ArticleContent = {
   source?: string; image?: string; paragraphs: string[]; message?: string;
 };
 export type NewsFolder = { name: string; count: number };
+export type NewsHighlight = { id: string; text: string; color: string; note: string; created: number };
 export type Subtask = { text: string; done: boolean };
 export type Task = {
   id: string;
@@ -451,6 +452,16 @@ export const api = {
       jpost<{ ok: boolean; id?: string; folder?: string; readable?: boolean; message?: string }>("/news/save", payload),
     move: (id: string, folder: string) => jput<{ ok: boolean; folder: string }>(`/news/saved/${id}`, { folder }),
     unsave: (id: string) => jdelete<{ ok: boolean }>(`/news/saved/${id}`),
+    // per-article notes + text highlights (keyed by the article URL)
+    annotations: (url: string) =>
+      jget<{ ok: boolean; note: string; summary: string; highlights: NewsHighlight[] }>(`/news/annotations?url=${encodeURIComponent(url)}`),
+    setNote: (url: string, note: string) => jput<{ ok: boolean }>("/news/notes", { url, note }),
+    setSummary: (url: string, summary: string) => jput<{ ok: boolean }>("/news/summary", { url, summary }),
+    addHighlight: (h: { url: string; text: string; color?: string; note?: string }) =>
+      jpost<{ ok: boolean; highlight: NewsHighlight }>("/news/highlights", { color: "yellow", note: "", ...h }),
+    updateHighlight: (hid: string, patch: { note?: string; color?: string }) =>
+      jput<{ ok: boolean }>(`/news/highlights/${hid}`, patch),
+    removeHighlight: (hid: string) => jdelete<{ ok: boolean }>(`/news/highlights/${hid}`),
   },
   tasks: {
     list: () => jget<{ ok: boolean; tasks: Task[]; open: number; total: number }>("/tasks"),

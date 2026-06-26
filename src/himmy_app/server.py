@@ -180,6 +180,28 @@ class NewsMoveRequest(BaseModel):
     folder: str
 
 
+class NewsNoteRequest(BaseModel):
+    url: str
+    note: str = ""
+
+
+class NewsSummaryRequest(BaseModel):
+    url: str
+    summary: str = ""
+
+
+class NewsHighlightRequest(BaseModel):
+    url: str
+    text: str
+    color: str = "yellow"
+    note: str = ""
+
+
+class NewsHighlightPatch(BaseModel):
+    note: str | None = None
+    color: str | None = None
+
+
 class DismissRequest(BaseModel):
     doi: str = ""
     title: str = ""
@@ -798,10 +820,11 @@ def create_app() -> FastAPI:
         return {"ok": True, "path": str(cfg.data_dir)}
 
     # ---- news hub: live feeds + in-app reading + saved articles -------------------------
-    from himmy_app.news import NewsService, SavedNews, extract_article
+    from himmy_app.news import NewsAnnotations, NewsService, SavedNews, extract_article
 
     news = NewsService(cfg)
     saved_news = SavedNews(cfg)
+    news_notes = NewsAnnotations(cfg)
 
     @app.get("/news/interests")
     async def news_interests() -> dict[str, Any]:
@@ -839,6 +862,31 @@ def create_app() -> FastAPI:
     @app.get("/news/article")
     async def news_article(url: str) -> dict[str, Any]:
         return await extract_article(url)
+
+    # per-article annotations (notes + text highlights), keyed by the article URL
+    @app.get("/news/annotations")
+    async def news_annotations(url: str) -> dict[str, Any]:
+        return {"ok": True, **news_notes.get(url)}
+
+    @app.put("/news/notes")
+    async def news_set_note(body: NewsNoteRequest) -> dict[str, Any]:
+        return news_notes.set_note(body.url, body.note)
+
+    @app.put("/news/summary")
+    async def news_set_summary(body: NewsSummaryRequest) -> dict[str, Any]:
+        return news_notes.set_summary(body.url, body.summary)
+
+    @app.post("/news/highlights")
+    async def news_add_highlight(body: NewsHighlightRequest) -> dict[str, Any]:
+        return news_notes.add_highlight(body.url, body.text, body.color, body.note)
+
+    @app.put("/news/highlights/{hid}")
+    async def news_update_highlight(hid: str, body: NewsHighlightPatch) -> dict[str, Any]:
+        return news_notes.update_highlight(hid, note=body.note, color=body.color)
+
+    @app.delete("/news/highlights/{hid}")
+    async def news_remove_highlight(hid: str) -> dict[str, Any]:
+        return news_notes.remove_highlight(hid)
 
     # saved articles (folders) — these feed the papers RAG so Himmy can read them
     @app.get("/news/saved/folders")

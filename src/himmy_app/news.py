@@ -825,7 +825,115 @@ class SavedNews:
         return out
 
 
+def _hl_id() -> str:
+    return f"nhl_{int(time.time() * 1000):x}_{abs(hash(time.time())) % 100000:05d}"
+
+
+class NewsAnnotations:
+    """Per-article notes + text highlights for the news reader, keyed by the article URL and
+    stored in library.db (so they ride backups). News articles aren't library items, so these
+    are URL-keyed and work whether or not the article is also saved to a folder."""
+
+    def __init__(self, config: HimmyConfig | None = None) -> None:
+        cfg = config or load_config()
+        self._db = cfg.data_dir / "library.db"
+        self._ensure()
+
+    def _conn(self) -> sqlite3.Connection:
+        c = sqlite3.connect(str(self._db))
+        c.row_factory = sqlite3.Row
+        return c
+
+    def _ensure(self) -> None:
+        with self._conn() as c:
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS news_notes (url TEXT PRIMARY KEY, note TEXT, updated REAL)"
+            )
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS news_summaries (url TEXT PRIMARY KEY, summary TEXT, created REAL)"
+            )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS news_highlights (
+                    id TEXT PRIMARY KEY, url TEXT, text TEXT, color TEXT, note TEXT, created REAL
+                )"""
+            )
+            c.execute("CREATE INDEX IF NOT EXISTS idx_news_hl_url ON news_highlights(url)")
+
+    def get(self, url: str) -> dict[str, Any]:
+        """Everything annotated on one article: the cached AI summary + free-text note + highlights."""
+        url = (url or "").strip()
+        with self._conn() as c:
+            nr = c.execute("SELECT note FROM news_notes WHERE url = ?", (url,)).fetchone()
+            sr = c.execute("SELECT summary FROM news_summaries WHERE url = ?", (url,)).fetchone()
+            hrs = c.execute(
+                "SELECT id, text, color, note, created FROM news_highlights WHERE url = ? ORDER BY created",
+                (url,),
+            ).fetchall()
+        return {"note": (nr["note"] if nr else ""), "summary": (sr["summary"] if sr else ""),
+                "highlights": [dict(r) for r in hrs]}
+
+    def set_summary(self, url: str, summary: str) -> dict[str, Any]:
+        """Cache (or, with an empty string, clear) the AI summary for an article."""
+        url = (url or "").strip()
+        with self._conn() as c:
+            if (summary or "").strip():
+                c.execute(
+                    "INSERT INTO news_summaries (url, summary, created) VALUES (?, ?, ?) "
+                    "ON CONFLICT(url) DO UPDATE SET summary = excluded.summary, created = excluded.created",
+                    (url, summary, time.time()),
+                )
+            else:
+                c.execute("DELETE FROM news_summaries WHERE url = ?", (url,))
+        return {"ok": True}
+
+    def set_note(self, url: str, note: str) -> dict[str, Any]:
+        url = (url or "").strip()
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO news_notes (url, note, updated) VALUES (?, ?, ?) "
+                "ON CONFLICT(url) DO UPDATE SET note = excluded.note, updated = excluded.updated",
+                (url, note or "", time.time()),
+            )
+        return {"ok": True}
+
+    def add_highlight(self, url: str, text: str, color: str = "yellow", note: str = "") -> dict[str, Any]:
+        url = (url or "").strip()
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "message": "Nothing to highlight."}
+        hid = _hl_id()
+        created = time.time()
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO news_highlights (id, url, text, color, note, created) VALUES (?, ?, ?, ?, ?, ?)",
+                (hid, url, text, color or "yellow", note or "", created),
+            )
+        return {"ok": True, "highlight": {"id": hid, "text": text, "color": color or "yellow",
+                                          "note": note or "", "created": created}}
+
+    def update_highlight(self, hid: str, *, note: str | None = None, color: str | None = None) -> dict[str, Any]:
+        sets: list[str] = []
+        vals: list[Any] = []
+        if note is not None:
+            sets.append("note = ?")
+            vals.append(note)
+        if color is not None:
+            sets.append("color = ?")
+            vals.append(color)
+        if not sets:
+            return {"ok": True}
+        vals.append(hid)
+        with self._conn() as c:
+            c.execute(f"UPDATE news_highlights SET {', '.join(sets)} WHERE id = ?", vals)
+        return {"ok": True}
+
+    def remove_highlight(self, hid: str) -> dict[str, Any]:
+        with self._conn() as c:
+            c.execute("DELETE FROM news_highlights WHERE id = ?", (hid,))
+        return {"ok": True}
+
+
 __all__ = [
-    "NewsService", "SavedNews", "CATEGORIES", "SOURCES", "TRUSTED_SOURCES",
+    "NewsService", "SavedNews", "NewsAnnotations", "CATEGORIES", "SOURCES", "TRUSTED_SOURCES",
     "DEFAULT_FOLDER", "extract_article", "refresh_all",
 ]

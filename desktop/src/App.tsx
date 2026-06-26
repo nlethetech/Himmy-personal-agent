@@ -9,11 +9,12 @@ import {
   Inbox, MapPin, KeyRound, ShieldCheck, Minus, ChevronLeft, ChevronRight, Repeat,
   Gauge, Coins, Zap, CalendarCheck, CalendarClock, Bell, Play, Flag,
   Star, BellOff, Users, TrendingUp, Cpu, Sparkle,
+  Info, StickyNote, Highlighter,
   type LucideIcon,
 } from "lucide-react";
 import {
   api, type Health, type Paper, type Collection,
-  type NewsArticle, type SavedArticle, type ArticleContent, type NewsFolder, type RecPaper,
+  type NewsArticle, type SavedArticle, type ArticleContent, type NewsFolder, type NewsHighlight, type RecPaper,
   type Task, type ChatSession, type ResearchResult, type Pending,
   type GoogleStatus, type MailMessage, type MailFull, type CalendarEvent, type Usage, type UsageTotals,
   type Routine, type RoutineSchedule, type NotificationItem, type ReadingStats,
@@ -3680,20 +3681,12 @@ function News() {
           <div className="flex items-baseline gap-2.5 min-w-0">
             <h1 className="font-display text-[19px] font-semibold tracking-[-0.01em] truncate">{heading}</h1>
             {isFeed
-              ? fetchedAt && (() => {
-                  const ago = relativeAgo(fetchedAt);
-                  // Only show the green "live" dot when the pull is genuinely fresh; otherwise a
-                  // neutral clock, so a 14-min-old cache hit doesn't imply a live connection.
-                  const fresh = ago === "just now";
-                  return (
-                    <span className="inline-flex items-center gap-1.5 text-[12px] text-mac-ink3 shrink-0">
-                      {fresh
-                        ? <span className="h-1.5 w-1.5 rounded-full bg-mac-green/80" />
-                        : <Clock size={10} className="text-mac-ink3" />}
-                      {" "}updated {ago}
-                    </span>
-                  );
-                })()
+              ? fetchedAt && (
+                  <span className="inline-flex items-center gap-1.5 text-[12px] text-mac-ink3 shrink-0">
+                    <Clock size={10} className="text-mac-ink3" />
+                    {" "}updated {relativeAgo(fetchedAt)}
+                  </span>
+                )
               : <span className="text-[12.5px] text-mac-ink3 tnum shrink-0">{count} {count === 1 ? "article" : "articles"}</span>}
           </div>
           <div className="flex items-center gap-2">
@@ -4038,6 +4031,129 @@ function FolderMenu({ folders, onPick, onClose }: { folders: NewsFolder[]; onPic
   );
 }
 
+/* ── news reader sidebar (Info / Notes / Highlights — mirrors the Library reader) ── */
+const NEWS_HL: Record<string, string> = {
+  yellow: "rgba(250, 204, 21, 0.32)",
+  green: "rgba(52, 211, 153, 0.30)",
+  blue: "rgba(96, 165, 250, 0.32)",
+  pink: "rgba(244, 114, 182, 0.30)",
+};
+function escapeRe(s: string) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+/* Wrap any highlighted snippet inside a paragraph with a colored <mark> (longest match first). */
+function markText(text: string, highlights: NewsHighlight[]): React.ReactNode {
+  if (!highlights.length) return text;
+  const byText = new Map<string, NewsHighlight>();
+  for (const h of highlights) { const t = h.text.trim(); if (t && !byText.has(t)) byText.set(t, h); }
+  const keys = [...byText.keys()].sort((a, b) => b.length - a.length);
+  if (!keys.length) return text;
+  let re: RegExp;
+  try { re = new RegExp(keys.map(escapeRe).join("|"), "g"); } catch { return text; }
+  const out: React.ReactNode[] = [];
+  let last = 0, m: RegExpExecArray | null, i = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index === re.lastIndex) { re.lastIndex++; continue; }
+    if (m.index > last) out.push(text.slice(last, m.index));
+    const h = byText.get(m[0]);
+    out.push(
+      <mark key={i++} data-hl={h?.id} title={h?.note || undefined}
+        style={{ background: NEWS_HL[h?.color || "yellow"] || NEWS_HL.yellow, color: "inherit", borderRadius: 3, padding: "0.5px 1px" }}>
+        {m[0]}
+      </mark>,
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+function NewsTabBtn({ icon: Ico, label, active, onClick, count }: {
+  icon: LucideIcon; label: string; active: boolean; onClick: () => void; count?: number;
+}) {
+  return (
+    <button onClick={onClick}
+      className={`h-8 px-2.5 rounded-[8px] text-[12.5px] flex items-center gap-1.5 transition-colors ${
+        active ? "bg-mac-fill text-mac-ink" : "text-mac-ink3 hover:text-mac-ink2"}`}>
+      <Ico size={13} /> {label}
+      {count ? <span className="text-[11px] text-mac-ink3">{count}</span> : null}
+    </button>
+  );
+}
+
+function NewsInfoPanel({ summary, summarizing, onSummarize, onClearSummary, source, meta, url }: {
+  summary: string | null; summarizing: boolean; onSummarize: () => void; onClearSummary: () => void;
+  source: string; meta: string; url: string;
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="rounded-xl border border-mac-accent bg-mac-accentDim p-3.5">
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-1.5">
+            <Sparkles size={13} className="text-mac-accentHi" />
+            <span className="text-[11.5px] font-semibold uppercase tracking-[0.06em] text-mac-ink">Summary</span>
+            {summarizing && <Loader2 size={11} className="animate-spin text-mac-ink3" />}
+          </div>
+          {summary !== null && !summarizing && (
+            <div className="flex items-center gap-0.5">
+              <button onClick={onSummarize} title="Re-run" className="h-6 w-6 grid place-items-center rounded-md text-mac-ink3 hover:text-mac-ink hover:bg-mac-fill transition-colors"><RefreshCw size={12} /></button>
+              <button onClick={onClearSummary} title="Clear" className="h-6 w-6 grid place-items-center rounded-md text-mac-ink3 hover:text-mac-ink hover:bg-mac-fill transition-colors"><X size={13} /></button>
+            </div>
+          )}
+        </div>
+        {summary === null ? (
+          <button onClick={onSummarize} disabled={summarizing}
+            className="w-full mt-0.5 h-8 rounded-lg bg-mac-fill border border-mac-stroke text-[12.5px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40">
+            <Sparkles size={13} className="text-mac-accentHi" /> Summarize this article
+          </button>
+        ) : summary === "" && summarizing ? (
+          <div className="flex items-center gap-1.5 py-1 text-[12.5px] text-mac-ink3">
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-mac-ink3 animate-pulse" /> Reading the article…
+          </div>
+        ) : (
+          <div className="text-[12.5px] leading-[1.65] text-mac-ink2 whitespace-pre-wrap">{summary}</div>
+        )}
+      </div>
+      <div className="space-y-2.5">
+        {source && (<div><div className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-mac-ink3 mb-1">Source</div><div className="text-[13px] text-mac-ink2">{source}</div></div>)}
+        {meta && (<div><div className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-mac-ink3 mb-1">Published</div><div className="text-[13px] text-mac-ink2">{meta}</div></div>)}
+        <div>
+          <div className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-mac-ink3 mb-1">Link</div>
+          <a href={url} target="_blank" rel="noreferrer" className="text-[12.5px] text-mac-accentHi hover:underline inline-flex items-center gap-1 break-all">Open original <ExternalLink size={12} className="shrink-0" /></a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NewsHighlightsPanel({ highlights, onJump, onRemove }: {
+  highlights: NewsHighlight[]; onJump: (id: string) => void; onRemove: (id: string) => void;
+}) {
+  if (!highlights.length) {
+    return (
+      <div className="h-full min-h-[140px] flex flex-col items-center justify-center text-center gap-2.5 py-6">
+        <Highlighter size={20} strokeWidth={1.75} className="text-mac-ink3" />
+        <p className="text-[12.5px] text-mac-ink3 max-w-[30ch] leading-relaxed">Select any text in the article to highlight it. Your highlights show up here.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {highlights.map((h) => (
+        <div key={h.id} className="group rounded-lg border border-mac-stroke bg-mac-fill p-2.5">
+          <button onClick={() => onJump(h.id)} className="block w-full text-left">
+            <div className="flex gap-2">
+              <span className="mt-1 h-3.5 w-1 shrink-0 rounded-full" style={{ background: NEWS_HL[h.color] || NEWS_HL.yellow }} />
+              <p className="text-[12.5px] leading-snug text-mac-ink2">{h.text}</p>
+            </div>
+          </button>
+          <div className="flex items-center justify-end mt-1">
+            <button onClick={() => onRemove(h.id)} title="Remove" className="opacity-0 group-hover:opacity-100 h-6 w-6 grid place-items-center rounded-md text-mac-ink3 hover:text-mac-orange transition-all"><Trash2 size={12} /></button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function NewsReader({ target, onClose, isSaved, folders, onSave, onUnsave }: {
   target: ReadTarget; onClose: () => void; isSaved: boolean; folders: NewsFolder[];
   onSave: (folder: string) => void; onUnsave: () => void;
@@ -4048,12 +4164,18 @@ function NewsReader({ target, onClose, isSaved, folders, onSave, onUnsave }: {
   const [pickOpen, setPickOpen] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
   const [summarizing, setSummarizing] = useState(false);
+  const [tab, setTab] = useState<"info" | "notes" | "highlights">("info");
+  const [note, setNote] = useState("");
+  const [highlights, setHighlights] = useState<NewsHighlight[]>([]);
+  const [sel, setSel] = useState<{ text: string; x: number; y: number } | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
   const a = target.article;
 
   useEffect(() => {
     let alive = true;
     setLoading(true); setFailed(null); setContent(null);
     setSummary(null); setSummarizing(false);
+    setTab("info"); setNote(""); setHighlights([]); setSel(null);
     const run: Promise<ArticleContent> = target.savedId
       ? api.news.savedGet(target.savedId).then((r) => ({
           ok: true, url: r.item.url, title: r.item.title, source: r.item.source,
@@ -4070,21 +4192,79 @@ function NewsReader({ target, onClose, isSaved, folders, onSave, onUnsave }: {
     return () => { alive = false; };
   }, [target]);
 
+  const url = content?.url || a.url;
   const title = content?.title || a.title;
   const source = a.source || content?.source || "";
   const image = content?.image || a.image;
   const meta = [content?.author, content?.date].filter(Boolean).join(" · ");
 
+  // load this article's saved notes + highlights once we know its url
+  useEffect(() => {
+    let alive = true;
+    if (!url) return;
+    api.news.annotations(url).then((r) => {
+      if (!alive) return;
+      setNote(r.note || "");
+      setHighlights(r.highlights || []);
+      if (r.summary) setSummary(r.summary);   // a previously-generated summary — no need to re-run it
+    }).catch(() => { /* annotations are best-effort */ });
+    return () => { alive = false; };
+  }, [url]);
+
+  const saveNote = () => { if (url) api.news.setNote(url, note).catch(() => { /* best effort */ }); };
+
+  // text selection in the article → a floating "Highlight" button
+  const onArticleMouseUp = () => {
+    const s = window.getSelection();
+    const txt = s?.toString().trim() || "";
+    if (txt.length >= 4 && txt.length <= 600 && s && s.rangeCount > 0) {
+      const rect = s.getRangeAt(0).getBoundingClientRect();
+      setSel({ text: txt, x: rect.left + rect.width / 2, y: rect.top });
+    } else {
+      setSel(null);
+    }
+  };
+
+  const addHighlight = async (color: string) => {
+    if (!sel || !url) return;
+    const text = sel.text;
+    setSel(null);
+    window.getSelection()?.removeAllRanges();
+    try {
+      const r = await api.news.addHighlight({ url, text, color });
+      if (r.ok && r.highlight) setHighlights((h) => [...h, r.highlight]);
+    } catch { /* ignore */ }
+  };
+
+  const removeHighlight = async (hid: string) => {
+    setHighlights((h) => h.filter((x) => x.id !== hid));
+    try { await api.news.removeHighlight(hid); } catch { /* ignore */ }
+  };
+
+  const jumpToHighlight = (hid: string) => {
+    const el = scrollRef.current?.querySelector(`mark[data-hl="${hid}"]`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+
+  const clearSummary = () => {
+    setSummary(null);
+    if (url) api.news.setSummary(url, "").catch(() => { /* best effort */ });
+  };
+
   async function summarize() {
     if (!content || summarizing) return;
+    setTab("info");
     setSummary("");
     setSummarizing(true);
+    let acc = "";
     const articleText = [title, ...(content.paragraphs || [])].join("\n\n");
     try {
       await api.askStream(
         "Summarise this news article in 3–5 concise key bullet points. Use plain language. Reply with only the bullets.",
-        { context: articleText, onToken: (t) => setSummary((s) => (s ?? "") + t) },
+        { context: articleText, onToken: (t) => { acc += t; setSummary((s) => (s ?? "") + t); } },
       );
+      // cache it so reopening the article never re-summarises
+      if (url && acc.trim()) api.news.setSummary(url, acc.trim()).catch(() => { /* best effort */ });
     } catch {
       setSummary((s) => s || "Couldn't generate a summary right now. Please try again.");
     } finally {
@@ -4100,11 +4280,6 @@ function NewsReader({ target, onClose, isSaved, folders, onSave, onUnsave }: {
           <ArrowLeft size={16} strokeWidth={2} /> <span className="text-[13px]">Back</span>
         </button>
         <div className="flex items-center gap-2">
-          <button onClick={summarize} disabled={loading || !!failed || summarizing}
-            className="h-8 px-3 rounded-[9px] bg-mac-accentDim border border-mac-accent text-[12.5px] text-mac-ink flex items-center gap-1.5 hover:bg-mac-fill transition-colors disabled:opacity-40 disabled:hover:bg-mac-accentDim">
-            {summarizing ? <Loader2 size={14} className="animate-spin text-mac-accentHi" /> : <Sparkles size={14} className="text-mac-accentHi" />}
-            Summarize
-          </button>
           {isSaved ? (
             <button onClick={onUnsave}
               className="h-8 px-3 rounded-[9px] bg-mac-accentDim border border-mac-accent text-[12.5px] text-mac-ink flex items-center gap-1.5 hover:bg-mac-fill transition-colors">
@@ -4126,63 +4301,72 @@ function NewsReader({ target, onClose, isSaved, folders, onSave, onUnsave }: {
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-auto">
-        <article className="mx-auto max-w-[700px] px-8 py-10">
-          {summary !== null && (
-            <div className="mb-7 rounded-xl border border-mac-accent bg-mac-accentDim px-5 py-4 shadow-mac">
-              <div className="flex items-center justify-between mb-2.5">
-                <div className="flex items-center gap-2">
-                  <Sparkles size={14} className="text-mac-accentHi" />
-                  <span className="text-[12px] font-semibold uppercase tracking-[0.06em] text-mac-ink">Summary</span>
-                  {summarizing && <Loader2 size={12} className="animate-spin text-mac-ink3" />}
-                </div>
-                <div className="flex items-center gap-1">
-                  {!summarizing && (
-                    <button onClick={summarize} title="Re-run"
-                      className="h-6 w-6 grid place-items-center rounded-md text-mac-ink3 hover:text-mac-ink hover:bg-mac-fill transition-colors">
-                      <RefreshCw size={13} />
-                    </button>
-                  )}
-                  <button onClick={() => setSummary(null)} title="Dismiss"
-                    className="h-6 w-6 grid place-items-center rounded-md text-mac-ink3 hover:text-mac-ink hover:bg-mac-fill transition-colors">
-                    <X size={14} />
-                  </button>
-                </div>
+      <div className="flex-1 min-h-0 flex">
+        {/* article */}
+        <div ref={scrollRef} className="flex-1 min-w-0 overflow-auto" onMouseUp={onArticleMouseUp}>
+          <article className="mx-auto max-w-[700px] px-8 py-10">
+            {source && <div className="text-[12px] font-medium uppercase tracking-[0.08em] text-mac-accentHi mb-3">{source}</div>}
+            <h1 className="font-semibold text-[31px] leading-[1.16] tracking-[-0.01em] text-mac-ink" style={{ fontFamily: READER_SERIF }}>{title}</h1>
+            {meta && <div className="mt-3 text-[12.5px] text-mac-ink3">{meta}</div>}
+            {image && (
+              <img src={image} onError={(e) => { e.currentTarget.style.display = "none"; }}
+                className="mt-6 w-full rounded-xl border border-mac-stroke object-cover" />
+            )}
+            {loading ? (
+              <div className="mt-12 grid place-items-center text-mac-ink3"><Loader2 size={20} className="animate-spin" /></div>
+            ) : failed ? (
+              <div className="mt-10 rounded-xl border border-mac-stroke bg-mac-fill px-5 py-6 text-center">
+                <p className="text-[13px] text-mac-ink2">{failed}</p>
+                <a href={a.url} target="_blank" rel="noreferrer"
+                  className="mt-3 inline-flex items-center gap-1.5 text-[13px] text-mac-accentHi hover:underline">
+                  Open the original <ExternalLink size={13} />
+                </a>
               </div>
-              {summary === "" && summarizing ? (
-                <div className="flex items-center gap-1.5 py-1 text-[13px] text-mac-ink3">
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-mac-ink3 animate-pulse" />
-                  Reading the article…
-                </div>
-              ) : (
-                <div className="text-[13.5px] leading-[1.7] text-mac-ink2 whitespace-pre-wrap">{summary}</div>
-              )}
-            </div>
-          )}
-          {source && <div className="text-[12px] font-medium uppercase tracking-[0.08em] text-mac-accentHi mb-3">{source}</div>}
-          <h1 className="font-semibold text-[31px] leading-[1.16] tracking-[-0.01em] text-mac-ink" style={{ fontFamily: READER_SERIF }}>{title}</h1>
-          {meta && <div className="mt-3 text-[12.5px] text-mac-ink3">{meta}</div>}
-          {image && (
-            <img src={image} onError={(e) => { e.currentTarget.style.display = "none"; }}
-              className="mt-6 w-full rounded-xl border border-mac-stroke object-cover" />
-          )}
-          {loading ? (
-            <div className="mt-12 grid place-items-center text-mac-ink3"><Loader2 size={20} className="animate-spin" /></div>
-          ) : failed ? (
-            <div className="mt-10 rounded-xl border border-mac-stroke bg-mac-fill px-5 py-6 text-center">
-              <p className="text-[13px] text-mac-ink2">{failed}</p>
-              <a href={a.url} target="_blank" rel="noreferrer"
-                className="mt-3 inline-flex items-center gap-1.5 text-[13px] text-mac-accentHi hover:underline">
-                Open the original <ExternalLink size={13} />
-              </a>
-            </div>
-          ) : (
-            <div className="mt-7 space-y-5 text-mac-ink2" style={{ fontFamily: READER_SERIF, fontSize: "17px", lineHeight: 1.75 }}>
-              {content!.paragraphs.map((p, i) => <p key={i}>{p}</p>)}
-            </div>
-          )}
-        </article>
+            ) : (
+              <div className="mt-7 space-y-5 text-mac-ink2" style={{ fontFamily: READER_SERIF, fontSize: "17px", lineHeight: 1.75 }}>
+                {content!.paragraphs.map((p, i) => <p key={i}>{markText(p, highlights)}</p>)}
+              </div>
+            )}
+          </article>
+        </div>
+
+        {/* sidebar: Info / Notes / Highlights */}
+        <aside className="w-[340px] shrink-0 border-l border-mac-stroke flex flex-col min-h-0 bg-[rgba(255,255,255,0.015)]">
+          <div className="shrink-0 flex items-center gap-1 px-2.5 h-11 border-b border-mac-stroke">
+            <NewsTabBtn icon={Info} label="Info" active={tab === "info"} onClick={() => setTab("info")} />
+            <NewsTabBtn icon={StickyNote} label="Notes" active={tab === "notes"} onClick={() => setTab("notes")} />
+            <NewsTabBtn icon={Highlighter} label="Highlights" active={tab === "highlights"} onClick={() => setTab("highlights")} count={highlights.length} />
+          </div>
+          <div className="flex-1 min-h-0 overflow-auto p-4">
+            {tab === "info" && (
+              <NewsInfoPanel summary={summary} summarizing={summarizing} onSummarize={summarize}
+                onClearSummary={clearSummary} source={source} meta={meta} url={a.url} />
+            )}
+            {tab === "notes" && (
+              <textarea value={note} onChange={(e) => setNote(e.target.value)} onBlur={saveNote}
+                placeholder="Your notes on this article — saved automatically."
+                className="w-full h-[62vh] resize-none rounded-lg bg-mac-fill border border-mac-stroke px-3 py-2.5 text-[13px] leading-relaxed text-mac-ink placeholder:text-mac-ink3 outline-none focus:border-mac-strokeHi" />
+            )}
+            {tab === "highlights" && (
+              <NewsHighlightsPanel highlights={highlights} onJump={jumpToHighlight} onRemove={removeHighlight} />
+            )}
+          </div>
+        </aside>
       </div>
+
+      {/* floating highlight button on a text selection */}
+      {sel && (
+        <div className="fixed z-50 -translate-x-1/2 -translate-y-full" style={{ left: sel.x, top: sel.y - 8 }}>
+          <div className="flex items-center gap-1 rounded-[10px] bg-mac-fillHi border border-mac-strokeHi shadow-mac px-2 py-1.5">
+            <Highlighter size={13} className="text-mac-ink3 mr-0.5" />
+            {(["yellow", "green", "blue", "pink"] as const).map((c) => (
+              <button key={c} onMouseDown={(e) => { e.preventDefault(); addHighlight(c); }}
+                title={`Highlight ${c}`} className="h-5 w-5 rounded-full border border-black/25 hover:scale-110 transition-transform"
+                style={{ background: NEWS_HL[c] }} />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
