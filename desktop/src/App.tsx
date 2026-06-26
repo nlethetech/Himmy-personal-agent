@@ -454,50 +454,52 @@ function DoTab() {
   const cartCount = cart?.count || 0;
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="relative h-full flex flex-col">
+      {/* ambient depth — a soft glow behind the header */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-72 bg-[radial-gradient(120%_100%_at_50%_0%,rgba(64,156,255,0.07),transparent_70%)]" />
       {/* header */}
-      <div className="shrink-0 px-9 pt-7 pb-4 mx-auto w-full max-w-[1180px]">
+      <div className="relative shrink-0 px-9 pt-8 pb-4 mx-auto w-full max-w-[1180px]">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <div className="flex items-center gap-2 text-[11px] font-medium text-mac-accentHi mb-1.5">
+            <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-mac-accentHi mb-2">
               <Sparkles size={12} strokeWidth={2.2} />
               {board?.ai ? "Picked for you" : board?.stale ? "Personalizing…" : "Your Nepal concierge"}
             </div>
-            <h1 className="font-display text-[24px] font-semibold leading-tight tracking-[-0.02em] text-mac-ink">
+            <h1 className="font-display text-[28px] font-semibold leading-[1.1] tracking-[-0.025em] bg-gradient-to-b from-white to-white/75 bg-clip-text text-transparent">
               {board?.headline || "What can I get you?"}
             </h1>
             {board?.generated_at && (
               <p className="text-[11.5px] text-mac-ink3 mt-1.5">Updated {relativeAgo(board.generated_at)}</p>
             )}
           </div>
-          <div className="shrink-0 flex items-center gap-1.5">
+          <div className="shrink-0 flex items-center gap-2">
             <button onClick={() => { loadCart(); setTrayOpen(true); }} title="Your tray"
-              className="relative h-9 px-3.5 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">
+              className="relative h-9 px-3.5 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-white/[0.05] ring-1 ring-inset ring-white/10 backdrop-blur text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.09] transition-colors">
               <ShoppingCart size={14} /> Tray
               {cartCount > 0 && (
-                <span className="min-w-[17px] h-[17px] px-1 rounded-full bg-mac-accent text-white text-[10px] font-semibold grid place-items-center">{cartCount}</span>
+                <span className="min-w-[17px] h-[17px] px-1 rounded-full bg-gradient-to-b from-mac-accentHi to-mac-accent text-white text-[10px] font-semibold grid place-items-center ring-1 ring-inset ring-white/20">{cartCount}</span>
               )}
             </button>
             <button onClick={refresh} disabled={refreshing} title="Refresh picks"
-              className="h-9 px-3.5 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors disabled:opacity-60">
+              className="h-9 px-3.5 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-white/[0.05] ring-1 ring-inset ring-white/10 backdrop-blur text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.09] transition-colors disabled:opacity-60">
               <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} /> Refresh
             </button>
           </div>
         </div>
 
         {/* search — food (Foodmandu) or products (Daraz) */}
-        <div className="flex items-center gap-2 mt-4">
-          <div className="flex items-center p-0.5 rounded-[9px] bg-mac-fill border border-mac-stroke">
+        <div className="flex items-center gap-2.5 mt-5">
+          <div className="flex items-center p-0.5 rounded-[11px] bg-white/[0.04] ring-1 ring-inset ring-white/10">
             {(["food", "shop"] as const).map((k) => (
               <button key={k} onClick={() => { setSearchKind(k); if (searchQ.trim()) runSearch(searchQ, k); }}
-                className={`h-7 px-2.5 rounded-[7px] text-[12px] font-medium transition-colors ${
-                  searchKind === k ? "bg-mac-fillHi text-mac-ink" : "text-mac-ink3 hover:text-mac-ink"}`}>
+                className={`h-8 px-3 rounded-[9px] text-[12px] font-medium transition-all ${
+                  searchKind === k ? "bg-white/[0.09] text-mac-ink shadow-sm" : "text-mac-ink3 hover:text-mac-ink"}`}>
                 {k === "food" ? "Food" : "Products"}
               </button>
             ))}
           </div>
-          <div className="flex-1 flex items-center gap-2 h-9 px-3 rounded-[10px] bg-mac-fill border border-mac-stroke focus-within:border-mac-strokeHi transition-colors">
-            <Search size={14} className="text-mac-ink3 shrink-0" />
+          <div className="flex-1 flex items-center gap-2.5 h-10 px-3.5 rounded-[12px] bg-white/[0.04] ring-1 ring-inset ring-white/10 focus-within:ring-white/20 focus-within:bg-white/[0.06] transition-all">
+            <Search size={15} className="text-mac-ink3 shrink-0" />
             <input value={searchQ} onChange={(e) => setSearchQ(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") runSearch(); }}
               placeholder={searchKind === "food" ? "Search restaurants or dishes on Foodmandu…" : "Search products on Daraz…"}
@@ -511,10 +513,10 @@ function DoTab() {
         </div>
         {/* quick asks */}
         {!results && (
-          <div className="flex flex-wrap items-center gap-1.5 mt-3">
+          <div className="flex flex-wrap items-center gap-2 mt-3.5">
             {DO_CHIPS.map((c) => (
               <button key={c} onClick={() => ask(c)}
-                className="h-7 px-2.5 rounded-full text-[11.5px] bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">
+                className="h-8 px-3 rounded-full text-[11.5px] bg-white/[0.04] ring-1 ring-inset ring-white/10 text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.08] transition-colors">
                 {c}
               </button>
             ))}
@@ -535,7 +537,7 @@ function DoTab() {
               {searching ? (
                 <div className="h-40 grid place-items-center text-mac-ink3"><Loader2 size={18} className="animate-spin" /></div>
               ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
                   {results.map((p) => (
                     <DoPickCard key={p.key} p={p} rail={searchKind === "food" ? "food" : "deals"}
                       action={searchKind === "food" ? "View menu" : "Buy"}
@@ -560,16 +562,15 @@ function DoTab() {
               if (!picks.length) return null;
               const Ico = rail.icon;
               return (
-                <section key={rail.key} className="mt-7 first:mt-1">
-                  <div className="flex items-center gap-2 mb-3">
-                    <div className="h-7 w-7 grid place-items-center rounded-[8px] bg-mac-fill border border-mac-stroke">
-                      <Ico size={14} strokeWidth={2} className="text-mac-accentHi" />
-                    </div>
-                    <h2 className="font-display text-[15px] font-semibold text-mac-ink tracking-[-0.01em]">{rail.label}</h2>
+                <section key={rail.key} className="mt-9 first:mt-2">
+                  <div className="flex items-center gap-3 mb-4">
+                    <Ico size={15} strokeWidth={2} className="text-mac-accentHi shrink-0" />
+                    <h2 className="text-[12px] font-semibold uppercase tracking-[0.16em] text-mac-ink2 shrink-0">{rail.label}</h2>
+                    <div className="flex-1 h-px bg-gradient-to-r from-mac-stroke to-transparent" />
                     <button onClick={() => ask(rail.verb)} title={`Ask Himmy to ${rail.verb}`}
-                      className="text-[11.5px] text-mac-ink3 hover:text-mac-accentHi transition-colors">More →</button>
+                      className="text-[11.5px] text-mac-ink3 hover:text-mac-accentHi transition-colors shrink-0">More →</button>
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
                     {picks.map((p) => (
                       <DoPickCard key={p.key} p={p} rail={rail.key} action={rail.action}
                         onDismiss={() => dismiss(rail.key, p)}
@@ -601,48 +602,52 @@ function DoPickCard({ p, rail, action, onDismiss, onOpen, onAdd }: {
 }) {
   const isFlight = rail === "flights";
   const RailIcon = rail === "food" ? UtensilsCrossed : ShoppingBag;
+  const btn = "h-9 flex-1 px-3 rounded-[10px] text-[12px] font-semibold inline-flex items-center justify-center gap-1.5 text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 shadow-[0_3px_12px_-3px_rgba(10,132,255,0.55)] hover:shadow-[0_5px_18px_-3px_rgba(10,132,255,0.7)] hover:brightness-[1.06] transition-all";
   return (
     <div onClick={onOpen}
-      className={`group relative flex flex-col rounded-xl bg-mac-fill border border-mac-stroke hover:border-mac-strokeHi hover:shadow-mac transition-all overflow-hidden ${onOpen ? "cursor-pointer" : ""}`}>
+      className={`group relative flex flex-col rounded-2xl overflow-hidden bg-gradient-to-b from-white/[0.055] to-white/[0.018] border border-white/[0.07] shadow-[0_1px_2px_rgba(0,0,0,0.35)] hover:border-white/[0.15] hover:shadow-[0_18px_40px_-16px_rgba(0,0,0,0.8)] hover:-translate-y-0.5 transition-all duration-300 ${onOpen ? "cursor-pointer" : ""}`}>
       {/* media — a photo for food/deals, a route banner for flights */}
-      <div className="relative h-28 w-full overflow-hidden bg-mac-fillHi">
+      <div className="relative h-36 w-full overflow-hidden bg-mac-fillHi">
         {isFlight ? (
-          <div className="relative h-full w-full grid place-items-center bg-gradient-to-br from-[rgba(10,132,255,0.22)] via-[rgba(10,132,255,0.08)] to-mac-fill">
-            <Plane size={20} className="text-mac-accentHi/60 -mt-3" />
-            <div className="absolute bottom-2.5 left-3 text-[16px] font-semibold text-mac-ink tracking-[-0.01em]">{p.title}</div>
+          <div className="relative h-full w-full bg-gradient-to-br from-[rgba(10,132,255,0.28)] via-[rgba(10,132,255,0.08)] to-transparent">
+            <div className="absolute inset-0 grid place-items-center"><Plane size={22} className="text-mac-accentHi/55 -mt-4" strokeWidth={1.75} /></div>
+            <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/55 to-transparent" />
+            <div className="absolute bottom-3 left-3.5 text-[17px] font-semibold text-white tracking-[-0.01em]">{p.title}</div>
           </div>
-        ) : p.image ? (
-          <img src={p.image} alt="" loading="lazy"
-            onError={(e) => { e.currentTarget.style.display = "none"; }}
-            className="h-full w-full object-cover group-hover:scale-[1.04] transition-transform duration-300" />
         ) : (
-          <div className="h-full w-full grid place-items-center text-mac-ink3"><RailIcon size={20} /></div>
+          <>
+            {p.image
+              ? <img src={p.image} alt="" loading="lazy" onError={(e) => { e.currentTarget.style.display = "none"; }}
+                  className="h-full w-full object-cover group-hover:scale-[1.06] transition-transform duration-[600ms] ease-out" />
+              : <div className="h-full w-full grid place-items-center text-mac-ink3"><RailIcon size={22} /></div>}
+            <div className="absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-black/45 to-transparent pointer-events-none" />
+          </>
         )}
         {onDismiss && (
           <button onClick={(e) => { e.stopPropagation(); onDismiss(); }} title="Not for me — show less like this"
-            className="absolute top-1.5 right-1.5 z-10 h-6 w-6 grid place-items-center rounded-full bg-black/45 backdrop-blur text-white/80 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity">
+            className="absolute top-2 right-2 z-10 h-6 w-6 grid place-items-center rounded-full bg-black/40 backdrop-blur-md ring-1 ring-white/10 text-white/80 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity">
             <ThumbsDown size={11} />
           </button>
         )}
         {rail === "deals" && p.discount && (
-          <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-mac-green text-white text-[10.5px] font-semibold shadow-mac">{p.discount}</span>
+          <span className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-black/45 backdrop-blur-md ring-1 ring-white/10 text-mac-green text-[10.5px] font-semibold tracking-wide">{p.discount}</span>
         )}
         {rail === "food" && (
-          <span className={`absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-md text-[10.5px] font-medium backdrop-blur ${
-            p.open_now ? "bg-mac-green/90 text-white" : "bg-black/55 text-white/85"}`}>
+          <span className="absolute top-2 left-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/45 backdrop-blur-md ring-1 ring-white/10 text-[10.5px] font-medium text-white/90">
+            <span className={`h-1.5 w-1.5 rounded-full ${p.open_now ? "bg-mac-green" : "bg-white/40"}`} />
             {p.open_now ? "Open now" : "Closed"}
           </span>
         )}
       </div>
 
       {/* body */}
-      <div className="flex flex-col flex-1 p-3">
+      <div className="flex flex-col flex-1 p-3.5">
         {/* rating / sold line (not for flights) */}
         {!isFlight && (typeof p.rating === "number" && p.rating > 0 || (rail === "deals" && p.meta)) && (
-          <div className="flex items-center gap-1.5 text-[11px] text-mac-ink3 mb-1">
+          <div className="flex items-center gap-1.5 text-[11px] text-mac-ink3 mb-1.5">
             {typeof p.rating === "number" && p.rating > 0 && (
-              <span className="inline-flex items-center gap-0.5">
-                <Star size={10} className="text-mac-accentHi fill-mac-accentHi" /> {p.rating.toFixed(1)}
+              <span className="inline-flex items-center gap-1 text-mac-ink2 font-medium">
+                <Star size={11} className="text-amber-400 fill-amber-400" /> {p.rating.toFixed(1)}
               </span>
             )}
             {rail === "deals" && p.meta && <span className="truncate">· {p.meta}</span>}
@@ -650,39 +655,37 @@ function DoPickCard({ p, rail, action, onDismiss, onOpen, onAdd }: {
         )}
         {/* title (route is already in the flight banner) */}
         {!isFlight && (
-          <div className="text-[13px] text-mac-ink font-medium leading-snug line-clamp-2">{p.title}</div>
+          <div className="text-[13.5px] text-mac-ink font-medium leading-snug line-clamp-2 tracking-[-0.005em]">{p.title}</div>
         )}
         {/* price / fare */}
         {p.subtitle && rail !== "food" && (
-          <div className="flex items-baseline gap-1.5 mt-1">
-            <span className={`font-semibold text-mac-ink ${isFlight ? "text-[16px]" : "text-[14px]"}`}>{p.subtitle}</span>
+          <div className="flex items-baseline gap-1.5 mt-1.5">
+            <span className={`font-semibold text-mac-ink ${isFlight ? "text-[17px]" : "text-[15px]"} tracking-[-0.01em]`}>{p.subtitle}</span>
             {rail === "deals" && p.was && <span className="text-[11.5px] text-mac-ink3 line-through">{p.was}</span>}
             {isFlight && p.meta && <span className="text-[11px] text-mac-ink3">· {p.meta}</span>}
           </div>
         )}
         {/* why — sparkle only when it's Himmy's own reasoning */}
         {p.why && (!isFlight || p.ai) && (
-          <div className="flex items-start gap-1 mt-1.5">
+          <div className="flex items-start gap-1.5 mt-2">
             {p.ai && <Sparkles size={11} strokeWidth={2} className="text-mac-accentHi shrink-0 mt-0.5" />}
             <p className={`text-[11.5px] leading-snug line-clamp-2 ${p.ai ? "text-mac-ink2" : "text-mac-ink3"}`}>{p.why}</p>
           </div>
         )}
-        <div className="mt-auto pt-2.5 flex items-center gap-1.5">
+        <div className="mt-auto pt-3.5 flex items-center gap-2">
           {onOpen ? (
-            <button onClick={(e) => { e.stopPropagation(); onOpen(); }}
-              className="h-8 flex-1 px-3 rounded-[9px] text-[12px] font-medium inline-flex items-center justify-center gap-1.5 bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">
+            <button onClick={(e) => { e.stopPropagation(); onOpen(); }} className={btn}>
               {action} <ArrowUpRight size={13} strokeWidth={2.5} />
             </button>
           ) : (
-            <a href={p.link || "#"} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
-              className="h-8 flex-1 px-3 rounded-[9px] text-[12px] font-medium inline-flex items-center justify-center gap-1.5 bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">
+            <a href={p.link || "#"} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className={btn}>
               {action} <ArrowUpRight size={13} strokeWidth={2.5} />
             </a>
           )}
           {onAdd && (
             <button onClick={(e) => { e.stopPropagation(); onAdd(); }} title="Add to tray"
-              className="h-8 w-8 shrink-0 grid place-items-center rounded-[9px] bg-mac-fillHi border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">
-              <Plus size={14} strokeWidth={2.5} />
+              className="h-9 w-9 shrink-0 grid place-items-center rounded-[10px] bg-white/[0.06] ring-1 ring-inset ring-white/10 text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.1] transition-colors">
+              <Plus size={15} strokeWidth={2.5} />
             </button>
           )}
         </div>
@@ -739,7 +742,7 @@ function RestaurantModal({ pick, onClose, onAdded, onOpenTray }: {
             <h2 className="font-display text-[19px] font-semibold text-white tracking-[-0.01em] drop-shadow">{data?.restaurant || pick.title}</h2>
             <div className="flex items-center gap-2 text-[11.5px] text-white/80 mt-0.5">
               {typeof pick.rating === "number" && pick.rating > 0 && (
-                <span className="inline-flex items-center gap-0.5"><Star size={10} className="fill-yellow-400 text-yellow-400" /> {pick.rating.toFixed(1)}</span>
+                <span className="inline-flex items-center gap-0.5"><Star size={10} className="fill-amber-400 text-amber-400" /> {pick.rating.toFixed(1)}</span>
               )}
               {data?.item_count ? <span>· {data.item_count} items</span> : null}
               <span className={pick.open_now ? "text-mac-green" : "text-white/60"}>· {pick.open_now ? "Open now" : "Closed"}</span>
