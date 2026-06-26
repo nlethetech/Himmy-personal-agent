@@ -190,6 +190,12 @@ export type DoCartAdd = {
   key: string; name: string; price: number; qty?: number; source?: string;
   place?: string; image?: string; link?: string; checkout_link?: string;
 };
+// Live flight tickets (Buddha Air) for a route + date.
+export type DoFlight = { flight: string; depart: string; arrive: string; from: string; to: string; fare_npr: number; class: string };
+export type DoFlights = {
+  ok: boolean; fares_available?: boolean; from: string; to: string; date: string;
+  currency?: string; flights: DoFlight[]; cheapest?: DoFlight | null; booking_link?: string; message?: string;
+};
 
 // "What Himmy knows about you" — a user-authored layer + a layer Himmy learns from activity.
 export type ProfileLayer = {
@@ -520,6 +526,8 @@ export const api = {
     search: (q: string, kind: "food" | "shop") =>
       jget<{ ok: boolean; kind: string; query: string; results: DoPick[] }>(
         `/do/search?q=${encodeURIComponent(q)}&kind=${kind}`),
+    flights: (from: string, to: string, date?: string) =>
+      jget<DoFlights>(`/do/flights?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}${date ? `&date=${date}` : ""}`),
     cart: {
       view: () => jget<DoCartView>("/do/cart"),
       add: (item: DoCartAdd) => jpost<DoCartView>("/do/cart/add", item),

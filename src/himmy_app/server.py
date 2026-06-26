@@ -25,7 +25,7 @@ import os
 
 import re
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
@@ -1007,6 +1007,11 @@ def create_app() -> FastAPI:
     @app.get("/do/search")
     async def do_search(q: str, kind: str = "food") -> dict[str, Any]:
         return await do.search(q, kind)
+
+    @app.get("/do/flights")
+    async def do_flights(origin: str = Query("", alias="from"), to: str = "", date: str = "") -> dict[str, Any]:
+        # Live Buddha Air tickets (times + fares) for a route + date, so the user can SEE flights.
+        return await do.flights(origin, to, date)
 
     # the tray — a Himmy-side cart the user checks out themselves (opening the place's page)
     @app.get("/do/cart")

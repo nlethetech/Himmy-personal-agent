@@ -10,7 +10,7 @@ import {
   Gauge, Coins, Zap, CalendarClock, Bell, Play, Flag,
   Star, BellOff, Users, TrendingUp, Cpu, Sparkle,
   Info, StickyNote, Highlighter,
-  ShoppingBag, Plane, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart,
+  ShoppingBag, Plane, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart, ArrowRight,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -23,7 +23,7 @@ import {
   type RecThread, type TaskExtras, type Subtask,
   type UserProfile, type ProfileLayer,
   type DoBoard, type DoPick, type DoRestaurant, type DoMenuItem,
-  type DoCartView, type DoCartAdd,
+  type DoCartView, type DoCartAdd, type DoFlights, type DoFlight,
 } from "./lib/api";
 import { apa, mla, bibtex } from "./lib/cite";
 import Reader from "./Reader";
@@ -370,9 +370,14 @@ const DO_RAILS: { key: DoRailKey; label: string; icon: LucideIcon; action: strin
   { key: "food", label: "Eat", icon: UtensilsCrossed, action: "Order", verb: "order food on Foodmandu" },
   { key: "deals", label: "Deals", icon: ShoppingBag, action: "Buy", verb: "shop on Daraz" },
   { key: "foryou", label: "For You", icon: Heart, action: "Buy", verb: "shop for your interests" },
-  { key: "flights", label: "Fly", icon: Plane, action: "Book", verb: "find a Buddha Air flight" },
+  { key: "flights", label: "Fly", icon: Plane, action: "See flights", verb: "find a Buddha Air flight" },
 ];
-const DO_CHIPS = ["Order momos", "Find a gift under Rs 2000", "Flights to Pokhara next weekend", "Best headphone deals"];
+const DO_CHIPS = ["Order momos", "Find a gift under Rs 2000", "Best headphone deals", "Newari food near me"];
+const SEARCH_MODES: { key: "food" | "shop" | "flights"; label: string; icon: LucideIcon }[] = [
+  { key: "food", label: "Food", icon: UtensilsCrossed },
+  { key: "shop", label: "Products", icon: ShoppingBag },
+  { key: "flights", label: "Flights", icon: Plane },
+];
 
 function doPriceNum(s?: string): number {
   const m = (s || "").replace(/,/g, "").match(/(\d+(\.\d+)?)/);
@@ -389,11 +394,21 @@ function DoTab() {
   const [trayOpen, setTrayOpen] = useState(false);
   // restaurant menu modal
   const [detail, setDetail] = useState<DoPick | null>(null);
+  // flight tickets modal + flight search fields
+  const [flightRoute, setFlightRoute] = useState<{ from: string; to: string; date: string } | null>(null);
+  const defaultDate = new Date(Date.now() + 8 * 86400000).toISOString().slice(0, 10);
+  const [flFrom, setFlFrom] = useState("KTM");
+  const [flTo, setFlTo] = useState("PKR");
+  const [flDate, setFlDate] = useState(defaultDate);
   // inline search
   const [searchQ, setSearchQ] = useState("");
-  const [searchKind, setSearchKind] = useState<"food" | "shop">("food");
+  const [searchKind, setSearchKind] = useState<"food" | "shop" | "flights">("food");
   const [results, setResults] = useState<DoPick[] | null>(null);
   const [searching, setSearching] = useState(false);
+  const openFlight = (p: DoPick) => {
+    const [f, t] = (p.key || "").split("-");
+    setFlightRoute({ from: f || "KTM", to: t || "PKR", date: p.date || defaultDate });
+  };
 
   const load = async (force = false) => {
     try {
@@ -442,9 +457,9 @@ function DoTab() {
     } catch { /* ignore */ }
   };
 
-  const runSearch = async (q = searchQ, kind = searchKind) => {
+  const runSearch = async (q = searchQ, kind: "food" | "shop" | "flights" = searchKind) => {
     const term = q.trim();
-    if (!term) { setResults(null); return; }
+    if (!term || kind === "flights") { setResults(null); return; }
     setSearching(true);
     try { const r = await api.do.search(term, kind); setResults(r.results || []); }
     catch { setResults([]); } finally { setSearching(false); }
@@ -487,29 +502,50 @@ function DoTab() {
           </div>
         </div>
 
-        {/* search — food (Foodmandu) or products (Daraz) */}
-        <div className="flex items-center gap-2.5 mt-5">
-          <div className="flex items-center p-0.5 rounded-[11px] bg-white/[0.04] ring-1 ring-inset ring-white/10">
-            {(["food", "shop"] as const).map((k) => (
-              <button key={k} onClick={() => { setSearchKind(k); if (searchQ.trim()) runSearch(searchQ, k); }}
-                className={`h-8 px-3 rounded-[9px] text-[12px] font-medium transition-all ${
-                  searchKind === k ? "bg-white/[0.09] text-mac-ink shadow-sm" : "text-mac-ink3 hover:text-mac-ink"}`}>
-                {k === "food" ? "Food" : "Products"}
-              </button>
-            ))}
+        {/* unified command bar — mode segments + a context-aware search/flight field */}
+        <div className="mt-5 flex items-center h-12 rounded-2xl bg-white/[0.04] ring-1 ring-inset ring-white/10 focus-within:ring-white/[0.18] transition-all pl-1.5 pr-1.5">
+          <div className="flex items-center gap-0.5 shrink-0">
+            {SEARCH_MODES.map((m) => {
+              const MI = m.icon;
+              const on = searchKind === m.key;
+              return (
+                <button key={m.key} onClick={() => { setSearchKind(m.key); setResults(null); if (m.key !== "flights" && searchQ.trim()) runSearch(searchQ, m.key); }}
+                  className={`h-9 px-3 rounded-[10px] text-[12px] font-medium inline-flex items-center gap-1.5 transition-all ${
+                    on ? "bg-white/[0.1] text-mac-ink shadow-[0_1px_2px_rgba(0,0,0,0.25)]" : "text-mac-ink3 hover:text-mac-ink"}`}>
+                  <MI size={13} strokeWidth={2} /> {m.label}
+                </button>
+              );
+            })}
           </div>
-          <div className="flex-1 flex items-center gap-2.5 h-10 px-3.5 rounded-[12px] bg-white/[0.04] ring-1 ring-inset ring-white/10 focus-within:ring-white/20 focus-within:bg-white/[0.06] transition-all">
-            <Search size={15} className="text-mac-ink3 shrink-0" />
-            <input value={searchQ} onChange={(e) => setSearchQ(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") runSearch(); }}
-              placeholder={searchKind === "food" ? "Search restaurants or dishes on Foodmandu…" : "Search products on Daraz…"}
-              className="flex-1 bg-transparent text-[13px] text-mac-ink placeholder:text-mac-ink3 outline-none" />
-            {searchQ && (
-              <button onClick={() => { setSearchQ(""); setResults(null); }} className="text-mac-ink3 hover:text-mac-ink">
-                <X size={14} />
+          <div className="w-px h-6 bg-white/10 mx-2.5 shrink-0" />
+          {searchKind === "flights" ? (
+            <div className="flex-1 flex items-center gap-2">
+              <Plane size={15} className="text-mac-ink3 shrink-0" />
+              <input value={flFrom} onChange={(e) => setFlFrom(e.target.value)}
+                className="w-16 bg-transparent text-[13px] font-medium text-mac-ink placeholder:text-mac-ink3 outline-none uppercase" placeholder="From" />
+              <ArrowRight size={13} className="text-mac-ink3 shrink-0" />
+              <input value={flTo} onChange={(e) => setFlTo(e.target.value)}
+                className="w-16 bg-transparent text-[13px] font-medium text-mac-ink placeholder:text-mac-ink3 outline-none uppercase" placeholder="To" />
+              <input type="date" value={flDate} onChange={(e) => setFlDate(e.target.value)}
+                className="bg-transparent text-[12.5px] text-mac-ink2 outline-none [color-scheme:dark]" />
+              <div className="flex-1" />
+              <button onClick={() => flFrom.trim() && flTo.trim() && setFlightRoute({ from: flFrom.trim(), to: flTo.trim(), date: flDate })}
+                className="h-8 px-4 rounded-[9px] text-[12px] font-semibold text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 shadow-[0_2px_8px_-2px_rgba(10,132,255,0.5)] hover:brightness-[1.06] transition-all inline-flex items-center gap-1.5">
+                <Search size={13} /> Search
               </button>
-            )}
-          </div>
+            </div>
+          ) : (
+            <div className="flex-1 flex items-center gap-2.5">
+              <Search size={15} className="text-mac-ink3 shrink-0" />
+              <input value={searchQ} onChange={(e) => setSearchQ(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") runSearch(); }}
+                placeholder={searchKind === "food" ? "Search restaurants or dishes on Foodmandu…" : "Search products on Daraz…"}
+                className="flex-1 bg-transparent text-[13px] text-mac-ink placeholder:text-mac-ink3 outline-none" />
+              {searchQ && (
+                <button onClick={() => { setSearchQ(""); setResults(null); }} className="text-mac-ink3 hover:text-mac-ink shrink-0"><X size={14} /></button>
+              )}
+            </div>
+          )}
         </div>
         {/* quick asks */}
         {!results && (
@@ -574,7 +610,7 @@ function DoTab() {
                     {picks.map((p) => (
                       <DoPickCard key={p.key} p={p} rail={rail.key} action={rail.action}
                         onDismiss={() => dismiss(rail.key, p)}
-                        onOpen={rail.key === "food" ? () => setDetail(p) : undefined}
+                        onOpen={rail.key === "food" ? () => setDetail(p) : rail.key === "flights" ? () => openFlight(p) : undefined}
                         onAdd={(rail.key === "deals" || rail.key === "foryou") ? () => addProduct(p) : undefined} />
                     ))}
                   </div>
@@ -588,6 +624,9 @@ function DoTab() {
       {detail && (
         <RestaurantModal pick={detail} onClose={() => setDetail(null)}
           onAdded={(v) => { setCart(v); }} onOpenTray={() => { setDetail(null); setTrayOpen(true); }} />
+      )}
+      {flightRoute && (
+        <FlightModal route={flightRoute} onClose={() => setFlightRoute(null)} />
       )}
       {trayOpen && (
         <DoTray cart={cart} onClose={() => setTrayOpen(false)} onChange={setCart} />
@@ -822,6 +861,97 @@ function MenuItemRow({ it, added, onAdd, highlight }: {
           added ? "bg-mac-green/20 text-mac-green" : "bg-mac-accent text-white hover:bg-mac-accentHi"}`}>
         {added ? <Check size={14} strokeWidth={2.5} /> : <Plus size={14} strokeWidth={2.5} />}
       </button>
+    </div>
+  );
+}
+
+function FlightModal({ route, onClose }: { route: { from: string; to: string; date: string }; onClose: () => void }) {
+  const [data, setData] = useState<DoFlights | null>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true; setLoading(true);
+    api.do.flights(route.from, route.to, route.date)
+      .then((d) => { if (alive) setData(d); })
+      .catch(() => { if (alive) setData(null); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [route]);
+
+  const flights = data?.flights || [];
+  const dateLabel = (() => {
+    const d = new Date(route.date + "T00:00:00");
+    return isNaN(d.getTime()) ? route.date : d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  })();
+  const cheapest = data?.cheapest?.fare_npr;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/45 backdrop-blur-sm" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()}
+        className="w-[640px] max-w-[calc(100%-2rem)] max-h-[82vh] flex flex-col rounded-2xl bg-[rgba(30,31,37,0.98)] backdrop-blur-xl border border-mac-strokeHi shadow-pop overflow-hidden">
+        {/* header banner */}
+        <div className="relative shrink-0 px-5 pt-5 pb-4 bg-gradient-to-br from-[rgba(10,132,255,0.24)] via-[rgba(10,132,255,0.06)] to-transparent">
+          <button onClick={onClose} className="absolute top-3 right-3 h-7 w-7 grid place-items-center rounded-full bg-black/30 text-white/85 hover:text-white"><X size={15} /></button>
+          <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-mac-accentHi mb-2"><Plane size={12} /> Buddha Air · one way</div>
+          <div className="flex items-center gap-3 text-[23px] font-semibold text-white tracking-[-0.015em]">
+            <span>{data?.from || route.from}</span><ArrowRight size={19} className="text-mac-accentHi" /><span>{data?.to || route.to}</span>
+          </div>
+          <div className="text-[12px] text-white/70 mt-1.5">
+            {dateLabel}{flights.length ? ` · ${flights.length} flights` : ""}{cheapest ? ` · from Rs ${Math.round(cheapest).toLocaleString()}` : ""}
+          </div>
+        </div>
+        {/* flight list */}
+        <div className="flex-1 min-h-0 overflow-y-auto p-3">
+          {loading ? (
+            <div className="h-40 grid place-items-center text-mac-ink3"><Loader2 size={18} className="animate-spin" /></div>
+          ) : !flights.length ? (
+            <div className="h-40 grid place-items-center text-center text-[13px] text-mac-ink2 px-6">
+              {data?.message || "No live fares came back — open Buddha Air to check this route."}
+            </div>
+          ) : (
+            flights.map((f, i) => <FlightRow key={`${f.flight}-${f.depart}-${i}`} f={f} best={i === 0} bookLink={data?.booking_link} />)
+          )}
+        </div>
+        {/* footer */}
+        <div className="shrink-0 flex items-center justify-between gap-3 px-5 py-3 border-t border-mac-stroke">
+          <span className="text-[11px] text-mac-ink3">Live fares · you complete the booking on Buddha Air</span>
+          <a href={data?.booking_link || "#"} target="_blank" rel="noreferrer"
+            className="h-9 px-4 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">
+            Open Buddha Air <ArrowUpRight size={14} strokeWidth={2.5} />
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FlightRow({ f, best, bookLink }: { f: DoFlight; best: boolean; bookLink?: string }) {
+  return (
+    <div className={`flex items-center gap-3 sm:gap-4 p-3 rounded-xl border mb-2 transition-colors ${
+      best ? "border-mac-accentHi/30 bg-[rgba(10,132,255,0.06)]" : "border-mac-stroke bg-mac-fill"}`}>
+      <div className="flex items-center gap-2.5 sm:gap-3.5 shrink-0">
+        <div className="text-center w-12">
+          <div className="text-[16px] font-semibold text-mac-ink tnum leading-none">{f.depart}</div>
+          <div className="text-[9.5px] text-mac-ink3 mt-1 truncate">{(f.from || "").slice(0, 3)}</div>
+        </div>
+        <div className="flex flex-col items-center gap-0.5 w-10">
+          <div className="h-px w-full bg-mac-stroke relative"><Plane size={11} className="absolute -top-[5px] right-0 text-mac-accentHi" /></div>
+        </div>
+        <div className="text-center w-12">
+          <div className="text-[16px] font-semibold text-mac-ink tnum leading-none">{f.arrive}</div>
+          <div className="text-[9.5px] text-mac-ink3 mt-1 truncate">{(f.to || "").slice(0, 3)}</div>
+        </div>
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-[12px] text-mac-ink2 font-medium">{f.flight}</div>
+        <div className="text-[10.5px] text-mac-ink3">{f.class ? `Class ${f.class}` : ""}{best ? " · Cheapest" : ""}</div>
+      </div>
+      <div className="text-right shrink-0">
+        <div className="text-[15px] font-semibold text-mac-ink tracking-[-0.01em]">Rs {Math.round(f.fare_npr).toLocaleString()}</div>
+      </div>
+      <a href={bookLink || "#"} target="_blank" rel="noreferrer"
+        className="h-8 px-3.5 shrink-0 rounded-[9px] text-[12px] font-semibold text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 hover:brightness-[1.06] transition-all inline-flex items-center gap-1.5">
+        Book <ArrowUpRight size={12} strokeWidth={2.5} />
+      </a>
     </div>
   );
 }

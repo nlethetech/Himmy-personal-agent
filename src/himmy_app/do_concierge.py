@@ -309,6 +309,14 @@ class DoConcierge:
             recommended = sorted(all_items, key=lambda x: float(x.get("price") or 1e9))[:6]
         return {**menu, "recommended": recommended[:8]}
 
+    # ---- flight tickets: live Buddha Air fares for a route + date ----------------------------
+    async def flights(self, origin: str, destination: str, date: str = "") -> dict[str, Any]:
+        from himmy_app.connectors.buddha_air import buddha_air_flights
+
+        if not date:
+            date = (datetime.date.today() + datetime.timedelta(days=8)).isoformat()
+        return await buddha_air_flights({"origin": origin, "destination": destination, "date": date})
+
     # ---- inline search over food (Foodmandu) + shopping (Daraz) ------------------------------
     async def search(self, query: str, kind: str = "food") -> dict[str, Any]:
         query = (query or "").strip()
