@@ -190,6 +190,15 @@ export type DoCartAdd = {
   key: string; name: string; price: number; qty?: number; source?: string;
   place?: string; image?: string; link?: string; checkout_link?: string;
 };
+// Permissions — what Himmy is allowed to do, per connection.
+export type PermLevel = { value: string; label: string };
+export type PermSurface = {
+  key: string; label: string; service: string; desc: string;
+  levels: PermLevel[]; level: string; requires?: string | null;
+  granted_tools: string[]; connected?: boolean; account?: string | null;
+};
+export type PermsCatalog = { ok: boolean; surfaces: PermSurface[]; levels: Record<string, string> };
+
 // Live flight tickets (Buddha Air) for a route + date.
 export type DoFlight = { flight: string; depart: string; arrive: string; from: string; to: string; fare_npr: number; class: string };
 export type DoFlights = {
@@ -535,6 +544,11 @@ export const api = {
       remove: (key: string) => jpost<DoCartView>("/do/cart/remove", { key, qty: 0 }),
       clear: () => jpost<DoCartView>("/do/cart/clear", {}),
     },
+  },
+
+  permissions: {
+    get: () => jget<PermsCatalog>("/permissions"),
+    set: (levels: Record<string, string>) => jput<PermsCatalog>("/permissions", { levels }),
   },
   tasks: {
     list: () => jget<{ ok: boolean; tasks: Task[]; open: number; total: number }>("/tasks"),

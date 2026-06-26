@@ -240,6 +240,10 @@ class DoCartQtyRequest(BaseModel):
     qty: int
 
 
+class PermissionsUpdate(BaseModel):
+    levels: dict[str, str]
+
+
 def _advance_due(due: str | None, recur: str) -> str:
     """Next due date for a recurring task: advance from its due (or today) by the repeat interval."""
     import calendar
@@ -1239,6 +1243,22 @@ def create_app() -> FastAPI:
     @app.get("/google/status")
     async def google_status() -> dict[str, Any]:
         return _google_status_dict()
+
+    # ---- permissions: what Himmy is allowed to do, per connection -----------------------
+    from himmy_app import permissions as _perms
+
+    def _permissions_payload() -> dict[str, Any]:
+        g = _google_status_dict()
+        return _perms.catalog(cfg, google_connected=bool(g.get("connected")), google_email=g.get("email"))
+
+    @app.get("/permissions")
+    async def permissions_get() -> dict[str, Any]:
+        return _permissions_payload()
+
+    @app.put("/permissions")
+    async def permissions_set(body: PermissionsUpdate) -> dict[str, Any]:
+        _perms.save(body.levels, cfg)
+        return _permissions_payload()
 
     @app.post("/google/client")
     async def google_set_client(body: GoogleClientRequest) -> dict[str, Any]:

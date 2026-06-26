@@ -24,6 +24,7 @@ import {
   type UserProfile, type ProfileLayer,
   type DoBoard, type DoPick, type DoRestaurant, type DoMenuItem,
   type DoCartView, type DoCartAdd, type DoFlights, type DoFlight,
+  type PermsCatalog, type PermSurface,
 } from "./lib/api";
 import { apa, mla, bibtex } from "./lib/cite";
 import Reader from "./Reader";
@@ -2400,6 +2401,65 @@ function ConnectionsSection({ g }: { g: ReturnType<typeof useGoogle> }) {
   );
 }
 
+function PermissionsSection({ onGoConnections }: { onGoConnections: () => void }) {
+  const [data, setData] = useState<PermsCatalog | null>(null);
+  useEffect(() => { api.permissions.get().then(setData).catch(() => {}); }, []);
+  const setLevel = async (key: string, value: string) => {
+    setData((d) => d ? { ...d, surfaces: d.surfaces.map((s) => s.key === key ? { ...s, level: value } : s) } : d);
+    try { setData(await api.permissions.set({ [key]: value })); } catch { /* keep optimistic */ }
+  };
+  return (
+    <div className="space-y-4">
+      <SectionHeader title="Permissions"
+        sub="Decide exactly what Himmy can access and do. Changes take effect immediately — anything you turn off is declined gracefully." />
+      {!data ? (
+        <div className="h-32 grid place-items-center text-mac-ink3"><Loader2 size={18} className="animate-spin" /></div>
+      ) : (
+        <div className="space-y-2">
+          {data.surfaces.map((s) => (
+            <PermissionRow key={s.key} s={s} onSet={(v) => setLevel(s.key, v)} onGoConnections={onGoConnections} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PermissionRow({ s, onSet, onGoConnections }: {
+  s: PermSurface; onSet: (v: string) => void; onGoConnections: () => void;
+}) {
+  const needsGoogle = s.requires === "google" && !s.connected;
+  return (
+    <div className="rounded-xl border border-mac-stroke bg-mac-fill p-3.5 flex items-start justify-between gap-4">
+      <div className="min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[13px] font-medium text-mac-ink">{s.label}</span>
+          {s.service && <span className="text-[11px] text-mac-ink3">· {s.service}</span>}
+          {needsGoogle && <Pill tone="orange">Not connected</Pill>}
+        </div>
+        <div className="text-[11.5px] text-mac-ink3 mt-0.5 max-w-[44ch] leading-snug">{s.desc}</div>
+        {needsGoogle && (
+          <button onClick={onGoConnections} className="text-[11px] text-mac-accentHi hover:underline mt-1">Connect Google →</button>
+        )}
+      </div>
+      <div className="shrink-0 flex items-center p-0.5 rounded-[10px] bg-black/20 ring-1 ring-inset ring-white/[0.06]">
+        {s.levels.map((l) => {
+          const on = s.level === l.value;
+          const isOff = l.value === "off";
+          return (
+            <button key={l.value} onClick={() => onSet(l.value)}
+              className={`h-7 px-2.5 rounded-[8px] text-[11.5px] font-medium transition-colors whitespace-nowrap ${
+                on ? (isOff ? "bg-mac-red/20 text-mac-red" : "bg-mac-fillHi text-mac-ink shadow-sm")
+                   : "text-mac-ink3 hover:text-mac-ink"}`}>
+              {l.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function Pill({ tone, children }: { tone: "green" | "orange" | "neutral"; children: React.ReactNode }) {
   const cls = tone === "green" ? "bg-mac-green/15 text-mac-green"
     : tone === "orange" ? "bg-mac-orange/15 text-mac-orange" : "bg-mac-fillHi text-mac-ink3";
@@ -2515,10 +2575,11 @@ function PlanSection() {
   );
 }
 
-type AccountTab = "you" | "connections" | "backup" | "preferences" | "plan";
+type AccountTab = "you" | "connections" | "permissions" | "backup" | "preferences" | "plan";
 const ACCOUNT_SECTIONS: { id: AccountTab; label: string; icon: LucideIcon }[] = [
   { id: "you", label: "You", icon: Sparkles },
   { id: "connections", label: "Connections", icon: Link2 },
+  { id: "permissions", label: "Permissions", icon: ShieldCheck },
   { id: "backup", label: "Backup & Sync", icon: FileDown },
   { id: "preferences", label: "Preferences", icon: Settings },
   { id: "plan", label: "Plan & Billing", icon: Coins },
@@ -2572,6 +2633,7 @@ function AccountPanel({ onClose }: { onClose: () => void }) {
           <div className="flex-1 min-h-0 overflow-auto p-5">
             {tab === "you" && <ProfileSettings />}
             {tab === "connections" && <ConnectionsSection g={g} />}
+            {tab === "permissions" && <PermissionsSection onGoConnections={() => setTab("connections")} />}
             {tab === "preferences" && <PreferencesSection dir={dir} onReveal={reveal} />}
             {tab === "plan" && <PlanSection />}
             {tab === "backup" && (

@@ -62,6 +62,19 @@ def _build_runtime(cfg: Any, on_event: Any, *, checkpoint_store: Any = None) -> 
     from himmy.runtime.from_spec import build_runtime_for_spec, load_spec_file
 
     spec = load_spec_file(str(_SPEC), provider=cfg.provider, model=cfg.model)
+
+    # Enforce the user's live permissions (Settings → Permissions): filter the tool allowlist so
+    # denied tools never reach the model, and tell the persona what's off so it declines gracefully.
+    try:
+        from himmy_app import permissions
+
+        spec.tools = permissions.gate_tools(list(spec.tools), cfg)
+        note = permissions.disabled_note(cfg)
+        if note:
+            spec.instructions = list(spec.instructions) + [note]
+    except Exception:  # noqa: BLE001 - permissions must never break building the agent
+        pass
+
     runtime, _registry = build_runtime_for_spec(
         spec, provider=cfg.provider, model=cfg.model, on_event=on_event, durable_defaults=True,
         checkpoint_store=checkpoint_store,

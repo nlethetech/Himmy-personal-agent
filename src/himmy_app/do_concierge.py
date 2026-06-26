@@ -283,6 +283,18 @@ class DoConcierge:
         self._spawn_refresh()  # let the next board reflect the new taste
         return out
 
+    # ---- permissions: the Concierge respects Settings → Permissions too --------------------
+    def _on(self, key: str) -> bool:
+        try:
+            from himmy_app import permissions
+
+            return permissions.level_of(key, self.cfg) != "off"
+        except Exception:  # noqa: BLE001 - if permissions can't load, default to allowed
+            return True
+
+    async def _none(self) -> list[dict[str, Any]]:
+        return []
+
     # ---- restaurant detail: the full menu + dishes recommended for the user ------------------
     def _food_pref_tokens(self) -> set[str]:
         """Words from the user's saved favourite foods/cuisines (e.g. {'momo','pizza','sekuwa'})."""
@@ -296,6 +308,8 @@ class DoConcierge:
         return toks
 
     async def restaurant_detail(self, vendor_id: str = "", name: str = "") -> dict[str, Any]:
+        if not self._on("food"):
+            return {"ok": False, "message": "Food (Foodmandu) is turned off in Settings → Permissions."}
         from himmy_app.connectors.foodmandu import foodmandu_menu
 
         menu = await foodmandu_menu({"vendor_id": vendor_id, "restaurant": name})
@@ -373,6 +387,9 @@ class DoConcierge:
         return resolved
 
     async def flights(self, origin: str, destination: str, date: str = "") -> dict[str, Any]:
+        if not self._on("flights"):
+            return {"ok": False, "flights": [], "from": origin, "to": destination, "date": date,
+                    "message": "Flights (Buddha Air) is turned off in Settings → Permissions."}
         from himmy_app.connectors.buddha_air import buddha_air_flights
 
         if not date:
@@ -389,6 +406,10 @@ class DoConcierge:
         query = (query or "").strip()
         if not query:
             return {"ok": False, "results": [], "message": "Type something to search."}
+        surface = "shopping" if kind == "shop" else "food"
+        if not self._on(surface):
+            label = "Shopping (Daraz)" if kind == "shop" else "Food (Foodmandu)"
+            return {"ok": False, "results": [], "message": f"{label} is turned off in Settings → Permissions."}
         if kind == "shop":
             from himmy_app.connectors.daraz import daraz_search
 
@@ -417,11 +438,12 @@ class DoConcierge:
         food_seeds = _seeds_from_vault(vault, _FOOD_VAULT_HINTS, _FOOD_SEEDS)
         deal_seeds = _seeds_from_vault(vault, _DEAL_VAULT_HINTS, _DEAL_SEEDS)
         shop_seeds = _seeds_from_vault(vault, _SHOP_VAULT_HINTS, _SHOP_SEEDS)
+        # Skip any rail whose surface the user turned off in Settings → Permissions.
         food, deals, foryou, flights = await asyncio.gather(
-            self._food(food_seeds, dismissed, weights),
-            self._deals(deal_seeds, dismissed, weights),
-            self._shop_foryou(shop_seeds, dismissed, weights),
-            self._flights(vault, dismissed),
+            self._food(food_seeds, dismissed, weights) if self._on("food") else self._none(),
+            self._deals(deal_seeds, dismissed, weights) if self._on("shopping") else self._none(),
+            self._shop_foryou(shop_seeds, dismissed, weights) if self._on("shopping") else self._none(),
+            self._flights(vault, dismissed) if self._on("flights") else self._none(),
             return_exceptions=True,
         )
         return {
