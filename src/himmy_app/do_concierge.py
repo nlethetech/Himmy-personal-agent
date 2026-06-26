@@ -417,47 +417,66 @@ class DoConcierge:
             pass
         return None
 
-    async def _pois(self, lat: float, lon: float) -> list[dict[str, str]]:
-        """Real nearby attractions/viewpoints/historic/natural spots via OSM Overpass."""
+    async def _osm_places(self, lat: float, lon: float) -> dict[str, list[dict[str, Any]]]:
+        """ONE Overpass call → real attractions, hotels and restaurants near a point (keyless).
+        Combined into a single request to stay polite to the free server (no rate-limit storms)."""
         import httpx
 
-        q = (f'[out:json][timeout:25];('
+        q = (f'[out:json][timeout:30];('
              f'node["tourism"~"attraction|viewpoint|museum|theme_park"](around:8000,{lat},{lon});'
              f'node["historic"](around:8000,{lat},{lon});'
-             f'node["leisure"="park"](around:8000,{lat},{lon});'
-             f'node["natural"="peak"](around:12000,{lat},{lon}););out body 40;')
+             f'node["natural"="peak"](around:12000,{lat},{lon});'
+             f'node["tourism"~"hotel|guest_house|hostel|resort"](around:7000,{lat},{lon});'
+             f'way["tourism"~"hotel|guest_house|hostel|resort"](around:7000,{lat},{lon});'
+             f'node["amenity"="restaurant"](around:6000,{lat},{lon}););out tags 260;')
+        attractions: list[dict[str, Any]] = []
+        hotels: list[dict[str, Any]] = []
+        restaurants: list[dict[str, Any]] = []
+        seen: set[str] = set()
         try:
-            async with httpx.AsyncClient(timeout=35, headers={"User-Agent": "HimmyApp/1.0 (concierge)"}) as c:
+            async with httpx.AsyncClient(timeout=40, headers={"User-Agent": "HimmyApp/1.0 (concierge)"}) as c:
                 r = await c.post("https://overpass-api.de/api/interpreter", data={"data": q})
-            out: list[dict[str, str]] = []
-            seen: set[str] = set()
             for e in r.json().get("elements", []):
                 t = e.get("tags", {})
                 name = (t.get("name") or "").strip()
-                if not name or name.lower() in seen or name.isdigit():
+                if not name or name.isdigit() or name.lower() in seen:
                     continue
                 seen.add(name.lower())
-                out.append({"name": name, "kind": t.get("tourism") or t.get("historic")
-                            or t.get("leisure") or t.get("natural") or "spot"})
-            return out[:25]
-        except Exception:  # noqa: BLE001
-            return []
+                tourism = t.get("tourism", "")
+                area = (t.get("addr:suburb") or t.get("addr:neighbourhood") or t.get("addr:street") or "").strip()
+                if tourism in ("hotel", "guest_house", "hostel", "resort"):
+                    hotels.append({"name": name, "type": "guesthouse" if tourism == "guest_house" else tourism,
+                                   "stars": str(t.get("stars") or "").strip(), "area": area})
+                elif t.get("amenity") == "restaurant":
+                    restaurants.append({"name": name, "cuisine": (t.get("cuisine") or "").replace("_", " ")})
+                else:
+                    attractions.append({"name": name, "kind": tourism or t.get("historic")
+                                        or t.get("natural") or "spot"})
+        except Exception:  # noqa: BLE001 - best-effort; the model can plan on its own knowledge
+            pass
+        return {"attractions": attractions[:25], "hotels": hotels[:30], "restaurants": restaurants[:25]}
 
-    async def trip(self, destination: str, days: int = 2) -> dict[str, Any]:
+    @staticmethod
+    def _hotel_book_link(name: str, dest: str) -> str:
+        from urllib.parse import quote_plus
+
+        return f"https://www.booking.com/searchresults.html?ss={quote_plus(f'{name}, {dest}')}"
+
+    async def trip(self, destination: str, days: int = 2, style: str = "comfort") -> dict[str, Any]:
         destination = (destination or "").strip()
         if not destination:
             return {"ok": False, "message": "Where would you like to go?"}
         days = max(1, min(int(days or 2), 7))
-        cache_key = f"{destination.lower()}|{days}"
+        style = style if style in ("budget", "comfort", "luxury") else "comfort"
+        cache_key = f"{destination.lower()}|{days}|{style}"
         cached = self._trip_cache().get(cache_key)
         if cached:
             return cached
-        # Ground the plan in REAL local spots so Himmy curates rather than invents.
+        # Ground the plan in REAL local spots/hotels/restaurants so Himmy curates rather than invents.
         geo = await self._geocode(destination)
-        pois = await self._pois(*geo) if geo else []
-        poi_str = "; ".join(f"{p['name']} ({p['kind']})" for p in pois) or "(none found — use your own knowledge)"
-        # Optional "getting there" — a Buddha Air flight from the user's home airport.
-        getting_there = None
+        places = await self._osm_places(*geo) if geo else {"attractions": [], "hotels": [], "restaurants": []}
+        # Getting there — a Buddha Air flight from the user's home airport (also feeds the budget).
+        getting_there, flight_fare = None, None
         if self._on("flights"):
             code = await self._resolve_airport(destination)
             home = _home_airport(_vault(self.cfg))
@@ -468,46 +487,70 @@ class DoConcierge:
                     date = (datetime.date.today() + datetime.timedelta(days=14)).isoformat()
                     fr = await buddha_air_flights({"origin": home, "destination": code, "date": date})
                     if fr.get("ok") and fr.get("cheapest"):
+                        flight_fare = fr["cheapest"].get("fare_npr")
                         getting_there = {"from": home, "to": code, "cheapest": fr["cheapest"],
                                          "booking_link": fr.get("booking_link")}
                 except Exception:  # noqa: BLE001
                     pass
-        roadmap = await self._plan_trip(destination, days, poi_str)
-        if not roadmap:
+        plan = await self._plan_trip(destination, days, style, places, flight_fare)
+        if not plan:
             return {"ok": False, "message": "Couldn't build a plan just now — try again."}
-        out = {"ok": True, "destination": destination, "days": days,
-               "getting_there": getting_there, **roadmap}
+        for h in plan.get("hotels", []):  # a booking deep-link for each picked hotel
+            h["book_link"] = self._hotel_book_link(str(h.get("name") or ""), destination)
+        out = {"ok": True, "destination": destination, "days": days, "style": style,
+               "getting_there": getting_there, **plan}
         self._trip_cache_write(cache_key, out)
         return out
 
-    async def _plan_trip(self, destination: str, days: int, poi_str: str) -> dict[str, Any] | None:
+    async def _plan_trip(self, destination: str, days: int, style: str,
+                         places: dict[str, list[dict[str, Any]]], flight_fare: float | None) -> dict[str, Any] | None:
         from himmy_app import user_profile
         from himmy.cli.provider import build_inference_for
         from himmy.services.inference.models import InferenceMessage, InferenceRequest
 
         profile = user_profile.render_for_prompt(cfg=self.cfg) or "(no saved profile)"
+        attr = "; ".join(f"{p['name']} ({p['kind']})" for p in places["attractions"]) or "(use your own knowledge)"
+        hotel_lines = "; ".join(
+            f"{h['name']} [{h['type']}{', ' + h['stars'] + '★' if h.get('stars') else ''}"
+            f"{', ' + h['area'] if h.get('area') else ''}]" for h in places["hotels"]) or "(none found)"
+        rest_lines = "; ".join(f"{r['name']}{' (' + r['cuisine'] + ')' if r.get('cuisine') else ''}"
+                               for r in places["restaurants"]) or "(none found)"
+        fare_note = (f"Use ~NPR {int(flight_fare) * 2} for the round-trip flights budget line "
+                     f"(NPR {int(flight_fare)} each way, Buddha Air)." if flight_fare else
+                     "No flight is needed/available — omit the flights line or set it to 0.")
         system = (
-            "You are Himmy, a sharp Nepal travel planner. Build a realistic DAY-BY-DAY roadmap of "
-            "places to visit and things to do — no maps, just a clear plan. Ground it in your real "
-            "knowledge of the destination AND the verified local spots provided; never invent places "
-            "that don't exist. Tailor to the user's profile where relevant. Reply with ONLY JSON: "
-            '{"summary":"<one warm sentence>","itinerary":[{"day":1,"title":"<short theme>",'
-            '"items":[{"name":"<place/activity>","category":"<Nature|Culture|Food|Adventure|Relax|'
-            'Shopping>","desc":"<one sentence>","tip":"<short optional tip>"}]}],"tips":["<short '
-            'practical tip>"]}. 2-4 items per day; be specific and local.'
+            "You are Himmy, a sharp Nepal travel planner. Produce a PREMIUM, realistic plan shaped by the "
+            "traveller's STYLE (budget/comfort/luxury) — style drives the hotel choice, the budget, and the "
+            "pace. GROUND everything in the real data given: pick HOTELS only from the hotel list and EAT "
+            "spots only from the restaurant list (you may add a famous attraction from your own knowledge). "
+            "Estimate costs from typical Nepal prices and give realistic NPR ranges. Reply with ONLY JSON: {"
+            '"summary":"<one warm sentence>",'
+            '"budget":{"currency":"NPR","per_person":true,"total_min":<int>,"total_max":<int>,'
+            '"breakdown":[{"label":"<Flights|Stay|Food|Activities|Local transport>","min":<int>,"max":<int>,'
+            '"note":"<short optional>"}]},'
+            '"hotels":[{"name":"<from list>","type":"<hotel|guesthouse|hostel|resort>","area":"<short>",'
+            '"why":"<one sentence matched to the style>"}],'
+            '"eat":[{"name":"<from list>","cuisine":"<short>","why":"<one sentence>"}],'
+            '"itinerary":[{"day":1,"title":"<short theme>","items":[{"name":"<place/activity>",'
+            '"category":"<Nature|Culture|Food|Adventure|Relax|Shopping>","desc":"<one sentence>",'
+            '"tip":"<short optional>"}]}],"tips":["<short practical tip>"]}. '
+            "Pick 3 hotels and 3-4 eat spots that fit the style; 2-4 items per day; be specific and local."
         )
-        user = (f"Destination: {destination}\nDays: {days}\nVerified local spots (OSM): {poi_str}\n\n"
-                f"About the traveller:\n{profile}\n\nBuild the roadmap.")
+        user = (f"Destination: {destination}\nDays: {days}\nTravel style: {style}\n{fare_note}\n\n"
+                f"Hotels (real, OSM): {hotel_lines}\n\nRestaurants (real, OSM): {rest_lines}\n\n"
+                f"Attractions (real, OSM): {attr}\n\nAbout the traveller:\n{profile}\n\nBuild the plan.")
         try:
             svc = build_inference_for(self.cfg.provider, self.cfg.model)
             resp = await svc.run(InferenceRequest(
                 messages=[InferenceMessage(role="system", content=system),
                           InferenceMessage(role="user", content=user)],
-                generation_params={"temperature": 0.4}, timeout_seconds=70.0))
+                generation_params={"temperature": 0.4}, timeout_seconds=95.0))
             data = _extract_json(resp.output_text or "")
             if isinstance(data, dict) and data.get("itinerary"):
                 return {"summary": str(data.get("summary") or "").strip(),
-                        "itinerary": data.get("itinerary") or [], "tips": data.get("tips") or []}
+                        "budget": data.get("budget") or {}, "hotels": data.get("hotels") or [],
+                        "eat": data.get("eat") or [], "itinerary": data.get("itinerary") or [],
+                        "tips": data.get("tips") or []}
         except Exception:  # noqa: BLE001
             pass
         return None

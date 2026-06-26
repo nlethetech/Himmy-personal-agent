@@ -210,13 +210,20 @@ export type DoFlights = {
   ok: boolean; fares_available?: boolean; from: string; to: string; date: string;
   currency?: string; flights: DoFlight[]; cheapest?: DoFlight | null; booking_link?: string; message?: string;
 };
-// A trip roadmap — day-by-day places/activities for a destination.
+// A trip roadmap — day-by-day places/activities for a destination, with budget, hotels & eat.
 export type DoTripItem = { name: string; category?: string; desc?: string; tip?: string };
 export type DoTripDay = { day: number; title: string; items: DoTripItem[] };
 export type DoTripFlight = { from: string; to: string; cheapest?: DoFlight | null; booking_link?: string };
+export type DoTripBudgetRow = { label: string; min: number; max: number; note?: string };
+export type DoTripBudget = {
+  currency?: string; per_person?: boolean; total_min?: number; total_max?: number; breakdown?: DoTripBudgetRow[];
+};
+export type DoTripHotel = { name: string; type?: string; area?: string; why?: string; book_link?: string };
+export type DoTripEat = { name: string; cuisine?: string; why?: string };
 export type DoTrip = {
-  ok: boolean; destination: string; days: number; summary?: string;
-  getting_there?: DoTripFlight | null; itinerary: DoTripDay[]; tips?: string[]; message?: string;
+  ok: boolean; destination: string; days: number; style?: string; summary?: string;
+  getting_there?: DoTripFlight | null; budget?: DoTripBudget; hotels?: DoTripHotel[]; eat?: DoTripEat[];
+  itinerary: DoTripDay[]; tips?: string[]; message?: string;
 };
 
 // "What Himmy knows about you" — a user-authored layer + a layer Himmy learns from activity.
@@ -550,8 +557,8 @@ export const api = {
         `/do/search?q=${encodeURIComponent(q)}&kind=${kind}`),
     flights: (from: string, to: string, date?: string) =>
       jget<DoFlights>(`/do/flights?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}${date ? `&date=${date}` : ""}`),
-    trip: (dest: string, days = 2) =>
-      jget<DoTrip>(`/do/trip?dest=${encodeURIComponent(dest)}&days=${days}`),
+    trip: (dest: string, days = 2, style = "comfort") =>
+      jget<DoTrip>(`/do/trip?dest=${encodeURIComponent(dest)}&days=${days}&style=${style}`),
     cart: {
       view: () => jget<DoCartView>("/do/cart"),
       add: (item: DoCartAdd) => jpost<DoCartView>("/do/cart/add", item),

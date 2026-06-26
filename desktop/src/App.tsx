@@ -11,7 +11,7 @@ import {
   Star, BellOff, Users, TrendingUp, Cpu, Sparkle,
   Info, StickyNote, Highlighter,
   ShoppingBag, Plane, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart, ArrowRight, ConciergeBell,
-  Route, Lightbulb,
+  Route, Lightbulb, BedDouble, Wallet,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -26,7 +26,7 @@ import {
   type DoBoard, type DoPick, type DoRestaurant, type DoMenuItem,
   type DoCartView, type DoCartAdd, type DoFlights, type DoFlight,
   type PermsCatalog, type PermSurface, type ActivityItem,
-  type DoTrip, type DoTripDay, type DoTripItem,
+  type DoTrip, type DoTripDay, type DoTripItem, type DoTripHotel, type DoTripEat,
 } from "./lib/api";
 import { apa, mla, bibtex } from "./lib/cite";
 import Reader from "./Reader";
@@ -407,7 +407,8 @@ function DoTab() {
   // trip roadmap
   const [tripDest, setTripDest] = useState("");
   const [tripDays, setTripDays] = useState(2);
-  const [tripOpen, setTripOpen] = useState<{ dest: string; days: number } | null>(null);
+  const [tripStyle, setTripStyle] = useState<"budget" | "comfort" | "luxury">("comfort");
+  const [tripOpen, setTripOpen] = useState<{ dest: string; days: number; style: string } | null>(null);
   // inline search
   const [searchQ, setSearchQ] = useState("");
   const [searchKind, setSearchKind] = useState<"food" | "shop" | "flights" | "trips">("food");
@@ -540,15 +541,24 @@ function DoTab() {
             <div className="flex-1 flex items-center gap-2">
               <Route size={15} className="text-mac-ink3 shrink-0" />
               <input value={tripDest} onChange={(e) => setTripDest(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && tripDest.trim()) setTripOpen({ dest: tripDest.trim(), days: tripDays }); }}
+                onKeyDown={(e) => { if (e.key === "Enter" && tripDest.trim()) setTripOpen({ dest: tripDest.trim(), days: tripDays, style: tripStyle }); }}
                 placeholder="Where to? e.g. Pokhara, Chitwan, Lumbini…"
-                className="flex-1 bg-transparent text-[13px] text-mac-ink placeholder:text-mac-ink3 outline-none" />
+                className="flex-1 min-w-0 bg-transparent text-[13px] text-mac-ink placeholder:text-mac-ink3 outline-none" />
+              <div className="flex items-center p-0.5 rounded-[8px] bg-black/20 ring-1 ring-inset ring-white/[0.06] shrink-0">
+                {(["budget", "comfort", "luxury"] as const).map((s) => (
+                  <button key={s} onClick={() => setTripStyle(s)} title={`${s} travel`}
+                    className={`h-6 px-2 rounded-[6px] text-[11px] font-medium capitalize transition-colors ${
+                      tripStyle === s ? "bg-white/[0.1] text-mac-ink" : "text-mac-ink3 hover:text-mac-ink"}`}>
+                    {s}
+                  </button>
+                ))}
+              </div>
               <select value={tripDays} onChange={(e) => setTripDays(+e.target.value)}
-                className="bg-transparent text-[12.5px] text-mac-ink2 outline-none [color-scheme:dark] cursor-pointer">
+                className="bg-transparent text-[12.5px] text-mac-ink2 outline-none [color-scheme:dark] cursor-pointer shrink-0">
                 {[1, 2, 3, 4, 5, 6, 7].map((n) => <option key={n} value={n}>{n} day{n > 1 ? "s" : ""}</option>)}
               </select>
-              <button onClick={() => tripDest.trim() && setTripOpen({ dest: tripDest.trim(), days: tripDays })}
-                className="h-8 px-4 rounded-[9px] text-[12px] font-semibold text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 shadow-[0_2px_8px_-2px_rgba(10,132,255,0.5)] hover:brightness-[1.06] transition-all inline-flex items-center gap-1.5">
+              <button onClick={() => tripDest.trim() && setTripOpen({ dest: tripDest.trim(), days: tripDays, style: tripStyle })}
+                className="h-8 px-4 shrink-0 rounded-[9px] text-[12px] font-semibold text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 shadow-[0_2px_8px_-2px_rgba(10,132,255,0.5)] hover:brightness-[1.06] transition-all inline-flex items-center gap-1.5">
                 <Sparkles size={13} /> Plan
               </button>
             </div>
@@ -647,7 +657,7 @@ function DoTab() {
         <FlightModal route={flightRoute} onClose={() => setFlightRoute(null)} />
       )}
       {tripOpen && (
-        <TripModal dest={tripOpen.dest} days={tripOpen.days} onClose={() => setTripOpen(null)}
+        <TripModal dest={tripOpen.dest} days={tripOpen.days} style={tripOpen.style} onClose={() => setTripOpen(null)}
           onFlights={(from, to) => { setTripOpen(null); setFlightRoute({ from, to, date: defaultDate }); }} />
       )}
       {trayOpen && (
@@ -931,20 +941,103 @@ function TripDay({ day }: { day: DoTripDay }) {
   );
 }
 
-function TripModal({ dest, days, onClose, onFlights }: {
-  dest: string; days: number; onClose: () => void; onFlights: (from: string, to: string) => void;
+function tripNum(n?: number): string { return (n || 0).toLocaleString(); }
+
+function TripSection({ icon: Icon, label, children }: { icon: LucideIcon; label: string; children: React.ReactNode }) {
+  return (
+    <section className="mb-5">
+      <div className="flex items-center gap-2 mb-3">
+        <Icon size={14} className="text-mac-accentHi shrink-0" />
+        <h3 className="text-[12px] font-semibold uppercase tracking-[0.14em] text-mac-ink2 shrink-0">{label}</h3>
+        <div className="flex-1 h-px bg-gradient-to-r from-mac-stroke to-transparent" />
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function TripBudget({ budget }: { budget: NonNullable<DoTrip["budget"]> }) {
+  const cur = budget.currency || "NPR";
+  const rows = budget.breakdown || [];
+  const max = Math.max(...rows.map((r) => r.max || 0), 1);
+  return (
+    <div className="mb-5 rounded-2xl border border-mac-strokeHi bg-gradient-to-b from-white/[0.05] to-white/[0.012] p-4">
+      <div className="flex items-center justify-between mb-3.5">
+        <div className="flex items-center gap-1.5 text-[12px] font-semibold uppercase tracking-[0.14em] text-mac-ink2"><Wallet size={14} className="text-mac-accentHi" /> Estimated budget</div>
+        <div className="text-right">
+          <div className="text-[18px] font-semibold text-mac-ink tracking-[-0.01em]">{cur} {tripNum(budget.total_min)}–{tripNum(budget.total_max)}</div>
+          {budget.per_person && <div className="text-[10.5px] text-mac-ink3">per person</div>}
+        </div>
+      </div>
+      <div className="space-y-2.5">
+        {rows.map((r, i) => (
+          <div key={i}>
+            <div className="flex items-center justify-between text-[11.5px] mb-1">
+              <span className="text-mac-ink2 truncate pr-2">{r.label}{r.note ? <span className="text-mac-ink3"> · {r.note}</span> : null}</span>
+              <span className="text-mac-ink tnum shrink-0">{cur} {tripNum(r.min)}{r.max !== r.min ? `–${tripNum(r.max)}` : ""}</span>
+            </div>
+            <div className="h-1.5 rounded-full bg-white/[0.05] overflow-hidden">
+              <div className="h-full rounded-full bg-gradient-to-r from-mac-accentHi to-mac-accent" style={{ width: `${Math.max(6, Math.round(((r.max || 0) / max) * 100))}%` }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TripHotelRow({ h }: { h: DoTripHotel }) {
+  return (
+    <div className="flex items-center gap-3 p-3 rounded-xl border border-mac-stroke bg-mac-fill">
+      <div className="h-9 w-9 shrink-0 grid place-items-center rounded-lg bg-mac-fillHi"><BedDouble size={15} className="text-mac-accentHi" /></div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[13px] font-medium text-mac-ink">{h.name}</span>
+          {h.type && <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-mac-fillHi text-mac-ink3 capitalize">{h.type}</span>}
+          {h.area && <span className="text-[11px] text-mac-ink3">· {h.area}</span>}
+        </div>
+        {h.why && <p className="text-[11.5px] text-mac-ink3 leading-snug mt-0.5 line-clamp-2">{h.why}</p>}
+      </div>
+      {h.book_link && (
+        <a href={h.book_link} target="_blank" rel="noreferrer"
+          className="h-8 px-3 shrink-0 rounded-[9px] text-[12px] font-medium bg-mac-accent text-white hover:bg-mac-accentHi transition-colors inline-flex items-center gap-1.5">
+          Book <ArrowUpRight size={12} strokeWidth={2.5} />
+        </a>
+      )}
+    </div>
+  );
+}
+
+function TripEatRow({ e }: { e: DoTripEat }) {
+  return (
+    <div className="flex items-start gap-2.5 p-2.5 rounded-xl border border-mac-stroke bg-mac-fill">
+      <div className="h-7 w-7 shrink-0 grid place-items-center rounded-lg bg-mac-fillHi"><UtensilsCrossed size={13} className="text-amber-400" /></div>
+      <div className="min-w-0">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-[12.5px] font-medium text-mac-ink">{e.name}</span>
+          {e.cuisine && <span className="text-[10px] text-mac-ink3 capitalize">{e.cuisine}</span>}
+        </div>
+        {e.why && <p className="text-[11px] text-mac-ink3 leading-snug mt-0.5 line-clamp-2">{e.why}</p>}
+      </div>
+    </div>
+  );
+}
+
+function TripModal({ dest, days, style, onClose, onFlights }: {
+  dest: string; days: number; style: string; onClose: () => void; onFlights: (from: string, to: string) => void;
 }) {
   const [data, setData] = useState<DoTrip | null>(null);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     let alive = true; setLoading(true);
-    api.do.trip(dest, days)
+    api.do.trip(dest, days, style)
       .then((d) => { if (alive) setData(d.ok ? d : null); })
       .catch(() => { if (alive) setData(null); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [dest, days]);
+  }, [dest, days, style]);
   const gt = data?.getting_there;
+  const cur = data?.budget?.currency || "NPR";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/45 backdrop-blur-sm" onClick={onClose}>
@@ -955,7 +1048,10 @@ function TripModal({ dest, days, onClose, onFlights }: {
           <button onClick={onClose} className="absolute top-3 right-3 h-7 w-7 grid place-items-center rounded-full bg-mac-fillHi text-mac-ink3 hover:text-mac-ink transition-colors"><X size={15} /></button>
           <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-mac-accentHi mb-2"><Route size={12} /> Trip roadmap</div>
           <h2 className="font-display text-[23px] font-semibold text-white tracking-[-0.015em]">{dest}</h2>
-          <div className="text-[12px] text-white/70 mt-1">{days} day{days > 1 ? "s" : ""}</div>
+          <div className="flex items-center gap-2 mt-1.5">
+            <span className="text-[12px] text-white/70">{days} day{days > 1 ? "s" : ""}</span>
+            <span className="capitalize text-[10.5px] font-medium px-1.5 py-0.5 rounded-md bg-white/[0.08] text-white/85">{data?.style || style}</span>
+          </div>
           {data?.summary && <p className="text-[12.5px] text-white/85 mt-2.5 max-w-[62ch] leading-snug">{data.summary}</p>}
         </div>
         {/* body */}
@@ -964,7 +1060,7 @@ function TripModal({ dest, days, onClose, onFlights }: {
             <div className="h-48 grid place-items-center text-center">
               <div>
                 <Loader2 size={20} className="animate-spin text-mac-accentHi mx-auto mb-3" />
-                <p className="text-[12.5px] text-mac-ink2">Planning your trip to {dest}…</p>
+                <p className="text-[12.5px] text-mac-ink2">Planning your {style} trip to {dest}…</p>
               </div>
             </div>
           ) : !data ? (
@@ -973,6 +1069,9 @@ function TripModal({ dest, days, onClose, onFlights }: {
             </div>
           ) : (
             <>
+              {data.budget && (data.budget.total_min || (data.budget.breakdown || []).length > 0) && (
+                <TripBudget budget={data.budget} />
+              )}
               {gt && (
                 <div className="mb-5 flex items-center gap-3 p-3 rounded-xl border border-mac-accentHi/25 bg-[rgba(10,132,255,0.06)]">
                   <div className="h-8 w-8 shrink-0 grid place-items-center rounded-lg bg-[rgba(10,132,255,0.12)]"><Plane size={15} className="text-mac-accentHi" /></div>
@@ -984,9 +1083,21 @@ function TripModal({ dest, days, onClose, onFlights }: {
                     className="h-8 px-3 shrink-0 rounded-[9px] text-[12px] font-medium bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">See flights</button>
                 </div>
               )}
-              {(data.itinerary || []).map((day) => <TripDay key={day.day} day={day} />)}
+              {data.hotels && data.hotels.length > 0 && (
+                <TripSection icon={BedDouble} label="Where to stay">
+                  <div className="space-y-2">{data.hotels.map((h, i) => <TripHotelRow key={i} h={h} />)}</div>
+                </TripSection>
+              )}
+              <TripSection icon={Route} label="Day by day">
+                {(data.itinerary || []).map((day) => <TripDay key={day.day} day={day} />)}
+              </TripSection>
+              {data.eat && data.eat.length > 0 && (
+                <TripSection icon={UtensilsCrossed} label="Where to eat">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">{data.eat.map((e, i) => <TripEatRow key={i} e={e} />)}</div>
+                </TripSection>
+              )}
               {data.tips && data.tips.length > 0 && (
-                <div className="mt-4 rounded-xl border border-mac-stroke bg-mac-fill p-3.5">
+                <div className="rounded-xl border border-mac-stroke bg-mac-fill p-3.5">
                   <div className="flex items-center gap-1.5 text-[12px] font-semibold text-mac-ink mb-2"><Lightbulb size={13} className="text-amber-400" /> Good to know</div>
                   <ul className="space-y-1.5">
                     {data.tips.map((t, i) => <li key={i} className="text-[12px] text-mac-ink2 flex gap-2 leading-snug"><span className="text-mac-ink3 shrink-0">•</span>{t}</li>)}

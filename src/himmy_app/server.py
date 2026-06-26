@@ -1018,9 +1018,9 @@ def create_app() -> FastAPI:
         return await do.flights(origin, to, date)
 
     @app.get("/do/trip")
-    async def do_trip(dest: str, days: int = 2) -> dict[str, Any]:
-        # A day-by-day roadmap of places/activities for a destination (grounded in real OSM spots).
-        return await do.trip(dest, days)
+    async def do_trip(dest: str, days: int = 2, style: str = "comfort") -> dict[str, Any]:
+        # A premium trip plan — budget, hotels, where-to-eat + a day-by-day roadmap (grounded in OSM).
+        return await do.trip(dest, days, style)
 
     # the tray — a Himmy-side cart the user checks out themselves (opening the place's page)
     @app.get("/do/cart")
