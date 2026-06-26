@@ -474,11 +474,31 @@ def create_app() -> FastAPI:
                 first = False
                 await asyncio.sleep(6 * 3600)
 
+        # Keep the news feeds REAL-TIME fresh: Himmy's own background refresher re-pulls every
+        # category on an interval (no external cron). It mirrors _warm_recs — wrapped so a dead
+        # feed / slow source / single failed category can NEVER crash the loop or the server.
+        async def _refresh_news() -> None:
+            from himmy_app.news import NewsService, _REFRESH_SECS, refresh_all
+
+            svc = NewsService(cfg)
+            first = True
+            while True:
+                # On the very first pass only warm a category whose cache is cold/stale;
+                # afterwards force a fresh pull so "updated Xm ago" actually moves. refresh_all
+                # wraps each category so one dead feed can never stop the pass or the loop.
+                await refresh_all(svc, force=not first)
+                first = False
+                await asyncio.sleep(_REFRESH_SECS)
+
         warm_task = asyncio.create_task(_warm_recs())
+        news_task = asyncio.create_task(_refresh_news())
         try:
             yield
         finally:
             warm_task.cancel()
+            news_task.cancel()
+            # Await the cancelled tasks so in-flight I/O unwinds before we stop the scheduler.
+            await asyncio.gather(warm_task, news_task, return_exceptions=True)
             await routines_mod.get_scheduler().stop()
 
     app = FastAPI(title="Himmy", version="0.1.0", lifespan=_lifespan)

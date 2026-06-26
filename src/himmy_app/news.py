@@ -36,30 +36,144 @@ _READER_UA = {
 }
 DEFAULT_FOLDER = "Reading List"
 
-#: Curated, tested RSS sources per category (name, url).
+#: Curated RSS sources per category (name, url). EVERY url here was live-validated (fetched and
+#: confirmed to parse to >=3 items) — dead / 404 / Cloudflare-blocked feeds were dropped, so this
+#: list ships only working sources. Reliability and INTERNATIONAL breadth are the curation rules:
+#:   * World   — reputable global wire/broadsheet outlets across several countries (UK/US/Qatar/
+#:               Germany/France), so coverage isn't single-nation.
+#:   * Technology — a tight allow-list of respected tech outlets only (no SEO-farm aggregators).
+#: Note: Reuters and the Associated Press no longer publish open public RSS feeds (their old
+#: endpoints now 404 / refuse connections), so they're intentionally absent rather than dead.
 SOURCES: dict[str, list[tuple[str, str]]] = {
     "Nepal": [
         ("The Kathmandu Post", "https://kathmandupost.com/rss"),
         ("Online Khabar", "https://english.onlinekhabar.com/feed"),
         ("Ratopati", "https://english.ratopati.com/feed"),
     ],
+    # International desk: deliberately multi-country so it reads as world news, not one outlet's.
     "World": [
-        ("BBC", "https://feeds.bbci.co.uk/news/world/rss.xml"),
+        ("BBC World", "https://feeds.bbci.co.uk/news/world/rss.xml"),
         ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
         ("The Guardian", "https://www.theguardian.com/world/rss"),
+        ("Deutsche Welle", "https://rss.dw.com/rdf/rss-en-world"),
+        ("France 24", "https://www.france24.com/en/rss"),
+        ("NPR World", "https://feeds.npr.org/1004/rss.xml"),
     ],
     "Business": [
         ("BBC Business", "https://feeds.bbci.co.uk/news/business/rss.xml"),
         ("The Guardian", "https://www.theguardian.com/business/rss"),
+        ("CNBC", "https://www.cnbc.com/id/10001147/device/rss/rss.html"),
+        ("MarketWatch", "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
+        ("NPR Business", "https://feeds.npr.org/1006/rss.xml"),
     ],
+    # Reliable-only tech: respected outlets with editorial standards; no clickbait aggregators.
     "Technology": [
-        ("TechCrunch", "https://techcrunch.com/feed/"),
-        ("The Verge", "https://www.theverge.com/rss/index.xml"),
         ("Ars Technica", "https://feeds.arstechnica.com/arstechnica/index"),
+        ("The Verge", "https://www.theverge.com/rss/index.xml"),
+        ("Wired", "https://www.wired.com/feed/rss"),
+        ("MIT Technology Review", "https://www.technologyreview.com/feed/"),
+        ("IEEE Spectrum", "https://spectrum.ieee.org/feeds/feed.rss"),
+        ("Hacker News", "https://hnrss.org/frontpage"),
+        ("The Register", "https://www.theregister.com/headlines.atom"),
+        ("Engadget", "https://www.engadget.com/rss.xml"),
+        ("Rest of World", "https://restofworld.org/feed/latest/"),
     ],
 }
+#: "World" is the INTERNATIONAL section. Order matters: "For You" (the personalised, taste-ranked
+#: feed) always leads.
 CATEGORIES = ["For You", "Nepal", "World", "Business", "Technology"]
+
+#: Reputable source DOMAINS used to filter search-derived results (e.g. the Google-News pool in
+#: "For You") down to trustworthy outlets. It's the union of every curated feed's domain above
+#: PLUS other well-known reputable outlets we don't run a standing feed for — so a Google-News hit
+#: from one of these is trusted even though it isn't in SOURCES. Used to PREFER (not hard-require)
+#: reliable sources, with a stricter bar for tech (where SEO farms are rife).
+TRUSTED_SOURCES: set[str] = {
+    # Nepal
+    "kathmandupost.com", "onlinekhabar.com", "english.onlinekhabar.com", "ratopati.com",
+    "english.ratopati.com", "thehimalayantimes.com", "nepalitimes.com",
+    "myrepublica.nagariknetwork.com", "setopati.com",
+    # World / international wires + broadsheets
+    "bbc.co.uk", "bbc.com", "aljazeera.com", "theguardian.com", "dw.com", "france24.com",
+    "npr.org", "cnn.com", "reuters.com", "apnews.com", "nytimes.com", "washingtonpost.com",
+    "ft.com", "economist.com", "bloomberg.com", "wsj.com", "afp.com", "politico.com",
+    "axios.com", "time.com", "theatlantic.com", "newyorker.com", "pbs.org",
+    # Business / markets  (dowjones.io is a CDN domain, not a publisher identity → excluded;
+    # MarketWatch is already covered by marketwatch.com.)
+    "cnbc.com", "marketwatch.com", "forbes.com", "businessinsider.com", "fortune.com",
+    # Technology (reliable allow-list).  (anandtech.com dropped: the editorial site shut down in
+    # Jan 2024 and now only redirects to its forums.)
+    "arstechnica.com", "theverge.com", "wired.com", "technologyreview.com", "spectrum.ieee.org",
+    "ieee.org", "ycombinator.com", "news.ycombinator.com", "theregister.com", "engadget.com",
+    "restofworld.org", "techcrunch.com", "nature.com", "sciencemag.org", "science.org",
+    "404media.co", "theinformation.com", "tomshardware.com",
+}
+
+#: Google News RSS items carry the outlet as a plain text LABEL (e.g. "The New York Times", "BBC"),
+#: not a hostname — so the domain-based TRUSTED_SOURCES check can't see them. This maps the common
+#: labels reputable outlets return to their canonical domain, so search-pool items from trusted
+#: outlets still earn the reliability bonus. Lowercased keys; matched case-insensitively.
+_TRUSTED_SOURCE_LABELS: dict[str, str] = {
+    "bbc": "bbc.com", "bbc news": "bbc.com", "al jazeera": "aljazeera.com",
+    "the guardian": "theguardian.com", "guardian": "theguardian.com",
+    "deutsche welle": "dw.com", "dw": "dw.com", "france 24": "france24.com",
+    "npr": "npr.org", "cnn": "cnn.com", "reuters": "reuters.com",
+    "associated press": "apnews.com", "ap": "apnews.com", "ap news": "apnews.com",
+    "the new york times": "nytimes.com", "new york times": "nytimes.com",
+    "the washington post": "washingtonpost.com", "washington post": "washingtonpost.com",
+    "financial times": "ft.com", "the economist": "economist.com", "economist": "economist.com",
+    "bloomberg": "bloomberg.com", "the wall street journal": "wsj.com", "wall street journal": "wsj.com",
+    "politico": "politico.com", "axios": "axios.com", "time": "time.com",
+    "the atlantic": "theatlantic.com", "the new yorker": "newyorker.com", "pbs": "pbs.org",
+    "cnbc": "cnbc.com", "marketwatch": "marketwatch.com", "forbes": "forbes.com",
+    "business insider": "businessinsider.com", "fortune": "fortune.com",
+    "ars technica": "arstechnica.com", "the verge": "theverge.com", "wired": "wired.com",
+    "mit technology review": "technologyreview.com", "ieee spectrum": "spectrum.ieee.org",
+    "the register": "theregister.com", "engadget": "engadget.com", "rest of world": "restofworld.org",
+    "techcrunch": "techcrunch.com", "404 media": "404media.co", "the information": "theinformation.com",
+    "tom's hardware": "tomshardware.com", "nature": "nature.com", "science": "science.org",
+    "the kathmandu post": "kathmandupost.com", "kathmandu post": "kathmandupost.com",
+    "online khabar": "onlinekhabar.com", "onlinekhabar": "onlinekhabar.com",
+    "ratopati": "ratopati.com", "the himalayan times": "thehimalayantimes.com",
+    "nepali times": "nepalitimes.com", "setopati": "setopati.com",
+}
+
+
+def _source_is_trusted(item: dict[str, Any]) -> bool:
+    """True if an item comes from a trusted outlet — by URL domain OR by a recognised source LABEL.
+    Google-News items have opaque ``news.google.com`` URLs and a plain outlet name in ``source``,
+    so the label fallback is what makes the reliability bonus actually fire for search results."""
+    if _is_trusted(_domain(item.get("url") or "")) or _is_trusted(_domain(item.get("source") or "")):
+        return True
+    label = (item.get("source") or "").strip().lower()
+    return _is_trusted(_TRUSTED_SOURCE_LABELS.get(label, ""))
+
+
+def _domain(value: str) -> str:
+    """Bare registrable-ish host for a URL or a source label, lowercased, ``www.`` stripped."""
+    v = (value or "").strip().lower()
+    if not v:
+        return ""
+    if "://" in v or v.startswith("//") or "/" in v or "." in v:
+        host = urlparse(v if "://" in v else f"//{v}", scheme="http").hostname or v
+    else:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def _is_trusted(domain: str) -> bool:
+    """True if ``domain`` is one of TRUSTED_SOURCES (exact host or a subdomain of one)."""
+    d = (domain or "").lower()
+    if not d:
+        return False
+    return any(d == t or d.endswith("." + t) for t in TRUSTED_SOURCES)
+
+
 _CACHE_TTL = 900  # seconds
+#: How often the background refresher re-pulls every category (real-time freshness). Override via
+#: HIMMY_NEWS_REFRESH_SECS. Kept >= the cache TTL so a refresh always recomputes rather than
+#: bouncing off a still-fresh cache.
+_REFRESH_SECS = max(60, int(os.environ.get("HIMMY_NEWS_REFRESH_SECS") or "900"))
 
 
 def _clean(text: str) -> str:
@@ -306,48 +420,204 @@ class NewsService:
             deduped.append(it)
         return deduped[:45]
 
-    async def _for_you(self, interests: list[str]) -> list[dict[str, Any]]:
+    # ---- "For You" — a taste-RANKED personal feed -------------------------------------------
+    async def _google_news(self, client: httpx.AsyncClient, query: str, *, limit: int = 8) -> list[dict[str, Any]]:
+        """A handful of fresh items for one taste query, via the Google News RSS search."""
+        try:
+            r = await client.get(
+                f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
+            )
+            xml = r.text if r.status_code == 200 else ""
+        except Exception:  # noqa: BLE001
+            return []
         out: list[dict[str, Any]] = []
+        for b in re.findall(r"<item>(.*?)</item>", xml, re.DOTALL)[:limit]:
+            def tag(n: str) -> str:
+                m = re.search(rf"<{n}[^>]*>(.*?)</{n}>", b, re.DOTALL)
+                return _clean(m.group(1)) if m else ""
+            title = tag("title")
+            link = tag("link")
+            if not title or not link:
+                continue
+            ts = _parse_date(tag("pubDate"))
+            out.append({
+                "title": title, "url": link, "source": tag("source"),
+                "image": "", "snippet": _clean(tag("description"))[:160],
+                "ts": ts, "ago": _ago(ts), "topic": query,
+            })
+        return out
+
+    def _build_profile(self) -> Any:
+        """Build the reading-weighted taste :class:`Profile`, or ``None`` if it can't be built
+        (no embedder, or an empty corpus → zero topics). Sync + blocking (fastembed), so the caller
+        runs it off the event loop. Never raises."""
+        try:
+            from himmy_app.recsys.profile import build_profile
+
+            prof = build_profile(self._cfg)
+            return prof if prof is not None and prof.num_topics else None
+        except Exception:  # noqa: BLE001 - the embedder/profile is a bonus, never a dependency
+            return None
+
+    async def _taste_queries(self, client: httpx.AsyncClient, interests: list[str]) -> list[str]:
+        """The user's STRONGEST taste signals as search terms: their own research CONCEPTS (derived
+        from the papers they actually read, via the Recommender's seed→OpenAlex→concept path)
+        blended with their typed interests. Concepts lead (the demonstrated signal); interests
+        always come along. Best-effort — degrades to just the typed interests."""
+        concepts: list[str] = []
+        try:
+            from himmy_app.recsys import sources as _src
+            from himmy_app.recsys.recommend import Recommender
+
+            seeds = Recommender(self._cfg)._seed_papers()
+            resolved = await asyncio.gather(
+                *[_src.openalex_resolve(client, doi=s.get("doi", ""), title=s.get("title", "")) for s in seeds[:5]],
+                return_exceptions=True,
+            )
+            for w in resolved:
+                if not isinstance(w, dict):
+                    continue
+                for c in (w.get("concepts") or []):
+                    if (c.get("score") or 0) >= 0.4 and 1 <= (c.get("level") or 0) <= 3:
+                        name = c.get("display_name", "")
+                        if name:
+                            concepts.append(name)
+        except Exception:  # noqa: BLE001
+            concepts = []
+        # Dedupe, concepts first (demonstrated taste), then typed interests; cap the fan-out.
+        return list(dict.fromkeys([*concepts, *interests]))[:8]
+
+    async def _curated_pool(self) -> list[dict[str, Any]]:
+        """A breadth pool for "For You": fresh items from the curated categories (World/Tech/
+        Business), so the taste ranker always has reputable international + tech stories to rank
+        even when search is thin. Best-effort per category."""
+        cats = ["World", "Technology", "Business"]
+        # Use the cache-aware public feed() (not _category directly): the background refresher writes
+        # these categories' caches in the SAME pass before "For You" runs, so this hits the warm
+        # cache and issues zero extra RSS requests — no double-fetching the same endpoints.
+        results = await asyncio.gather(*[self.feed(c) for c in cats], return_exceptions=True)
+        pool: list[dict[str, Any]] = []
+        for res in results:
+            if isinstance(res, dict) and isinstance(res.get("items"), list):
+                pool.extend(res["items"][:18])
+        return pool
+
+    async def _for_you(self, interests: list[str]) -> list[dict[str, Any]]:
+        """The personalised feed, RANKED by the reading-taste profile (not blind keyword search).
+
+        1. CANDIDATES — a broad pool: a Google-News search on the user's strongest taste signals
+           (their research concepts blended with typed interests) PLUS fresh items from the curated
+           categories (so there's always reputable world / tech breadth to rank).
+        2. RANK — embed each candidate's title(+snippet) and score by cosine to the reading-weighted
+           topic centroids (recsys :class:`Profile`), blended with recency, with a small reliability
+           bonus for items whose source is in TRUSTED_SOURCES.
+        3. REASON — attach a short "Because you follow X" derived from the matched taste signal.
+
+        Degrades gracefully at every step: if the profile/embedder is unavailable OR there's no
+        reading history, it falls back to the original keyword + recency ordering. Never raises."""
+        # Build the taste model off the event loop (fastembed blocks). None ⇒ no usable taste model.
+        profile = await asyncio.to_thread(self._build_profile)
+
+        # Brand-new user: no typed interests AND no reading-taste profile ⇒ nothing to personalise
+        # on. Return empty so feed() surfaces the "Build your For You feed" onboarding prompt rather
+        # than a generic curated pool. (With reading history OR typed interests we proceed below.)
+        if not interests and profile is None:
+            return []
+
+        candidates: list[dict[str, Any]] = []
         seen: set[str] = set()
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True,
-                                     headers={"User-Agent": "Mozilla/5.0 (Himmy)"}) as c:
-            for kw in interests[:6]:
-                try:
-                    r = await c.get(f"https://news.google.com/rss/search?q={quote_plus(kw)}&hl=en-US&gl=US&ceid=US:en")
-                    xml = r.text if r.status_code == 200 else ""
-                except Exception:  # noqa: BLE001
-                    xml = ""
-                for b in re.findall(r"<item>(.*?)</item>", xml, re.DOTALL)[:6]:
-                    def tag(n: str) -> str:
-                        m = re.search(rf"<{n}[^>]*>(.*?)</{n}>", b, re.DOTALL)
-                        return _clean(m.group(1)) if m else ""
-                    title = tag("title")
-                    if not title or title.lower() in seen:
-                        continue
-                    seen.add(title.lower())
-                    ts = _parse_date(tag("pubDate"))
-                    out.append({
-                        "title": title, "url": tag("link"), "source": tag("source"),
-                        "image": "", "snippet": "", "ts": ts, "ago": _ago(ts), "topic": kw,
-                    })
-        return sorted(out, key=lambda x: x["ts"], reverse=True)[:30]
+
+        def _add(items: list[dict[str, Any]]) -> None:
+            for it in items:
+                key = (it.get("title") or "").lower()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(it)
+
+        # Run the curated breadth pool CONCURRENTLY with the search fan-out (a real task, started
+        # before we await the searches) so wall-clock is the slower of the two, not their sum.
+        curated_task = asyncio.create_task(self._curated_pool())
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True,
+                                         headers={"User-Agent": "Mozilla/5.0 (Himmy)"}) as c:
+                queries = await self._taste_queries(c, interests)
+                search_jobs = [self._google_news(c, q) for q in queries[:8]]
+                search_res = await asyncio.gather(*search_jobs, return_exceptions=True)
+                for res in search_res:
+                    if isinstance(res, list):
+                        _add(res)
+        except Exception:  # noqa: BLE001 - candidate gathering must never hard-fail the feed
+            pass
+        try:
+            _add(await curated_task)
+        except Exception:  # noqa: BLE001 - curated pool is a bonus; never let it sink the feed
+            pass
+
+        if not candidates:
+            return []
+
+        # ---- RANK ---------------------------------------------------------------------------
+        # No taste model (cold start / no embedder) → keyword + recency fallback, with the
+        # reliability bonus still applied so reputable sources lead.
+        if profile is None:
+            for it in candidates:
+                it["reason"] = (f"Because you follow {it['topic']}"
+                                if it.get("topic") and it["topic"] in interests
+                                else ("Top story" if not it.get("topic") else ""))
+                it["_rank"] = it.get("ts", 0.0) + (1e9 if _source_is_trusted(it) else 0.0)
+            ranked = sorted(candidates, key=lambda x: x.get("_rank", 0.0), reverse=True)
+            for it in ranked:
+                it.pop("_rank", None)
+            return ranked[:30]
+
+        # Taste-ranked: cosine of title(+snippet) to the reading-weighted centroids, blended with
+        # recency and a reliability bonus, with the matched topic surfaced as the reason.
+        try:
+            texts = [f"{it.get('title', '')}. {it.get('snippet', '')}".strip()[:600] for it in candidates]
+            taste = await asyncio.to_thread(profile.score_texts, texts)
+        except Exception:  # noqa: BLE001 - scoring hiccup → recency fallback below
+            taste = []
+        if not taste or len(taste) != len(candidates):
+            ranked = sorted(candidates, key=lambda x: x.get("ts", 0.0), reverse=True)
+            for it in ranked:
+                it.setdefault("reason", "")
+            return ranked[:30]
+
+        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        for it, t in zip(candidates, taste):
+            age_days = max(0.0, (now - (it.get("ts", 0.0) or 0.0)) / 86400.0) if it.get("ts") else 3.0
+            recency = 0.5 ** (age_days / 2.0)  # ~2-day half-life: news is perishable
+            reliability = 0.05 if _source_is_trusted(it) else 0.0
+            it["score"] = float(t) + 0.18 * recency + reliability
+            it["reason"] = (f"Because you follow {it['topic']}"
+                            if it.get("topic") else "Matches what you read")
+        ranked = sorted(candidates, key=lambda x: x.get("score", 0.0), reverse=True)
+        for it in ranked:
+            it.pop("score", None)
+        return ranked[:30]
 
     # ---- public: a category feed, with a short cache ------------------------------------
     async def feed(self, category: str, force: bool = False) -> dict[str, Any]:
         cache = self._read(self._cache)
         entry = cache.get(category)
-        now = datetime.datetime.now().timestamp()
+        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
         if not force and entry and (now - entry.get("at", 0)) < _CACHE_TTL:
             return {"ok": True, "category": category, "items": entry["items"], "fetched_at": entry.get("iso")}
         if category == "For You":
             interests = self.get_interests()
-            if not interests:
-                return {"ok": True, "category": category, "items": [], "needs_interests": True}
             items = await self._for_you(interests)
+            # Only ask the user to pick interests when we have NOTHING to personalise on — no typed
+            # interests AND the reading-taste pool produced nothing. With reading history but no
+            # typed interests, the taste profile still drives a real feed, so we serve it.
+            if not items and not interests:
+                return {"ok": True, "category": category, "items": [], "needs_interests": True}
         else:
             items = await self._category(category)
-        cache[category] = {"items": items, "at": now,
-                           "iso": datetime.datetime.now().isoformat(timespec="seconds")}
+        cache[category] = {
+            "items": items, "at": now,
+            "iso": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        }
         self._cache.write_text(json.dumps(cache), encoding="utf-8")
         return {"ok": True, "category": category, "items": items, "fetched_at": cache[category]["iso"]}
 
@@ -398,6 +668,21 @@ class NewsService:
             if not interests:
                 return {"ok": True, "papers": []}
             return {"ok": True, "papers": (await self._arxiv(interests))[:8]}
+
+
+async def refresh_all(svc: NewsService, *, force: bool = True) -> None:
+    """Re-pull EVERY category once, best-effort. A dead feed / slow source / single failed
+    category can NEVER stop the pass — each category is wrapped so the loop always completes.
+    This is the single iteration the server's background refresher runs on an interval."""
+    # Refresh "For You" LAST: it pulls a curated breadth pool from World/Technology/Business via the
+    # cache-aware feed(). Refreshing those categories first means their caches are warm (<1s old)
+    # when "For You" runs, so the pool hits cache and re-fetches none of those RSS endpoints.
+    ordered = [c for c in CATEGORIES if c != "For You"] + (["For You"] if "For You" in CATEGORIES else [])
+    for cat in ordered:
+        try:
+            await svc.feed(cat, force=force)
+        except Exception:  # noqa: BLE001 - one bad category must not stop the pass
+            pass
 
 
 def _news_id() -> str:
@@ -540,4 +825,7 @@ class SavedNews:
         return out
 
 
-__all__ = ["NewsService", "SavedNews", "CATEGORIES", "DEFAULT_FOLDER", "extract_article"]
+__all__ = [
+    "NewsService", "SavedNews", "CATEGORIES", "SOURCES", "TRUSTED_SOURCES",
+    "DEFAULT_FOLDER", "extract_article", "refresh_all",
+]

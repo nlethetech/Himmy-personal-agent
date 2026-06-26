@@ -91,6 +91,15 @@ export type Collection = { id: string; name: string; count: number };
 export type NewsArticle = {
   title: string; url: string; source: string; image: string;
   snippet: string; ago: string; ts: number; topic?: string;
+  // "For You" only: a short, human reason this story was surfaced ("Because you follow X").
+  reason?: string;
+};
+// The /news/feed envelope. `fetched_at` is an ISO timestamp the UI renders as "updated Xm ago".
+// It can be `null` for a legacy cache entry written before the `iso` field existed (the backend
+// always emits a string on fresh writes), so the type allows null and the UI treats it as absent.
+export type NewsFeed = {
+  ok: boolean; category: string; items: NewsArticle[];
+  fetched_at?: string | null; needs_interests?: boolean;
 };
 export type SavedArticle = {
   id: string; title: string; source: string; url: string; image: string;
@@ -417,7 +426,7 @@ export const api = {
       jput<{ ok: boolean; interests: string[] }>("/news/interests", { interests }),
     categories: () => jget<{ ok: boolean; categories: string[] }>("/news/categories"),
     feed: (cat: string, force = false) =>
-      jget<{ ok: boolean; category: string; items: NewsArticle[]; fetched_at?: string; needs_interests?: boolean }>(
+      jget<NewsFeed>(
         `/news/feed?cat=${encodeURIComponent(cat)}${force ? "&force=true" : ""}`
       ),
     recommendations: (force = false) =>

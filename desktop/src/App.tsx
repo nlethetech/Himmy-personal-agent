@@ -8,7 +8,7 @@ import {
   MessageSquare, SquarePen, PanelLeft, PanelRight, Telescope, ListChecks, BookText, Link2,
   Inbox, MapPin, KeyRound, ShieldCheck, Minus, ChevronLeft, ChevronRight, Repeat,
   Gauge, Coins, Zap, CalendarCheck, CalendarClock, Bell, Play, Flag,
-  Star, BellOff, Users,
+  Star, BellOff, Users, TrendingUp, Cpu, Sparkle,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -3497,6 +3497,32 @@ function NotifRow({ n, busy, onRead, onRemove, onDecide }:
 /* ───────────────────────────────────────── news (live feeds · in-app reader · saved → RAG) */
 const NEWS_FEEDS = ["For You", "Nepal", "World", "Business", "Technology"];
 const READER_SERIF = '"Iowan Old Style", Charter, Georgia, "Times New Roman", serif';
+
+// Per-category icon (rail + headers). Falls back to a generic newspaper.
+function newsCatIcon(cat: string): LucideIcon {
+  switch (cat) {
+    case "For You": return Sparkles;
+    case "Nepal": return MapPin;
+    case "World": return Globe;
+    case "Business": return TrendingUp;
+    case "Technology": return Cpu;
+    default: return Newspaper;
+  }
+}
+// "updated 2m ago" — a compact relative label from an ISO timestamp.
+function relativeAgo(iso?: string): string {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const secs = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (secs < 45) return "just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  return `${days}d ago`;
+}
 type NewsView = { kind: "feed"; cat: string } | { kind: "saved"; folder: string | null };
 type ReadTarget = {
   article: { url: string; title: string; source?: string; image?: string; snippet?: string };
@@ -3513,10 +3539,16 @@ function News() {
   const [loading, setLoading] = useState(false);
   const [fetchedAt, setFetchedAt] = useState<string | undefined>();
   const [needsInterests, setNeedsInterests] = useState(false);
+  const needsInterestsRef = useRef(needsInterests);
+  useEffect(() => { needsInterestsRef.current = needsInterests; }, [needsInterests]);
   const [interests, setInterests] = useState<string[]>([]);
   const [interestInput, setInterestInput] = useState("");
   const [query, setQuery] = useState("");
   const [reading, setReading] = useState<ReadTarget | null>(null);
+  // Drives the live "updated Xm ago" label without refetching.
+  const [, setNowTick] = useState(0);
+  // Per-category timestamp of when the user last looked at it — anything newer gets a "New" dot.
+  const [lastSeen, setLastSeen] = useState<Record<string, number>>({});
 
   const isFeed = view.kind === "feed";
 
@@ -3543,10 +3575,10 @@ function News() {
     } catch { /* warming up */ }
   };
   const loadFeed = async (cat: string, force = false) => {
-    setLoading(true); setNeedsInterests(false);
+    setLoading(true); setNeedsInterests(false); setFetchedAt(undefined);
     try {
       const r = await api.news.feed(cat, force);
-      setItems(r.items || []); setFetchedAt(r.fetched_at); setNeedsInterests(!!r.needs_interests);
+      setItems(r.items || []); setFetchedAt(r.fetched_at || undefined); setNeedsInterests(!!r.needs_interests);
     } catch { setItems([]); } finally { setLoading(false); }
   };
   const loadSaved = async (folder: string | null) => {
@@ -3564,6 +3596,26 @@ function News() {
     else loadSaved(view.folder);
     /* eslint-disable-next-line */
   }, [view]);
+  // REAL-TIME: while a feed is open, silently re-fetch on an interval (the backend serves from its
+  // ~15-min cache, so this is cheap) and tick a clock so "updated Xm ago" keeps advancing.
+  useEffect(() => {
+    if (view.kind !== "feed" || reading) return;
+    const cat = view.cat;
+    const clock = setInterval(() => setNowTick((n) => n + 1), 30_000);
+    // Skip the silent refresh while the empty "Build your For You feed" prompt is showing — there's
+    // nothing to refresh and it would queue no-op backend round-trips.
+    const poll = setInterval(() => { if (!needsInterestsRef.current) loadFeed(cat); }, 150_000);
+    return () => { clearInterval(clock); clearInterval(poll); };
+    /* eslint-disable-next-line */
+  }, [view, reading]);
+  // Mark the current category "seen" shortly after it loads, so the "New" dots clear once read.
+  useEffect(() => {
+    if (view.kind !== "feed" || loading) return;
+    const cat = view.cat;
+    const t = setTimeout(() => setLastSeen((m) => ({ ...m, [cat]: Date.now() / 1000 })), 4_000);
+    return () => clearTimeout(t);
+    /* eslint-disable-next-line */
+  }, [view, loading]);
   // Himmy saved an article → refresh the saved indicators (and the saved list, if it's open).
   useRefreshSignal("news", () => {
     loadFolders();
@@ -3628,7 +3680,20 @@ function News() {
           <div className="flex items-baseline gap-2.5 min-w-0">
             <h1 className="font-display text-[19px] font-semibold tracking-[-0.01em] truncate">{heading}</h1>
             {isFeed
-              ? fetchedAt && <span className="text-[12px] text-mac-ink3 shrink-0">updated {new Date(fetchedAt).toLocaleString([], { hour: "numeric", minute: "2-digit" })}</span>
+              ? fetchedAt && (() => {
+                  const ago = relativeAgo(fetchedAt);
+                  // Only show the green "live" dot when the pull is genuinely fresh; otherwise a
+                  // neutral clock, so a 14-min-old cache hit doesn't imply a live connection.
+                  const fresh = ago === "just now";
+                  return (
+                    <span className="inline-flex items-center gap-1.5 text-[12px] text-mac-ink3 shrink-0">
+                      {fresh
+                        ? <span className="h-1.5 w-1.5 rounded-full bg-mac-green/80" />
+                        : <Clock size={10} className="text-mac-ink3" />}
+                      {" "}updated {ago}
+                    </span>
+                  );
+                })()
               : <span className="text-[12.5px] text-mac-ink3 tnum shrink-0">{count} {count === 1 ? "article" : "articles"}</span>}
           </div>
           <div className="flex items-center gap-2">
@@ -3666,7 +3731,17 @@ function News() {
             <div className="h-48 grid place-items-center text-mac-ink3"><Loader2 size={18} className="animate-spin" /></div>
           ) : isFeed ? (
             needsInterests ? (
-              <div className="h-48 grid place-items-center text-center text-[13px] text-mac-ink2">Add a few topics above to get a personalised feed.</div>
+              <div className="h-56 grid place-items-center text-center px-8">
+                <div className="max-w-sm">
+                  <div className="mx-auto mb-3 h-11 w-11 grid place-items-center rounded-full bg-mac-accent/12 text-mac-accentHi">
+                    <Sparkles size={18} strokeWidth={2} />
+                  </div>
+                  <div className="text-[14px] font-medium text-mac-ink">Build your For You feed</div>
+                  <p className="mt-1.5 text-[12.5px] text-mac-ink2 leading-snug">
+                    Add a few topics above, or just start reading papers and articles — Himmy learns your taste and curates from {NEWS_FEEDS.length - 1} sections.
+                  </p>
+                </div>
+              </div>
             ) : liveShown.length === 0 ? (
               <div className="h-48 grid place-items-center text-[13px] text-mac-ink3">{query ? `No stories match “${query}”.` : "No stories right now — try Refresh."}</div>
             ) : (
@@ -3674,8 +3749,10 @@ function News() {
                 {liveShown.map((a, i) => {
                   const st = savedMap[a.url];
                   const flag = st === "pending" ? "pending" : st ? true : false;
+                  const seenTs = lastSeen[view.cat];
+                  const isNew = !!seenTs && !!a.ts && a.ts > seenTs;
                   return (
-                    <NewsCard key={a.url + i} a={a} saved={flag}
+                    <NewsCard key={a.url + i} a={a} saved={flag} isForYou={view.cat === "For You"} isNew={isNew}
                       onOpen={() => setReading({ article: { url: a.url, title: a.title, source: a.source, image: a.image, snippet: a.snippet } })}
                       onToggleSave={() => (flag ? doUnsave(a.url) : doSave({ url: a.url, title: a.title, source: a.source, image: a.image, snippet: a.snippet }))} />
                   );
@@ -3708,7 +3785,7 @@ function NewsRail({ feeds, folders, savedTotal, view, onPick }: {
       <div className="px-2 mb-1 text-[10px] uppercase tracking-wide text-mac-ink3">Feeds</div>
       {feeds.map((f) => {
         const active = view.kind === "feed" && view.cat === f;
-        const Ico = f === "For You" ? Sparkles : Newspaper;
+        const Ico = newsCatIcon(f);
         return (
           <button key={f} onClick={() => onPick({ kind: "feed", cat: f })}
             className={`w-full flex items-center gap-2 h-8 px-2.5 rounded-md text-[12.5px] transition-colors ${active ? "bg-mac-fillHi text-mac-ink" : "text-mac-ink2 hover:bg-mac-fill"}`}>
@@ -3766,14 +3843,21 @@ function CardImage({ source, image, hue }: { source: string; image?: string; hue
   );
 }
 
-function NewsCard({ a, saved, onOpen, onToggleSave }: {
+function NewsCard({ a, saved, onOpen, onToggleSave, isForYou = false, isNew = false }: {
   a: NewsArticle; saved: boolean | "pending"; onOpen: () => void; onToggleSave: () => void;
+  isForYou?: boolean; isNew?: boolean;
 }) {
   const hue = newsHue(a.source || "News");
+  const reason = isForYou ? (a.reason || "").trim() : "";
   return (
     <div onClick={onOpen}
       className="group relative flex flex-col h-full rounded-xl overflow-hidden bg-mac-fill border border-mac-stroke hover:border-mac-strokeHi hover:shadow-mac transition-all cursor-pointer">
       <CardImage source={a.source} image={a.image} hue={hue} />
+      {isNew && (
+        <span className="absolute top-2 left-2 inline-flex items-center gap-1 rounded-full bg-mac-accent/90 backdrop-blur-md px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
+          <Sparkle size={9} strokeWidth={2.4} /> New
+        </span>
+      )}
       <button onClick={(e) => { e.stopPropagation(); onToggleSave(); }}
         title={saved ? "Saved — remove from reading list" : "Save to read later"}
         className={`absolute top-2 right-2 h-7 w-7 grid place-items-center rounded-lg backdrop-blur-md border transition-all ${
@@ -3789,6 +3873,12 @@ function NewsCard({ a, saved, onOpen, onToggleSave }: {
         </div>
         <div className="text-[14px] text-mac-ink font-medium leading-snug line-clamp-2">{a.title}</div>
         {a.snippet && <div className="text-[12.5px] text-mac-ink2 mt-1.5 leading-snug line-clamp-2">{a.snippet}</div>}
+        {reason && (
+          <div className="mt-auto pt-2.5 flex items-center gap-1.5 text-[11px] text-mac-accentHi">
+            <Sparkles size={11} strokeWidth={2} className="shrink-0" />
+            <span className="truncate">{reason}</span>
+          </div>
+        )}
       </div>
     </div>
   );
