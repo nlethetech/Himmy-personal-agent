@@ -58,11 +58,33 @@ def _sectors() -> dict[str, str]:
     return _sectors_cache
 
 
+def sector_options() -> list[tuple[str, str]]:
+    """``[(code, display_name)]`` for every Buddha Air sector — for smart resolution / pickers."""
+    out: list[tuple[str, str]] = []
+    try:
+        r = httpx.get(f"{_API}/index-data", headers=_HEADERS, timeout=15)
+        for s in r.json()["data"]["sectors-list"]["data"]:
+            out.append((str(s["sector_code"]).strip(), str(s["sector_name"]).strip()))
+    except Exception:  # noqa: BLE001 - best-effort
+        pass
+    return out
+
+
+#: Common Nepali spellings / alternate names → the canonical sector name (deterministic, no model).
+_ALIASES = {
+    "BHAIRAWA": "BHAIRAHAWA", "BHAIRHAWA": "BHAIRAHAWA", "SIDDHARTHANAGAR": "BHAIRAHAWA",
+    "LUMBINI": "BHAIRAHAWA", "SUNAULI": "BHAIRAHAWA", "KATH": "KATHMANDU",
+    "NARAYANGARH": "BHARATPUR", "NARAYANGADH": "BHARATPUR", "CHITWAN": "BHARATPUR",
+    "NEPALJUNG": "NEPALGUNJ", "NEPALGANJ": "NEPALGUNJ", "DHANGADI": "DHANGADHI",
+}
+
+
 def _resolve(place: str) -> str | None:
     s = _sectors()
     p = (place or "").strip().upper()
     if not p:
         return None
+    p = _ALIASES.get(p, p)
     if p in s:
         return s[p]
     for k, v in s.items():
@@ -164,4 +186,4 @@ class BuddhaAirConnector:
         return ["buddha_air_flights"]
 
 
-__all__ = ["BuddhaAirConnector", "buddha_air_flights"]
+__all__ = ["BuddhaAirConnector", "buddha_air_flights", "sector_options", "_resolve"]

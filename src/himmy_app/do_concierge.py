@@ -44,6 +44,17 @@ _TARGETS = {"food": 4, "deals": 4, "foryou": 4, "flights": 3}
 _SHOP_SEEDS = ["books", "home decor", "kitchen", "backpack", "headphones"]
 _SHOP_VAULT_HINTS = ("interest", "shop", "hobby", "gadget", "wishlist", "want", "like")
 
+#: Fast aliases for common Nepali city spellings/alt-names → a name the sector resolver knows.
+#: (Anything not here falls back to Himmy/the model in `_resolve_airport`.)
+_CITY_ALIASES = {
+    "ktm": "Kathmandu", "kath": "Kathmandu", "pkr": "Pokhara",
+    "bhairawa": "Bhairahawa", "bhairhawa": "Bhairahawa", "bhairawaa": "Bhairahawa",
+    "siddharthanagar": "Bhairahawa", "sunauli": "Bhairahawa", "lumbini": "Bhairahawa", "bwa": "Bhairahawa",
+    "biratnagar": "Biratnagar", "birat": "Biratnagar", "nepalganj": "Nepalgunj", "nepaljung": "Nepalgunj",
+    "chitwan": "Bharatpur", "narayangarh": "Bharatpur", "narayangadh": "Bharatpur",
+    "janakpurdham": "Janakpur", "dhangadi": "Dhangadhi", "dhangari": "Dhangadhi",
+}
+
 #: Default seeds when the vault tells us nothing — broad, popular Nepal queries.
 _FOOD_SEEDS = ["momo", "pizza", "chowmein", "burger", "newari"]
 _DEAL_SEEDS = ["headphones", "smart watch", "kitchen", "sneakers", "power bank"]
@@ -246,6 +257,7 @@ class DoConcierge:
         self._cache = self.cfg.data_dir / "do_cache.json"
         self.fb = DoFeedback(self.cfg)
         self._refreshing = False
+        self._air_cache: dict[str, str] = {}  # smart airport resolutions (text → code)
 
     # ---- public: the board, served warm with a background refresh ---------------------------
     async def board(self, *, force: bool = False) -> dict[str, Any]:
@@ -310,12 +322,67 @@ class DoConcierge:
         return {**menu, "recommended": recommended[:8]}
 
     # ---- flight tickets: live Buddha Air fares for a route + date ----------------------------
+    async def _resolve_airport(self, text: str) -> str:
+        """Map whatever the user typed to a Buddha Air airport code — deterministically first,
+        then via Himmy (the model) for misspellings/alt-names it doesn't know. Cached."""
+        text = (text or "").strip()
+        if not text:
+            return ""
+        from himmy_app.connectors.buddha_air import _resolve, sector_options
+
+        # 1) exact / substring match against the live sector list
+        code = _resolve(text)
+        if code:
+            return code
+        # 2) fast alias table for common Nepali spellings / alternate names
+        alias = _CITY_ALIASES.get(text.lower())
+        if alias and (code := _resolve(alias)):
+            return code
+        # 3) smart routing via Himmy — only when the cheap paths miss
+        key = text.lower()
+        if key in self._air_cache:
+            return self._air_cache[key]
+        opts = await asyncio.to_thread(sector_options)
+        codes = {c.upper() for c, _ in opts}
+        resolved = ""
+        if opts:
+            listing = "; ".join(f"{name} = {c}" for c, name in opts)
+            try:
+                from himmy.cli.provider import build_inference_for
+                from himmy.services.inference.models import InferenceMessage, InferenceRequest
+
+                svc = build_inference_for(self.cfg.provider, self.cfg.model)
+                resp = await svc.run(InferenceRequest(
+                    messages=[
+                        InferenceMessage(role="system", content=(
+                            "You map a Nepali place the user typed to its Buddha Air airport CODE. "
+                            "Reply with ONLY the 3-letter code from the provided list, or NONE if there is "
+                            "no reasonable match. Handle misspellings and alternate/local names "
+                            "(e.g. Bhairawa/Siddharthanagar/Lumbini -> Bhairahawa; Chitwan/Narayangarh -> "
+                            "Bharatpur; KTM -> Kathmandu).")),
+                        InferenceMessage(role="user", content=f"Airports: {listing}\n\nUser typed: {text!r}\nCode:"),
+                    ],
+                    generation_params={"temperature": 0.0}, timeout_seconds=30.0,
+                ))
+                m = re.search(r"[A-Za-z]{3}", resp.output_text or "")
+                if m and m.group(0).upper() in codes:
+                    resolved = m.group(0).upper()
+            except Exception:  # noqa: BLE001 - smart routing is best-effort
+                resolved = ""
+        self._air_cache[key] = resolved
+        return resolved
+
     async def flights(self, origin: str, destination: str, date: str = "") -> dict[str, Any]:
         from himmy_app.connectors.buddha_air import buddha_air_flights
 
         if not date:
             date = (datetime.date.today() + datetime.timedelta(days=8)).isoformat()
-        return await buddha_air_flights({"origin": origin, "destination": destination, "date": date})
+        # Smart-route both endpoints first (so "Bhairawa", "Lumbini", typos all work).
+        o = await self._resolve_airport(origin)
+        d = await self._resolve_airport(destination)
+        return await buddha_air_flights({
+            "origin": o or origin, "destination": d or destination, "date": date,
+        })
 
     # ---- inline search over food (Foodmandu) + shopping (Daraz) ------------------------------
     async def search(self, query: str, kind: str = "food") -> dict[str, Any]:
