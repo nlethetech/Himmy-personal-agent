@@ -951,8 +951,8 @@ function TripModal({ dest, days, onClose, onFlights }: {
       <div onClick={(e) => e.stopPropagation()}
         className="w-[680px] max-w-[calc(100%-2rem)] h-[82vh] max-h-[760px] flex flex-col rounded-2xl bg-[rgba(30,31,37,0.98)] backdrop-blur-xl border border-mac-strokeHi shadow-pop overflow-hidden">
         {/* header */}
-        <div className="relative shrink-0 px-5 pt-5 pb-4 bg-gradient-to-br from-[rgba(10,132,255,0.2)] via-[rgba(10,132,255,0.05)] to-transparent">
-          <button onClick={onClose} className="absolute top-3 right-3 h-7 w-7 grid place-items-center rounded-full bg-black/30 text-white/85 hover:text-white"><X size={15} /></button>
+        <div className="relative shrink-0 px-5 pt-5 pb-4 border-b border-mac-stroke">
+          <button onClick={onClose} className="absolute top-3 right-3 h-7 w-7 grid place-items-center rounded-full bg-mac-fillHi text-mac-ink3 hover:text-mac-ink transition-colors"><X size={15} /></button>
           <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-mac-accentHi mb-2"><Route size={12} /> Trip roadmap</div>
           <h2 className="font-display text-[23px] font-semibold text-white tracking-[-0.015em]">{dest}</h2>
           <div className="text-[12px] text-white/70 mt-1">{days} day{days > 1 ? "s" : ""}</div>
@@ -1033,8 +1033,8 @@ function FlightModal({ route, onClose }: { route: { from: string; to: string; da
       <div onClick={(e) => e.stopPropagation()}
         className="w-[640px] max-w-[calc(100%-2rem)] max-h-[82vh] flex flex-col rounded-2xl bg-[rgba(30,31,37,0.98)] backdrop-blur-xl border border-mac-strokeHi shadow-pop overflow-hidden">
         {/* header banner */}
-        <div className="relative shrink-0 px-5 pt-5 pb-4 bg-gradient-to-br from-[rgba(10,132,255,0.24)] via-[rgba(10,132,255,0.06)] to-transparent">
-          <button onClick={onClose} className="absolute top-3 right-3 h-7 w-7 grid place-items-center rounded-full bg-black/30 text-white/85 hover:text-white"><X size={15} /></button>
+        <div className="relative shrink-0 px-5 pt-5 pb-4 border-b border-mac-stroke">
+          <button onClick={onClose} className="absolute top-3 right-3 h-7 w-7 grid place-items-center rounded-full bg-mac-fillHi text-mac-ink3 hover:text-mac-ink transition-colors"><X size={15} /></button>
           <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-mac-accentHi mb-2"><Plane size={12} /> Buddha Air · one way</div>
           <div className="flex items-center gap-3 text-[23px] font-semibold text-white tracking-[-0.015em]">
             <span>{data?.from || route.from}</span><ArrowRight size={19} className="text-mac-accentHi" /><span>{data?.to || route.to}</span>
@@ -1630,15 +1630,15 @@ function AgendaRow({ item, onClick, onComplete }:
       <span className="shrink-0 w-[58px] text-right text-[11px] tnum text-mac-ink3 leading-none">
         {item.timeLabel || "—"}
       </span>
-      {/* dot distinguishes event (accent) from task (green) */}
+      {/* a clean outline circle for tasks (checks on hover); a small accent dot for events */}
       {item.taskId && onComplete ? (
         <button onClick={onComplete} title="Mark done"
-          className="shrink-0 grid place-items-center text-mac-ink3 hover:text-mac-green transition-colors">
-          <span className="h-2 w-2 rounded-full bg-mac-green group-hover:hidden" />
-          <CheckCircle2 size={14} strokeWidth={2} className="hidden group-hover:block text-mac-green" />
+          className="shrink-0 grid place-items-center text-mac-ink3 hover:text-mac-ink transition-colors">
+          <Circle size={13} strokeWidth={2} className="group-hover:hidden" />
+          <CheckCircle2 size={14} strokeWidth={2} className="hidden group-hover:block text-mac-accentHi" />
         </button>
       ) : (
-        <span className={`shrink-0 h-2 w-2 rounded-full ${isEvent ? "bg-mac-accentHi" : "bg-mac-green"}`} />
+        <span className={`shrink-0 h-1.5 w-1.5 rounded-full ${isEvent ? "bg-mac-accentHi" : "bg-mac-ink3"}`} />
       )}
       <button onClick={onClick} className="min-w-0 flex-1 text-left">
         <div className={`text-[12.5px] truncate leading-tight ${item.done ? "line-through text-mac-ink3" : "text-mac-ink"}`}>{item.title}</div>
