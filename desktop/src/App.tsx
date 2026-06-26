@@ -2888,22 +2888,7 @@ function PreferencesSection({ dir, onReveal }: { dir: string; onReveal: () => vo
   );
 }
 
-function PlanSection() {
-  return (
-    <div className="space-y-4">
-      <SectionHeader title="Plan &amp; Billing" sub="Your Himmy plan." />
-      <div className="rounded-xl border border-mac-stroke bg-mac-fill p-6 text-center">
-        <Coins size={22} className="text-mac-accentHi mx-auto mb-2.5" />
-        <p className="text-[13px] text-mac-ink font-medium">Himmy is free while in development</p>
-        <p className="text-[12px] text-mac-ink3 mt-1.5 max-w-[42ch] mx-auto leading-relaxed">
-          Plans &amp; billing will live here when Himmy becomes a paid product — nothing to manage yet.
-        </p>
-      </div>
-    </div>
-  );
-}
-
-type AccountTab = "you" | "connections" | "permissions" | "activity" | "backup" | "preferences" | "plan";
+type AccountTab = "you" | "connections" | "permissions" | "activity" | "backup" | "preferences";
 const ACCOUNT_SECTIONS: { id: AccountTab; label: string; icon: LucideIcon }[] = [
   { id: "you", label: "You", icon: Sparkles },
   { id: "connections", label: "Connections", icon: Link2 },
@@ -2911,7 +2896,6 @@ const ACCOUNT_SECTIONS: { id: AccountTab; label: string; icon: LucideIcon }[] = 
   { id: "activity", label: "Activity", icon: ListChecks },
   { id: "backup", label: "Backup & Sync", icon: FileDown },
   { id: "preferences", label: "Preferences", icon: Settings },
-  { id: "plan", label: "Plan & Billing", icon: Coins },
 ];
 
 function AccountPanel({ onClose }: { onClose: () => void }) {
@@ -2965,7 +2949,6 @@ function AccountPanel({ onClose }: { onClose: () => void }) {
             {tab === "permissions" && <PermissionsSection onGoConnections={() => setTab("connections")} />}
             {tab === "activity" && <ActivitySection />}
             {tab === "preferences" && <PreferencesSection dir={dir} onReveal={reveal} />}
-            {tab === "plan" && <PlanSection />}
             {tab === "backup" && (
               <div className="space-y-4">
                 <SectionHeader title="Backup & Sync" sub="Keep a copy of your whole workspace, or move it to another Mac." />
