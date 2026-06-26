@@ -219,8 +219,25 @@ class DismissRequest(BaseModel):
 class DoFeedbackRequest(BaseModel):
     kind: str           # "up" | "down"
     key: str
-    rail: str = ""      # "food" | "deals" | "flights"
+    rail: str = ""      # "food" | "deals" | "foryou" | "flights"
     tags: list[str] = []
+
+
+class DoCartAddRequest(BaseModel):
+    key: str
+    name: str
+    price: float = 0.0
+    qty: int = 1
+    source: str = "shop"          # "food" | "shop"
+    place: str = ""               # group label (restaurant name, or "Daraz")
+    image: str = ""
+    link: str = ""
+    checkout_link: str = ""
+
+
+class DoCartQtyRequest(BaseModel):
+    key: str
+    qty: int
 
 
 def _advance_due(due: str | None, recur: str) -> str:
@@ -964,9 +981,10 @@ def create_app() -> FastAPI:
         return saved_news.remove(nid)
 
     # ---- "Do" hub: a smart Nepal concierge over flights / food / shopping ----------------
-    from himmy_app.do_concierge import DoConcierge
+    from himmy_app.do_concierge import DoCart, DoConcierge
 
     do = DoConcierge(cfg)
+    do_cart = DoCart(cfg)
 
     @app.get("/do")
     async def do_board(force: bool = False) -> dict[str, Any]:
@@ -980,6 +998,36 @@ def create_app() -> FastAPI:
     @app.post("/do/feedback")
     async def do_feedback(body: DoFeedbackRequest) -> dict[str, Any]:
         return do.feedback(body.kind, body.key, body.rail, body.tags)
+
+    @app.get("/do/restaurant")
+    async def do_restaurant(id: str = "", name: str = "") -> dict[str, Any]:
+        # A restaurant's menu + the dishes recommended for the user (matched to their tastes).
+        return await do.restaurant_detail(vendor_id=id, name=name)
+
+    @app.get("/do/search")
+    async def do_search(q: str, kind: str = "food") -> dict[str, Any]:
+        return await do.search(q, kind)
+
+    # the tray — a Himmy-side cart the user checks out themselves (opening the place's page)
+    @app.get("/do/cart")
+    async def do_cart_view() -> dict[str, Any]:
+        return {"ok": True, **do_cart.view()}
+
+    @app.post("/do/cart/add")
+    async def do_cart_add(body: DoCartAddRequest) -> dict[str, Any]:
+        return do_cart.add(body.model_dump())
+
+    @app.post("/do/cart/qty")
+    async def do_cart_qty(body: DoCartQtyRequest) -> dict[str, Any]:
+        return do_cart.set_qty(body.key, body.qty)
+
+    @app.post("/do/cart/remove")
+    async def do_cart_remove(body: DoCartQtyRequest) -> dict[str, Any]:
+        return do_cart.remove(body.key)
+
+    @app.post("/do/cart/clear")
+    async def do_cart_clear() -> dict[str, Any]:
+        return do_cart.clear()
 
     # ---- tasks: the SAME board Himmy reads/writes (himmy tasks pack, shared SQLite) -------
     # config.load_config() pinned HIMMY_TASKS_PATH to .scholar-desk/tasks.db, so the agent's

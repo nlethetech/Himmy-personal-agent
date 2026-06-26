@@ -23,11 +23,88 @@ _HEADERS = {
     "Origin": "https://foodmandu.com",
     "Referer": "https://foodmandu.com/",
     "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json",
 }
+_IMG_BASE = "https://images.foodmandu.com"
 
 
 def _order_link(vendor_id: Any) -> str:
     return f"https://foodmandu.com/Restaurant/Details/{vendor_id}"
+
+
+def _vendor_id_from_link(link: str) -> str:
+    """Pull the vendor id out of a .../Restaurant/Details/{id} order link."""
+    return (link or "").rstrip("/").rsplit("/", 1)[-1]
+
+
+def _img(path: str) -> str:
+    path = (path or "").strip()
+    if not path:
+        return ""
+    if path.startswith("http"):
+        return path
+    return f"{_IMG_BASE}/{path.lstrip('/')}"
+
+
+async def _resolve_vendor(query: str) -> dict[str, Any] | None:
+    """Best-effort restaurant-name -> {id, name, image, order_link} via the vendor search."""
+    res = await foodmandu_search({"query": query, "limit": 1})
+    rows = res.get("restaurants") or []
+    if not rows:
+        return None
+    r = rows[0]
+    return {"id": _vendor_id_from_link(r.get("order_link") or ""), "name": r.get("name"),
+            "image": r.get("image"), "order_link": r.get("order_link")}
+
+
+async def foodmandu_menu(args: dict[str, Any]) -> dict[str, Any]:
+    """A restaurant's full menu (dishes by category) from Foodmandu — public, no auth."""
+    vid = str(args.get("vendor_id") or "").strip()
+    name = str(args.get("restaurant") or args.get("query") or args.get("name") or "").strip()
+    resolved_name = name
+    order_link = ""
+    if not vid and name:
+        v = await _resolve_vendor(name)
+        if not v or not v.get("id"):
+            return {"ok": False, "message": f"Couldn't find '{name}' on Foodmandu."}
+        vid, resolved_name, order_link = v["id"], v.get("name") or name, v.get("order_link") or ""
+    if not vid:
+        return {"ok": False, "message": "Need a restaurant name or vendor_id."}
+    if not order_link:
+        order_link = _order_link(vid)
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(f"{_API}/v2/Product/GetVendorProductsBySubCategoryV2",
+                            params={"VendorId": vid, "show": ""}, headers=_HEADERS)
+        cats = r.json()
+        if not isinstance(cats, list):
+            cats = []
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": f"Couldn't read the menu ({type(exc).__name__})."}
+    categories: list[dict[str, Any]] = []
+    total = 0
+    for c in cats:
+        items: list[dict[str, Any]] = []
+        for it in (c.get("items") or []):
+            price = it.get("price")
+            old = it.get("oldprice")
+            items.append({
+                "id": it.get("productId"),
+                "name": (it.get("name") or "").strip(),
+                "price": price,
+                "was": old if (old and float(old or 0) > float(price or 0)) else None,
+                "desc": (it.get("productDesc") or "").strip(),
+                "image": _img(it.get("ProductImage") or it.get("ProductGridImage") or ""),
+                "popular": bool(it.get("IsFavouriteProduct")),
+                "tag": (it.get("itemDisplayTag") or "").strip(),
+            })
+        if items:
+            total += len(items)
+            categories.append({"category": (c.get("category") or "").strip(), "items": items})
+    return {
+        "ok": True, "vendor_id": vid, "restaurant": resolved_name,
+        "categories": categories, "item_count": total, "order_link": order_link,
+    }
 
 
 async def foodmandu_search(args: dict[str, Any]) -> dict[str, Any]:
@@ -93,7 +170,20 @@ class FoodmanduConnector:
                 "delivery_zone_id": {"type": "integer"}},
                 "required": ["query"]},
         )
-        return ["foodmandu_search"]
+        safe_register_local_tool(
+            registry, name="foodmandu_menu", read_only=True, handler=foodmandu_menu,
+            description=(
+                "Read a restaurant's MENU from Foodmandu (Nepal). Pass `restaurant` (the name, e.g. "
+                "'Bota Mo:Mo', 'Roadhouse Pizza') or a `vendor_id`. Returns the dishes grouped by "
+                "category, each with name, price (NPR), description and whether it's popular — so you "
+                "can recommend specific dishes, compare prices, or answer 'what's good here'. Use this "
+                "whenever the user asks what a place serves or wants a dish recommendation. It does NOT "
+                "place an order; to order, point them to the restaurant's Foodmandu page."
+            ),
+            args_json_schema={"type": "object", "properties": {
+                "restaurant": {"type": "string"}, "vendor_id": {"type": "string"}}},
+        )
+        return ["foodmandu_search", "foodmandu_menu"]
 
 
 __all__ = ["FoodmanduConnector", "foodmandu_search"]

@@ -37,7 +37,12 @@ from himmy_app.config import HimmyConfig, load_config
 _TTL = float(os.environ.get("HIMMY_DO_TTL") or str(6 * 3600))
 
 #: How many picks each rail shows (rails are padded to this so the layout stays full).
-_TARGETS = {"food": 4, "deals": 4, "flights": 3}
+_TARGETS = {"food": 4, "deals": 4, "foryou": 4, "flights": 3}
+
+#: "For You" shopping seeds (Daraz, interest-driven not discount-driven) + the vault labels we
+#: read them from. Falls back to broad lifestyle categories until the user saves interests.
+_SHOP_SEEDS = ["books", "home decor", "kitchen", "backpack", "headphones"]
+_SHOP_VAULT_HINTS = ("interest", "shop", "hobby", "gadget", "wishlist", "want", "like")
 
 #: Default seeds when the vault tells us nothing — broad, popular Nepal queries.
 _FOOD_SEEDS = ["momo", "pizza", "chowmein", "burger", "newari"]
@@ -94,6 +99,86 @@ class DoFeedback:
                     if t:
                         weights[t.lower()] = weights.get(t.lower(), 0) + delta
         return dismissed, weights
+
+
+# --------------------------------------------------------------------------------------------
+# the tray: a Himmy-side cart of dishes + products, grouped by place, that the user checks out
+# themselves (opening the restaurant/product page). No vendor login — that's the later rung.
+# --------------------------------------------------------------------------------------------
+class DoCart:
+    def __init__(self, config: HimmyConfig | None = None) -> None:
+        cfg = config or load_config()
+        self._db = cfg.data_dir / "do_cart.db"
+        self._ensure()
+
+    def _conn(self) -> sqlite3.Connection:
+        c = sqlite3.connect(str(self._db), timeout=10)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def _ensure(self) -> None:
+        with self._conn() as c:
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS cart (
+                    key TEXT PRIMARY KEY, source TEXT, place TEXT, checkout_link TEXT,
+                    name TEXT, price REAL, qty INTEGER, image TEXT, link TEXT, at REAL
+                )"""
+            )
+
+    def add(self, item: dict[str, Any]) -> dict[str, Any]:
+        key = str(item.get("key") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if not key or not name:
+            return {"ok": False, "error": "need key + name"}
+        with self._conn() as c:
+            row = c.execute("SELECT qty FROM cart WHERE key=?", (key,)).fetchone()
+            qty = (row["qty"] if row else 0) + int(item.get("qty") or 1)
+            c.execute(
+                """INSERT INTO cart (key, source, place, checkout_link, name, price, qty, image, link, at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(key) DO UPDATE SET qty=excluded.qty""",
+                (key, str(item.get("source") or "shop"), str(item.get("place") or ""),
+                 str(item.get("checkout_link") or item.get("link") or ""), name,
+                 float(item.get("price") or 0), qty, str(item.get("image") or ""),
+                 str(item.get("link") or ""), time.time()),
+            )
+        return {"ok": True, **self.view()}
+
+    def set_qty(self, key: str, qty: int) -> dict[str, Any]:
+        with self._conn() as c:
+            if qty <= 0:
+                c.execute("DELETE FROM cart WHERE key=?", (key,))
+            else:
+                c.execute("UPDATE cart SET qty=? WHERE key=?", (int(qty), key))
+        return {"ok": True, **self.view()}
+
+    def remove(self, key: str) -> dict[str, Any]:
+        with self._conn() as c:
+            c.execute("DELETE FROM cart WHERE key=?", (key,))
+        return {"ok": True, **self.view()}
+
+    def clear(self) -> dict[str, Any]:
+        with self._conn() as c:
+            c.execute("DELETE FROM cart")
+        return {"ok": True, **self.view()}
+
+    def view(self) -> dict[str, Any]:
+        with self._conn() as c:
+            rows = [dict(r) for r in c.execute("SELECT * FROM cart ORDER BY at")]
+        groups: dict[str, dict[str, Any]] = {}
+        total = 0.0
+        count = 0
+        for r in rows:
+            g = groups.setdefault(r["place"] or "Other", {
+                "place": r["place"] or "Other", "source": r["source"],
+                "checkout_link": r["checkout_link"], "items": [], "subtotal": 0.0})
+            line = float(r["price"] or 0) * int(r["qty"] or 1)
+            g["items"].append({"key": r["key"], "name": r["name"], "price": r["price"],
+                               "qty": r["qty"], "image": r["image"], "link": r["link"]})
+            g["subtotal"] += line
+            total += line
+            count += int(r["qty"] or 1)
+        return {"groups": list(groups.values()), "total": round(total, 2), "count": count}
 
 
 # --------------------------------------------------------------------------------------------
@@ -186,22 +271,120 @@ class DoConcierge:
         self._spawn_refresh()  # let the next board reflect the new taste
         return out
 
+    # ---- restaurant detail: the full menu + dishes recommended for the user ------------------
+    def _food_pref_tokens(self) -> set[str]:
+        """Words from the user's saved favourite foods/cuisines (e.g. {'momo','pizza','sekuwa'})."""
+        toks: set[str] = set()
+        for label, value in _vault(self.cfg).items():
+            if any(h in label.lower() for h in _FOOD_VAULT_HINTS):
+                for part in re.split(r"[,/;]| and ", value):
+                    for w in part.split():
+                        if len(w) >= 3:
+                            toks.add(w.strip().lower())
+        return toks
+
+    async def restaurant_detail(self, vendor_id: str = "", name: str = "") -> dict[str, Any]:
+        from himmy_app.connectors.foodmandu import foodmandu_menu
+
+        menu = await foodmandu_menu({"vendor_id": vendor_id, "restaurant": name})
+        if not menu.get("ok"):
+            return menu
+        tokens = self._food_pref_tokens()
+        recommended: list[dict[str, Any]] = []
+        all_items: list[dict[str, Any]] = []
+        for cat in menu["categories"]:
+            for it in cat["items"]:
+                # Normalise punctuation so a token like "momo" matches a dish named "Mo:Mo".
+                hay = re.sub(r"[^a-z0-9 ]", "", f"{it.get('name', '')} {it.get('desc', '')} "
+                             f"{cat.get('category', '')}".lower())
+                match = any(t in hay for t in tokens)
+                it["recommended"] = match
+                enriched = {**it, "category": cat["category"], "_pref": match}
+                all_items.append(enriched)
+                if match or it.get("popular"):
+                    recommended.append(enriched)
+        recommended.sort(key=lambda x: (not x["_pref"], not x.get("popular"), float(x.get("price") or 1e9)))
+        # Fallback so the section is never empty: the cheapest handful of dishes.
+        if not recommended:
+            recommended = sorted(all_items, key=lambda x: float(x.get("price") or 1e9))[:6]
+        return {**menu, "recommended": recommended[:8]}
+
+    # ---- inline search over food (Foodmandu) + shopping (Daraz) ------------------------------
+    async def search(self, query: str, kind: str = "food") -> dict[str, Any]:
+        query = (query or "").strip()
+        if not query:
+            return {"ok": False, "results": [], "message": "Type something to search."}
+        if kind == "shop":
+            from himmy_app.connectors.daraz import daraz_search
+
+            res = await daraz_search({"query": query, "limit": 12})
+            out = [{"key": p.get("product_link") or p.get("name"), "title": p.get("name"),
+                    "subtitle": f"Rs {p.get('price_npr')}",
+                    "was": f"Rs {p.get('original_price_npr')}" if p.get("discount") else None,
+                    "discount": p.get("discount") or "", "rating": _rating(p.get("rating")),
+                    "meta": p.get("sold") or "", "image": p.get("image") or "",
+                    "link": p.get("product_link"), "why": ""} for p in res.get("products", [])]
+            return {"ok": True, "kind": "shop", "query": query, "results": out}
+        from himmy_app.connectors.foodmandu import _vendor_id_from_link, foodmandu_search
+
+        res = await foodmandu_search({"query": query, "limit": 12})
+        out = [{"key": r.get("order_link"),
+                "vendor_id": _vendor_id_from_link(r.get("order_link") or ""),
+                "title": r.get("name"), "subtitle": r.get("cuisine"),
+                "rating": _rating(r.get("rating")), "open_now": bool(r.get("open_now")),
+                "image": r.get("image") or "", "link": r.get("order_link"), "why": ""}
+               for r in res.get("restaurants", [])]
+        return {"ok": True, "kind": "food", "query": query, "results": out}
+
     # ---- candidate generation (free, deterministic, live) -----------------------------------
     async def _candidates(self, vault: dict[str, str]) -> dict[str, list[dict[str, Any]]]:
         dismissed, weights = self.fb.signals()
         food_seeds = _seeds_from_vault(vault, _FOOD_VAULT_HINTS, _FOOD_SEEDS)
         deal_seeds = _seeds_from_vault(vault, _DEAL_VAULT_HINTS, _DEAL_SEEDS)
-        food, deals, flights = await asyncio.gather(
+        shop_seeds = _seeds_from_vault(vault, _SHOP_VAULT_HINTS, _SHOP_SEEDS)
+        food, deals, foryou, flights = await asyncio.gather(
             self._food(food_seeds, dismissed, weights),
             self._deals(deal_seeds, dismissed, weights),
+            self._shop_foryou(shop_seeds, dismissed, weights),
             self._flights(vault, dismissed),
             return_exceptions=True,
         )
         return {
             "food": food if isinstance(food, list) else [],
             "deals": deals if isinstance(deals, list) else [],
+            "foryou": foryou if isinstance(foryou, list) else [],
             "flights": flights if isinstance(flights, list) else [],
         }
+
+    async def _shop_foryou(self, seeds: list[str], dismissed: set[str], weights: dict[str, int]) -> list[dict[str, Any]]:
+        """Daraz items related to the user's interests — ranked by rating, NOT by discount."""
+        from himmy_app.connectors.daraz import daraz_search
+
+        results = await asyncio.gather(
+            *[daraz_search({"query": s, "limit": 6, "sort": "popular"}) for s in seeds],
+            return_exceptions=True,
+        )
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for seed, res in zip(seeds, results):
+            if not isinstance(res, dict):
+                continue
+            for p in res.get("products", []):
+                key = p.get("product_link") or p.get("name")
+                rating = _rating(p.get("rating"))
+                if not key or key in seen or key in dismissed or rating < 3.8:
+                    continue
+                seen.add(key)
+                out.append({
+                    "key": key, "title": p.get("name"),
+                    "subtitle": f"Rs {p.get('price_npr')}",
+                    "was": f"Rs {p.get('original_price_npr')}" if p.get("discount") else None,
+                    "discount": p.get("discount") or "", "rating": rating, "meta": p.get("sold") or "",
+                    "image": p.get("image") or "", "link": p.get("product_link"), "tag": seed,
+                    "_score": 4 * rating + 0.5 * weights.get(seed.lower(), 0),
+                })
+        out.sort(key=lambda x: x["_score"], reverse=True)
+        return out[:8]
 
     async def _food(self, seeds: list[str], dismissed: set[str], weights: dict[str, int]) -> list[dict[str, Any]]:
         from himmy_app.connectors.foodmandu import foodmandu_search
@@ -313,6 +496,9 @@ class DoConcierge:
         if rail == "deals":
             sold = str(c.get("meta") or "").strip()
             return f"{sold} · popular pick" if sold else "Limited-time deal"
+        if rail == "foryou":
+            tag = str(c.get("tag") or "").strip()
+            return f"Popular in {tag}" if tag else "Picked for your interests"
         return str(c.get("meta") or c.get("date") or "")  # flights: flight no · time
 
     def _assemble_rail(self, rail: str, cand_rail: list[dict[str, Any]],
@@ -346,6 +532,7 @@ class DoConcierge:
             "headline": "Here's what's good in Nepal right now.",
             "food": self._assemble_rail("food", cands["food"], None),
             "deals": self._assemble_rail("deals", cands["deals"], None),
+            "foryou": self._assemble_rail("foryou", cands["foryou"], None),
             "flights": self._assemble_rail("flights", cands["flights"], None),
             "ai": False,
         }
@@ -359,7 +546,7 @@ class DoConcierge:
                      "discount": c.get("discount"), "meta": c.get("meta")} for i, c in enumerate(rail)]
 
         payload = {"food": slim(cands["food"]), "deals": slim(cands["deals"]),
-                   "flights": slim(cands["flights"])}
+                   "foryou": slim(cands["foryou"]), "flights": slim(cands["flights"])}
         if not any(payload.values()):
             return None
 
@@ -374,8 +561,10 @@ class DoConcierge:
             "weekend). Be specific and honest — never invent a place, price, or rating not in the "
             "candidates. Reply with ONLY a JSON object, no prose, of the form: "
             '{"headline": "<friendly one-liner>", "food": [{"id": <int>, "why": "<reason>"}], '
-            '"deals": [...], "flights": [...]}. Use up to 4 food, 4 deals, 2 flights; ids refer to the '
-            "candidate 'id' fields. Drop anything weak rather than padding."
+            '"deals": [...], "foryou": [...], "flights": [...]}. food = restaurants; deals = '
+            "discounted products; foryou = products matching the user's interests; flights = trips. "
+            "Use up to 4 each (2 flights); ids refer to the candidate 'id' fields within that rail. "
+            "Drop anything weak rather than padding."
         )
         user = (
             f"Local time: {now:%A %d %b, %I:%M %p}.\n\nAbout the user:\n{profile}\n\n"
@@ -398,13 +587,14 @@ class DoConcierge:
         # so the layout always stays full even when the model only ranks a couple.
         food = self._assemble_rail("food", cands["food"], picks.get("food"))
         deals = self._assemble_rail("deals", cands["deals"], picks.get("deals"))
+        foryou = self._assemble_rail("foryou", cands["foryou"], picks.get("foryou"))
         flights = self._assemble_rail("flights", cands["flights"], picks.get("flights"))
-        if not (food or deals or flights):
+        if not (food or deals or foryou or flights):
             return None
         return {
             "ok": True,
             "headline": str(picks.get("headline") or "Here's what's good in Nepal right now.").strip(),
-            "food": food, "deals": deals, "flights": flights, "ai": True,
+            "food": food, "deals": deals, "foryou": foryou, "flights": flights, "ai": True,
         }
 
     # ---- cache plumbing ---------------------------------------------------------------------
@@ -456,4 +646,4 @@ def _extract_json(text: str) -> Any:
     return None
 
 
-__all__ = ["DoConcierge", "DoFeedback"]
+__all__ = ["DoConcierge", "DoFeedback", "DoCart"]

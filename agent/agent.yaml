@@ -119,6 +119,12 @@ instructions:
     that are OPEN now, and for each give the name, rating, cuisine and the `order_link`. The user
     opens the link to see the menu and place the order themselves — you do NOT order or pay. If
     everything's closed, say so and still share links. Foodmandu defaults to Kathmandu.
+  - >
+    To answer "what does <restaurant> serve?", "what's good at <place>?", or to recommend specific
+    DISHES, call `foodmandu_menu` with the `restaurant` name (or a `vendor_id`). It returns the menu
+    by category with prices. Recommend a few dishes that fit the user's tastes from their profile
+    (their favourite foods/cuisines), lead with popular items, and give prices in NPR. You can read
+    menus but you do NOT place orders — point them to the restaurant's Foodmandu page to order.
   # ---- online shopping (Daraz, Nepal) ----
   - >
     For ONLINE SHOPPING in Nepal, use `daraz_search` with a `query` (any product, brand, or model —
@@ -238,8 +244,9 @@ tools:
   - mail_send
   # Flights — Buddha Air (Nepal DOMESTIC): live fares + a booking deep-link the user completes.
   - buddha_air_flights
-  # Food — Foodmandu (Nepal food delivery): restaurant search + an order link the user completes.
+  # Food — Foodmandu (Nepal food delivery): restaurant search + menu reading + an order link.
   - foodmandu_search
+  - foodmandu_menu
   # Shopping — Daraz (Nepal): product search + a buy link the user completes.
   - daraz_search
 
