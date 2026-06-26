@@ -1260,6 +1260,17 @@ def create_app() -> FastAPI:
         _perms.save(body.levels, cfg)
         return _permissions_payload()
 
+    # ---- activity log: a plain-English record of what Himmy did -------------------------
+    from himmy_app import activity as _activity
+
+    @app.get("/activity")
+    async def activity_get(limit: int = 60) -> dict[str, Any]:
+        return {"ok": True, "items": _activity.recent(limit, cfg)}
+
+    @app.delete("/activity")
+    async def activity_clear() -> dict[str, Any]:
+        return _activity.clear(cfg)
+
     @app.post("/google/client")
     async def google_set_client(body: GoogleClientRequest) -> dict[str, Any]:
         """Store the user's Google OAuth client_id/secret (one-time setup)."""

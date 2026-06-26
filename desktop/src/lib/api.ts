@@ -199,6 +199,11 @@ export type PermSurface = {
 };
 export type PermsCatalog = { ok: boolean; surfaces: PermSurface[]; levels: Record<string, string> };
 
+// Activity log — a plain-English record of what Himmy did.
+export type ActivityItem = {
+  ts: number; tool: string; surface: string; title: string; detail: string; status: string;
+};
+
 // Live flight tickets (Buddha Air) for a route + date.
 export type DoFlight = { flight: string; depart: string; arrive: string; from: string; to: string; fare_npr: number; class: string };
 export type DoFlights = {
@@ -549,6 +554,11 @@ export const api = {
   permissions: {
     get: () => jget<PermsCatalog>("/permissions"),
     set: (levels: Record<string, string>) => jput<PermsCatalog>("/permissions", { levels }),
+  },
+
+  activity: {
+    get: (limit = 60) => jget<{ ok: boolean; items: ActivityItem[] }>(`/activity?limit=${limit}`),
+    clear: () => jdelete<{ ok: boolean }>("/activity"),
   },
   tasks: {
     list: () => jget<{ ok: boolean; tasks: Task[]; open: number; total: number }>("/tasks"),

@@ -75,8 +75,24 @@ def _build_runtime(cfg: Any, on_event: Any, *, checkpoint_store: Any = None) -> 
     except Exception:  # noqa: BLE001 - permissions must never break building the agent
         pass
 
+    # Record what Himmy does (one capture point for every path): wrap on_event so each tool the
+    # agent completes is logged to the activity log, then forward to the original callback.
+    import inspect
+
+    async def _on_event_logged(event: Any) -> None:
+        try:
+            from himmy_app import activity
+
+            activity.observe(event, cfg)
+        except Exception:  # noqa: BLE001 - logging must never disturb a turn
+            pass
+        if on_event is not None:
+            res = on_event(event)
+            if inspect.isawaitable(res):
+                await res
+
     runtime, _registry = build_runtime_for_spec(
-        spec, provider=cfg.provider, model=cfg.model, on_event=on_event, durable_defaults=True,
+        spec, provider=cfg.provider, model=cfg.model, on_event=_on_event_logged, durable_defaults=True,
         checkpoint_store=checkpoint_store,
     )
     return runtime, spec.to_persona(), spec

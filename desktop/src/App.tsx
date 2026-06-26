@@ -24,7 +24,7 @@ import {
   type UserProfile, type ProfileLayer,
   type DoBoard, type DoPick, type DoRestaurant, type DoMenuItem,
   type DoCartView, type DoCartAdd, type DoFlights, type DoFlight,
-  type PermsCatalog, type PermSurface,
+  type PermsCatalog, type PermSurface, type ActivityItem,
 } from "./lib/api";
 import { apa, mla, bibtex } from "./lib/cite";
 import Reader from "./Reader";
@@ -2460,6 +2460,74 @@ function PermissionRow({ s, onSet, onGoConnections }: {
   );
 }
 
+const ACT_ICON: Record<string, LucideIcon> = {
+  mail: Mail, calendar: Calendar, tasks: CheckSquare, food: UtensilsCrossed,
+  shopping: ShoppingBag, flights: Plane, web: Globe, live_data: MapPin,
+  library: BookOpen, memory: Sparkles,
+};
+
+function ActivitySection() {
+  const [items, setItems] = useState<ActivityItem[] | null>(null);
+  const load = () => api.activity.get(80).then((r) => setItems(r.items || [])).catch(() => setItems([]));
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+  const clear = async () => { await api.activity.clear().catch(() => {}); load(); };
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <SectionHeader title="Activity"
+          sub="A record of what Himmy has done for you — every action it takes is logged here. Stays on your Mac." />
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button onClick={load} title="Refresh"
+            className="h-8 w-8 grid place-items-center rounded-[9px] bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">
+            <RefreshCw size={13} />
+          </button>
+          {items && items.length > 0 && (
+            <button onClick={clear}
+              className="h-8 px-3 rounded-[9px] bg-mac-fill border border-mac-stroke text-[12px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors inline-flex items-center gap-1.5">
+              <Trash2 size={13} /> Clear
+            </button>
+          )}
+        </div>
+      </div>
+      {!items ? (
+        <div className="h-32 grid place-items-center text-mac-ink3"><Loader2 size={18} className="animate-spin" /></div>
+      ) : items.length === 0 ? (
+        <div className="h-40 grid place-items-center text-center">
+          <div>
+            <ListChecks size={22} className="text-mac-ink3 mx-auto mb-3" />
+            <p className="text-[13px] text-mac-ink2">No activity yet.</p>
+            <p className="text-[11.5px] text-mac-ink3 mt-1 max-w-[34ch] mx-auto">Anything Himmy does — searches, drafts, bookings, tasks — will show up here.</p>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {items.map((a, i) => <ActivityRow key={i} a={a} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActivityRow({ a }: { a: ActivityItem }) {
+  const Icon = ACT_ICON[a.surface] || Sparkles;
+  const tint = a.status === "blocked" ? "text-mac-orange" : a.status === "failed" ? "text-mac-red" : "text-mac-accentHi";
+  return (
+    <div className="flex items-center gap-3 px-3 py-2.5 rounded-xl border border-mac-stroke bg-mac-fill">
+      <div className="h-8 w-8 shrink-0 grid place-items-center rounded-lg bg-mac-fillHi">
+        <Icon size={14} className={tint} />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-[12.5px] text-mac-ink leading-snug">
+          {a.title}{a.detail ? <span className="text-mac-ink3"> — {a.detail}</span> : null}
+        </div>
+      </div>
+      {a.status === "blocked" && <Pill tone="orange">blocked</Pill>}
+      {a.status === "failed" && <Pill tone="neutral">failed</Pill>}
+      <span className="text-[11px] text-mac-ink3 shrink-0 tnum">{relativeAgo(new Date(a.ts * 1000).toISOString())}</span>
+    </div>
+  );
+}
+
 function Pill({ tone, children }: { tone: "green" | "orange" | "neutral"; children: React.ReactNode }) {
   const cls = tone === "green" ? "bg-mac-green/15 text-mac-green"
     : tone === "orange" ? "bg-mac-orange/15 text-mac-orange" : "bg-mac-fillHi text-mac-ink3";
@@ -2575,11 +2643,12 @@ function PlanSection() {
   );
 }
 
-type AccountTab = "you" | "connections" | "permissions" | "backup" | "preferences" | "plan";
+type AccountTab = "you" | "connections" | "permissions" | "activity" | "backup" | "preferences" | "plan";
 const ACCOUNT_SECTIONS: { id: AccountTab; label: string; icon: LucideIcon }[] = [
   { id: "you", label: "You", icon: Sparkles },
   { id: "connections", label: "Connections", icon: Link2 },
   { id: "permissions", label: "Permissions", icon: ShieldCheck },
+  { id: "activity", label: "Activity", icon: ListChecks },
   { id: "backup", label: "Backup & Sync", icon: FileDown },
   { id: "preferences", label: "Preferences", icon: Settings },
   { id: "plan", label: "Plan & Billing", icon: Coins },
@@ -2634,6 +2703,7 @@ function AccountPanel({ onClose }: { onClose: () => void }) {
             {tab === "you" && <ProfileSettings />}
             {tab === "connections" && <ConnectionsSection g={g} />}
             {tab === "permissions" && <PermissionsSection onGoConnections={() => setTab("connections")} />}
+            {tab === "activity" && <ActivitySection />}
             {tab === "preferences" && <PreferencesSection dir={dir} onReveal={reveal} />}
             {tab === "plan" && <PlanSection />}
             {tab === "backup" && (
