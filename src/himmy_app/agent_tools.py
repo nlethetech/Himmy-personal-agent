@@ -102,6 +102,14 @@ def register(registry: ToolRegistry) -> list[str]:
     except Exception:  # noqa: BLE001 - best-effort; food search just won't be offered
         pass
 
+    # --- Daraz: Nepal online-shopping product search + a buy link --------------------------
+    try:
+        from himmy_app.connectors.daraz import DarazConnector
+
+        registered += DarazConnector().register_tools(registry)
+    except Exception:  # noqa: BLE001 - best-effort; shopping search just won't be offered
+        pass
+
     # De-dup while preserving order.
     seen: set[str] = set()
     ordered: list[str] = []

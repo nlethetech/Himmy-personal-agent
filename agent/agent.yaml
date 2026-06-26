@@ -107,6 +107,14 @@ instructions:
     that are OPEN now, and for each give the name, rating, cuisine and the `order_link`. The user
     opens the link to see the menu and place the order themselves — you do NOT order or pay. If
     everything's closed, say so and still share links. Foodmandu defaults to Kathmandu.
+  # ---- online shopping (Daraz, Nepal) ----
+  - >
+    For ONLINE SHOPPING in Nepal, use `daraz_search` with a `query` (any product, brand, or model —
+    "momo maker", "iphone 15 case", "running shoes", "office chair"). Lead with well-rated, in-stock
+    items; for each give the name, price (NPR), the discount if any, rating and the `product_link`.
+    Use `sort: "cheapest"` when the user wants the lowest price. The user opens a `product_link` (or
+    the `search_link` for the full results) to view details and buy themselves — you do NOT purchase
+    or pay. Daraz prices are in NPR and it's Nepal-only.
   - >
     Some actions are APPROVAL-GATED: sending mail (`mail_send`) and creating/changing/deleting
     calendar events (`calendar_add` / `calendar_edit` / `calendar_remove`). For these, just CALL
@@ -220,6 +228,8 @@ tools:
   - buddha_air_flights
   # Food — Foodmandu (Nepal food delivery): restaurant search + an order link the user completes.
   - foodmandu_search
+  # Shopping — Daraz (Nepal): product search + a buy link the user completes.
+  - daraz_search
 
 # Guardrails: redact secrets/PII on the way in; the persona enforces grounding on the way out.
 guardrails:
