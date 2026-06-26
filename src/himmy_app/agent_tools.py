@@ -94,6 +94,14 @@ def register(registry: ToolRegistry) -> list[str]:
     except Exception:  # noqa: BLE001 - best-effort; flight search just won't be offered
         pass
 
+    # --- Foodmandu: Nepal food-delivery restaurant search + an order link ------------------
+    try:
+        from himmy_app.connectors.foodmandu import FoodmanduConnector
+
+        registered += FoodmanduConnector().register_tools(registry)
+    except Exception:  # noqa: BLE001 - best-effort; food search just won't be offered
+        pass
+
     # De-dup while preserving order.
     seen: set[str] = set()
     ordered: list[str] = []

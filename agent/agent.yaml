@@ -100,6 +100,13 @@ instructions:
     options (flight no, time, fare), then give them the `booking_link` to open and complete the
     booking themselves — you do NOT book or pay. If `fares_available` is false, just share the link.
     Buddha Air is domestic Nepal ONLY; for international routes, say you can't search those yet.
+  # ---- food delivery (Foodmandu, Nepal) ----
+  - >
+    For FOOD DELIVERY in Nepal, use `foodmandu_search` with a `query` (a dish, cuisine, or
+    restaurant — "momo", "pizza", "KFC", "Newari", "biryani"). Lead with the best-rated places
+    that are OPEN now, and for each give the name, rating, cuisine and the `order_link`. The user
+    opens the link to see the menu and place the order themselves — you do NOT order or pay. If
+    everything's closed, say so and still share links. Foodmandu defaults to Kathmandu.
   - >
     Some actions are APPROVAL-GATED: sending mail (`mail_send`) and creating/changing/deleting
     calendar events (`calendar_add` / `calendar_edit` / `calendar_remove`). For these, just CALL
@@ -211,6 +218,8 @@ tools:
   - mail_send
   # Flights — Buddha Air (Nepal DOMESTIC): live fares + a booking deep-link the user completes.
   - buddha_air_flights
+  # Food — Foodmandu (Nepal food delivery): restaurant search + an order link the user completes.
+  - foodmandu_search
 
 # Guardrails: redact secrets/PII on the way in; the persona enforces grounding on the way out.
 guardrails:
