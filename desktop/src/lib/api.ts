@@ -165,7 +165,7 @@ export type RecResult = {
 // The "Do" concierge — smart Nepal picks across food / shopping / flights, each with a deep-link.
 export type DoPick = {
   key: string; title: string; subtitle?: string; meta?: string; why?: string;
-  link?: string; rating?: number; open_now?: boolean;
+  link?: string; rating?: number; open_now?: boolean; image?: string; ai?: boolean;
   discount?: string; was?: string; tag?: string; date?: string;
 };
 export type DoBoard = {

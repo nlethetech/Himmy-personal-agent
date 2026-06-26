@@ -501,48 +501,77 @@ function DoTab() {
 function DoPickCard({ p, rail, action, onDismiss }: {
   p: DoPick; rail: "food" | "deals" | "flights"; action: string; onDismiss: () => void;
 }) {
+  const isFlight = rail === "flights";
+  const RailIcon = rail === "food" ? UtensilsCrossed : ShoppingBag;
   return (
-    <div className="group relative flex flex-col rounded-xl bg-mac-fill border border-mac-stroke hover:border-mac-strokeHi hover:shadow-mac transition-all p-3.5">
-      <button onClick={onDismiss} title="Not for me — show less like this"
-        className="absolute top-1.5 right-1.5 z-10 h-6 w-6 grid place-items-center rounded-full bg-mac-fill/80 backdrop-blur text-mac-ink3 hover:text-mac-ink hover:bg-mac-fillHi opacity-0 group-hover:opacity-100 transition-opacity">
-        <ThumbsDown size={12} />
-      </button>
-      {/* badges */}
-      <div className="flex items-center gap-1.5 text-[11px] mb-1.5 pr-6">
-        {rail === "deals" && p.discount && (
-          <span className="font-semibold text-mac-green">{p.discount}</span>
+    <div className="group relative flex flex-col rounded-xl bg-mac-fill border border-mac-stroke hover:border-mac-strokeHi hover:shadow-mac transition-all overflow-hidden">
+      {/* media — a photo for food/deals, a route banner for flights */}
+      <div className="relative h-28 w-full overflow-hidden bg-mac-fillHi">
+        {isFlight ? (
+          <div className="relative h-full w-full grid place-items-center bg-gradient-to-br from-[rgba(10,132,255,0.22)] via-[rgba(10,132,255,0.08)] to-mac-fill">
+            <Plane size={20} className="text-mac-accentHi/60 -mt-3" />
+            <div className="absolute bottom-2.5 left-3 text-[16px] font-semibold text-mac-ink tracking-[-0.01em]">{p.title}</div>
+          </div>
+        ) : p.image ? (
+          <img src={p.image} alt="" loading="lazy"
+            onError={(e) => { e.currentTarget.style.display = "none"; }}
+            className="h-full w-full object-cover group-hover:scale-[1.04] transition-transform duration-300" />
+        ) : (
+          <div className="h-full w-full grid place-items-center text-mac-ink3"><RailIcon size={20} /></div>
         )}
-        {typeof p.rating === "number" && p.rating > 0 && (
-          <span className="inline-flex items-center gap-0.5 text-mac-ink3">
-            <Star size={10} className="text-mac-accentHi fill-mac-accentHi" /> {p.rating.toFixed(1)}
-          </span>
+        <button onClick={onDismiss} title="Not for me — show less like this"
+          className="absolute top-1.5 right-1.5 z-10 h-6 w-6 grid place-items-center rounded-full bg-black/45 backdrop-blur text-white/80 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity">
+          <ThumbsDown size={11} />
+        </button>
+        {rail === "deals" && p.discount && (
+          <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-mac-green text-white text-[10.5px] font-semibold shadow-mac">{p.discount}</span>
         )}
         {rail === "food" && (
-          <span className={`inline-flex items-center gap-1 ${p.open_now ? "text-mac-green" : "text-mac-ink3"}`}>
-            <span className={`h-1.5 w-1.5 rounded-full ${p.open_now ? "bg-mac-green" : "bg-mac-ink3"}`} />
-            {p.open_now ? "Open" : "Closed"}
+          <span className={`absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-md text-[10.5px] font-medium backdrop-blur ${
+            p.open_now ? "bg-mac-green/90 text-white" : "bg-black/55 text-white/85"}`}>
+            {p.open_now ? "Open now" : "Closed"}
           </span>
         )}
       </div>
-      <div className="text-[14px] text-mac-ink font-medium leading-snug line-clamp-2">{p.title}</div>
-      {/* price line for deals/flights */}
-      {(p.subtitle && rail !== "food") && (
-        <div className="flex items-baseline gap-1.5 mt-1">
-          <span className="text-[14px] font-semibold text-mac-ink">{p.subtitle}</span>
-          {rail === "deals" && p.was && <span className="text-[11.5px] text-mac-ink3 line-through">{p.was}</span>}
+
+      {/* body */}
+      <div className="flex flex-col flex-1 p-3">
+        {/* rating / sold line (not for flights) */}
+        {!isFlight && (typeof p.rating === "number" && p.rating > 0 || (rail === "deals" && p.meta)) && (
+          <div className="flex items-center gap-1.5 text-[11px] text-mac-ink3 mb-1">
+            {typeof p.rating === "number" && p.rating > 0 && (
+              <span className="inline-flex items-center gap-0.5">
+                <Star size={10} className="text-mac-accentHi fill-mac-accentHi" /> {p.rating.toFixed(1)}
+              </span>
+            )}
+            {rail === "deals" && p.meta && <span className="truncate">· {p.meta}</span>}
+          </div>
+        )}
+        {/* title (route is already in the flight banner) */}
+        {!isFlight && (
+          <div className="text-[13px] text-mac-ink font-medium leading-snug line-clamp-2">{p.title}</div>
+        )}
+        {/* price / fare */}
+        {p.subtitle && rail !== "food" && (
+          <div className="flex items-baseline gap-1.5 mt-1">
+            <span className={`font-semibold text-mac-ink ${isFlight ? "text-[16px]" : "text-[14px]"}`}>{p.subtitle}</span>
+            {rail === "deals" && p.was && <span className="text-[11.5px] text-mac-ink3 line-through">{p.was}</span>}
+            {isFlight && p.meta && <span className="text-[11px] text-mac-ink3">· {p.meta}</span>}
+          </div>
+        )}
+        {/* why — sparkle only when it's Himmy's own reasoning */}
+        {p.why && (!isFlight || p.ai) && (
+          <div className="flex items-start gap-1 mt-1.5">
+            {p.ai && <Sparkles size={11} strokeWidth={2} className="text-mac-accentHi shrink-0 mt-0.5" />}
+            <p className={`text-[11.5px] leading-snug line-clamp-2 ${p.ai ? "text-mac-ink2" : "text-mac-ink3"}`}>{p.why}</p>
+          </div>
+        )}
+        <div className="mt-auto pt-2.5">
+          <a href={p.link || "#"} target="_blank" rel="noreferrer"
+            className="h-8 w-full px-3 rounded-[9px] text-[12px] font-medium inline-flex items-center justify-center gap-1.5 bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">
+            {action} <ArrowUpRight size={13} strokeWidth={2.5} />
+          </a>
         </div>
-      )}
-      {p.why && (
-        <div className="flex items-start gap-1 mt-2">
-          <Sparkles size={11} strokeWidth={2} className="text-mac-accentHi shrink-0 mt-0.5" />
-          <p className="text-[12px] text-mac-ink2 leading-snug line-clamp-2">{p.why}</p>
-        </div>
-      )}
-      <div className="mt-auto pt-3">
-        <a href={p.link || "#"} target="_blank" rel="noreferrer"
-          className="h-8 w-full px-3 rounded-[9px] text-[12px] font-medium inline-flex items-center justify-center gap-1.5 bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">
-          {action} <ArrowUpRight size={13} strokeWidth={2.5} />
-        </a>
       </div>
     </div>
   );

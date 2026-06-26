@@ -63,6 +63,8 @@ async def foodmandu_search(args: dict[str, Any]) -> dict[str, Any]:
             "address": (v.get("Address1") or "").strip(),
             "distance": (v.get("DeliveryDistanceStr") or "").strip(),
             "delivers": bool(v.get("AcceptsDeliveryOrder")),
+            "image": (v.get("VendorListingWebImageName") or v.get("VendorCoverImageName")
+                      or v.get("VendorLogoImageName") or "").strip(),
             "order_link": _order_link(vid),
         })
     return {

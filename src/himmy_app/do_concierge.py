@@ -36,6 +36,9 @@ from himmy_app.config import HimmyConfig, load_config
 #: How long a generated board stays fresh before a background refresh recomputes it.
 _TTL = float(os.environ.get("HIMMY_DO_TTL") or str(6 * 3600))
 
+#: How many picks each rail shows (rails are padded to this so the layout stays full).
+_TARGETS = {"food": 4, "deals": 4, "flights": 3}
+
 #: Default seeds when the vault tells us nothing — broad, popular Nepal queries.
 _FOOD_SEEDS = ["momo", "pizza", "chowmein", "burger", "newari"]
 _DEAL_SEEDS = ["headphones", "smart watch", "kitchen", "sneakers", "power bank"]
@@ -220,7 +223,7 @@ class DoConcierge:
                     "key": key, "title": r.get("name"), "subtitle": r.get("cuisine"),
                     "rating": _rating(r.get("rating")), "open_now": bool(r.get("open_now")),
                     "meta": r.get("hours") or r.get("distance") or "", "link": r.get("order_link"),
-                    "tag": seed,
+                    "image": r.get("image") or "", "tag": seed,
                     "_score": _rating(r.get("rating")) + (2.0 if r.get("open_now") else 0.0)
                               + 0.5 * weights.get(seed.lower(), 0),
                 })
@@ -250,7 +253,7 @@ class DoConcierge:
                     "key": key, "title": p.get("name"),
                     "subtitle": f"Rs {p.get('price_npr')}", "was": f"Rs {p.get('original_price_npr')}",
                     "discount": p.get("discount"), "rating": rating, "meta": p.get("sold") or "",
-                    "link": p.get("product_link"), "tag": seed,
+                    "image": p.get("image") or "", "link": p.get("product_link"), "tag": seed,
                     "_score": pct + 4 * rating + 0.5 * weights.get(seed.lower(), 0),
                 })
         out.sort(key=lambda x: x["_score"], reverse=True)
@@ -261,7 +264,7 @@ class DoConcierge:
 
         home = _home_airport(vault)
         date = (datetime.date.today() + datetime.timedelta(days=8)).isoformat()
-        targets = [t for t in ("KTM", "PKR", "BWA") if t != home][:2]
+        targets = [t for t in ("KTM", "PKR", "BWA", "BIR", "BHR") if t != home][:3]
         routes = [(home, t) for t in targets] or [("KTM", "PKR")]
         results = await asyncio.gather(
             *[buddha_air_flights({"origin": o, "destination": d, "date": date}) for o, d in routes],
@@ -302,32 +305,48 @@ class DoConcierge:
             pass
         return board
 
+    def _why_template(self, rail: str, c: dict[str, Any]) -> str:
+        """A non-redundant secondary line (the badges already show rating / open / discount)."""
+        if rail == "food":
+            cui = str(c.get("subtitle") or "").split("|")[0].strip()
+            return cui or ("Open now" if c.get("open_now") else "Opens later")
+        if rail == "deals":
+            sold = str(c.get("meta") or "").strip()
+            return f"{sold} · popular pick" if sold else "Limited-time deal"
+        return str(c.get("meta") or c.get("date") or "")  # flights: flight no · time
+
+    def _assemble_rail(self, rail: str, cand_rail: list[dict[str, Any]],
+                       ai_picks: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        """AI-chosen items first (with their 'why'), then pad with the next-best candidates."""
+        used: set[int] = set()
+        out: list[dict[str, Any]] = []
+        for item in (ai_picks or []):
+            try:
+                idx = int(item.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if idx in used or not (0 <= idx < len(cand_rail)):
+                continue
+            used.add(idx)
+            why = str(item.get("why") or "").strip()
+            out.append({**cand_rail[idx], "why": why or self._why_template(rail, cand_rail[idx]),
+                        "ai": bool(why)})
+        for i, c in enumerate(cand_rail):
+            if len(out) >= _TARGETS[rail]:
+                break
+            if i in used:
+                continue
+            out.append({**c, "why": self._why_template(rail, c), "ai": False})
+        return out[:_TARGETS[rail]]
+
     def _deterministic_board(self, cands: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
         """A complete board with template 'why' lines — used cold and as the AI fallback."""
-        def why_food(c: dict[str, Any]) -> str:
-            bits = ["Open now" if c["open_now"] else "Opens later"]
-            if c["rating"]:
-                bits.append(f"⭐{c['rating']:.1f}")
-            if c.get("subtitle"):
-                bits.append(str(c["subtitle"]).split("|")[0].strip())
-            return " · ".join(b for b in bits if b)
-
-        def why_deal(c: dict[str, Any]) -> str:
-            bits = []
-            if c.get("discount"):
-                bits.append(str(c["discount"]))
-            if c["rating"]:
-                bits.append(f"⭐{c['rating']:.1f}")
-            if c.get("meta"):
-                bits.append(str(c["meta"]))
-            return " · ".join(bits)
-
         return {
             "ok": True,
             "headline": "Here's what's good in Nepal right now.",
-            "food": [{**c, "why": why_food(c)} for c in cands["food"][:4]],
-            "deals": [{**c, "why": why_deal(c)} for c in cands["deals"][:4]],
-            "flights": [{**c, "why": (c.get("meta") or c.get("date") or "")} for c in cands["flights"][:2]],
+            "food": self._assemble_rail("food", cands["food"], None),
+            "deals": self._assemble_rail("deals", cands["deals"], None),
+            "flights": self._assemble_rail("flights", cands["flights"], None),
             "ai": False,
         }
 
@@ -375,36 +394,17 @@ class DoConcierge:
         picks = _extract_json(resp.output_text or "")
         if not isinstance(picks, dict):
             return None
-
-        def apply(rail_name: str, limit: int) -> list[dict[str, Any]]:
-            chosen: list[dict[str, Any]] = []
-            used: set[int] = set()
-            for item in (picks.get(rail_name) or [])[:limit]:
-                try:
-                    idx = int(item.get("id"))
-                except (TypeError, ValueError):
-                    continue
-                if idx in used or not (0 <= idx < len(cands[rail_name])):
-                    continue
-                used.add(idx)
-                why = str(item.get("why") or "").strip()
-                chosen.append({**cands[rail_name][idx], "why": why})
-            return chosen
-
-        food = apply("food", 4)
-        deals = apply("deals", 4)
-        flights = apply("flights", 2)
+        # Assemble each rail from the model's ordered picks, padded with the next-best candidates
+        # so the layout always stays full even when the model only ranks a couple.
+        food = self._assemble_rail("food", cands["food"], picks.get("food"))
+        deals = self._assemble_rail("deals", cands["deals"], picks.get("deals"))
+        flights = self._assemble_rail("flights", cands["flights"], picks.get("flights"))
         if not (food or deals or flights):
             return None
-        # Fall back per-rail to deterministic order if the model skipped a rail entirely.
-        base = self._deterministic_board(cands)
         return {
             "ok": True,
-            "headline": str(picks.get("headline") or base["headline"]).strip(),
-            "food": food or base["food"],
-            "deals": deals or base["deals"],
-            "flights": flights or base["flights"],
-            "ai": True,
+            "headline": str(picks.get("headline") or "Here's what's good in Nepal right now.").strip(),
+            "food": food, "deals": deals, "flights": flights, "ai": True,
         }
 
     # ---- cache plumbing ---------------------------------------------------------------------

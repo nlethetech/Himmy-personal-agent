@@ -84,6 +84,7 @@ async def daraz_search(args: dict[str, Any]) -> dict[str, Any]:
             "seller": (it.get("sellerName") or "").strip(),
             "brand": (it.get("brandName") or "").strip(),
             "in_stock": bool(it.get("inStock", True)),
+            "image": _abs(it.get("image") or ""),
             "product_link": _abs(it.get("itemUrl") or ""),
         })
     return {
