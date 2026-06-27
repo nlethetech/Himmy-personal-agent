@@ -98,6 +98,11 @@ async def generate(cfg: HimmyConfig | None = None) -> dict[str, Any]:
     checked: dict[str, Any] = {}
 
     try:
+        # Warm the live holiday feed (cached, ≤7-day TTL) so the sync upcoming() below sees
+        # fresh dates; refresh() never raises and falls back to a snapshot when offline.
+        from himmy_app import festivals
+
+        await festivals.refresh()
         created += _festival_nudges(inbox, today, checked)
     except Exception as exc:  # noqa: BLE001 - one bad source never blocks the others
         checked["festivals_error"] = f"{type(exc).__name__}: {exc}"

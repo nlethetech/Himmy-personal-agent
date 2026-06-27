@@ -44,7 +44,7 @@ import socket
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 import httpx
@@ -52,6 +52,7 @@ import httpx
 __all__ = [
     "NetError",
     "safe_get_json",
+    "safe_get_text",
     "atomic_write_text",
     "read_json_snapshot",
     "write_json_snapshot",
@@ -153,6 +154,18 @@ def _is_json_content_type(content_type: str | None) -> bool:
     return main.endswith("+json")
 
 
+def _is_text_content_type(content_type: str | None) -> bool:
+    """Default predicate for :func:`safe_get_text`: accept ``text/*`` (and JSON-ish) bodies.
+
+    A caller fetching a specific text format (e.g. an ICS calendar) should pass a STRICTER
+    predicate so a captcha/HTML body is rejected at the content-type gate rather than parsed.
+    """
+    if not content_type:
+        return False
+    main = content_type.split(";", 1)[0].strip().lower()
+    return main.startswith("text/") or main.endswith("+json") or main in _JSON_CT_EXACT
+
+
 async def _read_capped(response: httpx.Response, max_bytes: int) -> bytes:
     """Stream the body, aborting (NetError) if it exceeds ``max_bytes``."""
     chunks: list[bytes] = []
@@ -188,11 +201,14 @@ async def _send_once(
     headers: dict[str, str] | None,
     allow_hosts: frozenset[str] | None,
     max_bytes: int,
-) -> Any:
-    """One request (with at most one manual, validated redirect hop). Returns parsed JSON.
+    content_ok: Callable[[str | None], bool],
+) -> bytes:
+    """One request (with at most one manual, validated redirect hop). Returns the raw body bytes.
 
-    Raises NetError on guard violations / bad content-type / oversize bodies. Re-raises
-    httpx.HTTPStatusError so the caller's retry logic can inspect the status code.
+    Validates every hop's host (SSRF), rejects an unexpected ``content-type`` (per ``content_ok``)
+    BEFORE reading the body, and caps the body size. Raises NetError on guard violations; re-raises
+    httpx.HTTPStatusError so the caller's retry logic can inspect the status code. Decoding/parsing
+    the returned bytes is the caller's job.
     """
     current_url = url
     current_params = params
@@ -210,18 +226,13 @@ async def _send_once(
                 current_params = None  # params already encoded into the original URL
                 continue
             response.raise_for_status()
-            if not _is_json_content_type(response.headers.get("content-type")):
-                raise NetError(
-                    "non-JSON response "
-                    f"(content-type={response.headers.get('content-type', '?')!r})"
-                )
+            ct = response.headers.get("content-type")
+            if not content_ok(ct):
+                raise NetError(f"unexpected content-type ({ct!r})")
             body = await _read_capped(response, max_bytes)
         finally:
             await response.aclose()
-        try:
-            return json.loads(body)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise NetError(f"invalid JSON body ({exc.__class__.__name__})") from None
+        return body
     raise NetError("too many redirects")
 
 
@@ -260,6 +271,65 @@ async def safe_get_json(
         NetError: on any guard violation, non-JSON body, oversize body, or after exhausting
             retries on a retryable status, or on a non-retryable HTTP error / network failure.
     """
+    return await _fetch_guarded(
+        url, params=params, headers=headers, allow_hosts=allow_hosts, allow_any=allow_any,
+        timeout=timeout, max_bytes=max_bytes, retries=retries, content_ok=_is_json_content_type,
+        decode=_decode_json,
+    )
+
+
+def _decode_json(body: bytes) -> Any:
+    try:
+        return json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise NetError(f"invalid JSON body ({exc.__class__.__name__})") from None
+
+
+def _decode_text(body: bytes) -> str:
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError:
+        return body.decode("utf-8", "replace")
+
+
+async def safe_get_text(
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    allow_hosts: list[str] | set[str] | tuple[str, ...] | None = None,
+    allow_any: bool = False,
+    timeout: float = 20.0,
+    max_bytes: int = 5_000_000,
+    retries: int = 1,
+    content_ok: Callable[[str | None], bool] = _is_text_content_type,
+) -> str:
+    """GET ``url`` and return decoded UTF-8 text, with the SAME SSRF / allow-host / redirect / size /
+    retry guards as :func:`safe_get_json` (see that docstring for the argument semantics). ``content_ok``
+    defaults to accepting ``text/*``; pass a stricter predicate (e.g. only ``text/calendar``) when you
+    expect one specific format so a captcha/HTML body is rejected at the content-type gate.
+    """
+    return await _fetch_guarded(
+        url, params=params, headers=headers, allow_hosts=allow_hosts, allow_any=allow_any,
+        timeout=timeout, max_bytes=max_bytes, retries=retries, content_ok=content_ok,
+        decode=_decode_text,
+    )
+
+
+async def _fetch_guarded(
+    url: str,
+    *,
+    params: dict[str, Any] | None,
+    headers: dict[str, str] | None,
+    allow_hosts: list[str] | set[str] | tuple[str, ...] | None,
+    allow_any: bool,
+    timeout: float,
+    max_bytes: int,
+    retries: int,
+    content_ok: Callable[[str | None], bool],
+    decode: Callable[[bytes], Any],
+) -> Any:
+    """Shared SSRF/redirect/content-type/size/retry-guarded GET; returns ``decode(body)``."""
     hosts = _normalise_allow_hosts(allow_hosts)
     if not hosts and not allow_any:
         # Mandatory allow-list: refuse a wide-open fetch rather than rely on the advisory per-IP
@@ -273,14 +343,16 @@ async def safe_get_json(
     ) as client:
         for attempt in range(attempts):
             try:
-                return await _send_once(
+                body = await _send_once(
                     client,
                     url,
                     params=params,
                     headers=headers,
                     allow_hosts=hosts,
                     max_bytes=max_bytes,
+                    content_ok=content_ok,
                 )
+                return decode(body)
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 if status not in _RETRYABLE_STATUS or attempt == attempts - 1:
