@@ -581,42 +581,40 @@ function DoTab() {
               const on = searchKind === m.key;
               return (
                 <button key={m.key} onClick={() => { setSearchKind(m.key); setResults(null); if ((m.key === "food" || m.key === "shop") && searchQ.trim()) runSearch(searchQ, m.key); }}
-                  className={`h-9 px-3 rounded-[10px] text-[12px] font-medium inline-flex items-center gap-1.5 transition-all ${
+                  className={`h-9 px-2.5 rounded-[10px] text-[12px] font-medium inline-flex items-center gap-1.5 transition-all ${
                     on ? "bg-white/[0.1] text-mac-ink shadow-[0_1px_2px_rgba(0,0,0,0.25)]" : "text-mac-ink3 hover:text-mac-ink"}`}>
                   <MI size={13} strokeWidth={2} /> {m.label}
                 </button>
               );
             })}
           </div>
-          <div className="w-px h-6 bg-white/10 mx-2.5 shrink-0" />
+          <div className="w-px h-6 bg-white/10 mx-2 shrink-0" />
           {searchKind === "flights" ? (
-            <div className="flex-1 flex items-center gap-2">
+            <div className="flex-1 min-w-0 flex items-center gap-1.5">
               <Plane size={15} className="text-mac-ink3 shrink-0" />
               <input value={flFrom} onChange={(e) => setFlFrom(e.target.value)}
-                className="w-16 bg-transparent text-[13px] font-medium text-mac-ink placeholder:text-mac-ink3 outline-none uppercase" placeholder="From" />
-              <ArrowRight size={13} className="text-mac-ink3 shrink-0" />
+                className="w-12 bg-transparent text-[13px] font-medium text-mac-ink placeholder:text-mac-ink3 outline-none uppercase" placeholder="From" />
+              <ArrowRight size={12} className="text-mac-ink3 shrink-0" />
               <input value={flTo} onChange={(e) => setFlTo(e.target.value)}
-                className="w-16 bg-transparent text-[13px] font-medium text-mac-ink placeholder:text-mac-ink3 outline-none uppercase" placeholder="To" />
-              <span className="text-[10px] text-mac-ink3 shrink-0 ml-1">Depart</span>
-              <input type="date" value={flDate} onChange={(e) => setFlDate(e.target.value)}
-                className="bg-transparent text-[12.5px] text-mac-ink2 outline-none [color-scheme:dark]" />
-              {/* Round-trip toggle — when on, reveal a return-date field; the modal then fetches an
-                  inbound leg + round-trip total. Off = unchanged one-way search. */}
-              <button onClick={() => setFlRoundTrip((v) => !v)} title="Round trip"
-                className={`h-7 px-2.5 shrink-0 rounded-[8px] text-[11px] font-medium inline-flex items-center gap-1.5 transition-colors ${
-                  flRoundTrip ? "bg-[rgba(10,132,255,0.16)] text-mac-accentHi ring-1 ring-inset ring-mac-accentHi/30" : "bg-white/[0.05] text-mac-ink3 hover:text-mac-ink ring-1 ring-inset ring-white/10"}`}>
-                <ArrowRightLeft size={11} /> Round trip
+                className="w-12 bg-transparent text-[13px] font-medium text-mac-ink placeholder:text-mac-ink3 outline-none uppercase" placeholder="To" />
+              <div className="w-px h-5 bg-white/10 mx-1.5 shrink-0" />
+              {/* dates, label-free: the native date picker already shows a calendar glyph; the ⇄
+                  toggle between the two dates adds a return (round trip). */}
+              <input type="date" value={flDate} onChange={(e) => setFlDate(e.target.value)} title="Depart date"
+                className="bg-transparent text-[12.5px] text-mac-ink2 outline-none [color-scheme:dark] cursor-pointer" />
+              <button onClick={() => setFlRoundTrip((v) => !v)}
+                title={flRoundTrip ? "Round trip — click for one-way" : "Add a return (round trip)"}
+                className={`h-7 w-7 shrink-0 grid place-items-center rounded-[8px] transition-colors ${
+                  flRoundTrip ? "bg-[rgba(10,132,255,0.16)] text-mac-accentHi ring-1 ring-inset ring-mac-accentHi/30" : "text-mac-ink3 hover:text-mac-ink hover:bg-white/[0.06]"}`}>
+                <ArrowRightLeft size={13} />
               </button>
               {flRoundTrip && (
-                <>
-                  <span className="text-[10px] text-mac-ink3 shrink-0">Return</span>
-                  <input type="date" value={flReturnDate} min={flDate} onChange={(e) => setFlReturnDate(e.target.value)}
-                    className="bg-transparent text-[12.5px] text-mac-ink2 outline-none [color-scheme:dark]" />
-                </>
+                <input type="date" value={flReturnDate} min={flDate} onChange={(e) => setFlReturnDate(e.target.value)} title="Return"
+                  className="bg-transparent text-[12.5px] text-mac-ink2 outline-none [color-scheme:dark] cursor-pointer" />
               )}
               <div className="flex-1" />
               <button onClick={() => flFrom.trim() && flTo.trim() && setFlightRoute({ from: flFrom.trim(), to: flTo.trim(), date: flDate, returnDate: flRoundTrip ? flReturnDate : undefined })}
-                className="h-8 px-4 rounded-[9px] text-[12px] font-semibold text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 shadow-[0_2px_8px_-2px_rgba(10,132,255,0.5)] hover:brightness-[1.06] transition-all inline-flex items-center gap-1.5">
+                className="h-8 px-3.5 shrink-0 rounded-[9px] text-[12px] font-semibold text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 shadow-[0_2px_8px_-2px_rgba(10,132,255,0.5)] hover:brightness-[1.06] transition-all inline-flex items-center gap-1.5">
                 <Search size={13} /> Search
               </button>
             </div>
