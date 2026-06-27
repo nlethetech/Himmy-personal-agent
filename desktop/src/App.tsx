@@ -452,6 +452,7 @@ function DoTab() {
   // inline search
   const [searchQ, setSearchQ] = useState("");
   const [searchKind, setSearchKind] = useState<SearchKind>("food");
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);   // the active-mode dropdown
   const [results, setResults] = useState<DoPick[] | null>(null);
   const [searching, setSearching] = useState(false);
   // The search call THREW — show a retry, not the "0 results" empty copy.
@@ -575,19 +576,40 @@ function DoTab() {
 
         {/* unified command bar — mode segments + a context-aware search/flight field */}
         <div className="mt-5 flex items-center h-12 rounded-2xl bg-white/[0.04] ring-1 ring-inset ring-white/10 focus-within:ring-white/[0.18] transition-all pl-1.5 pr-1.5">
-          <div className="flex items-center gap-0.5 shrink-0">
-            {SEARCH_MODES.map((m) => {
-              const MI = m.icon;
-              const on = searchKind === m.key;
-              return (
-                <button key={m.key} onClick={() => { setSearchKind(m.key); setResults(null); if ((m.key === "food" || m.key === "shop") && searchQ.trim()) runSearch(searchQ, m.key); }}
-                  className={`h-9 px-2.5 rounded-[10px] text-[12px] font-medium inline-flex items-center gap-1.5 transition-all ${
-                    on ? "bg-white/[0.1] text-mac-ink shadow-[0_1px_2px_rgba(0,0,0,0.25)]" : "text-mac-ink3 hover:text-mac-ink"}`}>
-                  <MI size={13} strokeWidth={2} /> {m.label}
+          {/* Active-mode DROPDOWN — one slim control showing the current mode; opens to switch. */}
+          {(() => {
+            const active = SEARCH_MODES.find((m) => m.key === searchKind) || SEARCH_MODES[0];
+            const AI = active.icon;
+            return (
+              <div className="relative shrink-0">
+                <button onClick={() => setModeMenuOpen((o) => !o)} title="Switch mode"
+                  className="h-9 pl-2.5 pr-2 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-white/[0.06] text-mac-ink ring-1 ring-inset ring-white/10 hover:bg-white/[0.1] transition-colors">
+                  <AI size={14} strokeWidth={2} className="text-mac-accentHi" /> {active.label}
+                  <ChevronDown size={13} strokeWidth={2.2} className={`text-mac-ink3 transition-transform ${modeMenuOpen ? "rotate-180" : ""}`} />
                 </button>
-              );
-            })}
-          </div>
+                {modeMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-30" onClick={() => setModeMenuOpen(false)} />
+                    <div className="absolute top-full left-0 mt-1.5 z-40 w-44 p-1 rounded-xl bg-[rgba(36,37,43,0.98)] backdrop-blur-2xl border border-mac-strokeHi shadow-pop">
+                      {SEARCH_MODES.map((m) => {
+                        const MI = m.icon;
+                        const on = searchKind === m.key;
+                        return (
+                          <button key={m.key}
+                            onClick={() => { setSearchKind(m.key); setResults(null); setModeMenuOpen(false); if ((m.key === "food" || m.key === "shop") && searchQ.trim()) runSearch(searchQ, m.key); }}
+                            className={`w-full h-8 px-2.5 rounded-[8px] text-[12.5px] inline-flex items-center gap-2 transition-colors ${
+                              on ? "bg-white/[0.1] text-mac-ink" : "text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.06]"}`}>
+                            <MI size={14} strokeWidth={2} className={on ? "text-mac-accentHi" : "text-mac-ink3"} /> {m.label}
+                            {on && <Check size={13} className="ml-auto text-mac-accentHi" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })()}
           <div className="w-px h-6 bg-white/10 mx-2 shrink-0" />
           {searchKind === "flights" ? (
             <div className="flex-1 min-w-0 flex items-center gap-1.5">
