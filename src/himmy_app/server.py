@@ -1352,9 +1352,11 @@ def create_app() -> FastAPI:
         return await do.search(q, kind)
 
     @app.get("/do/flights")
-    async def do_flights(origin: str = Query("", alias="from"), to: str = "", date: str = "") -> dict[str, Any]:
-        # Live Buddha Air tickets (times + fares) for a route + date, so the user can SEE flights.
-        return await do.flights(origin, to, date)
+    async def do_flights(origin: str = Query("", alias="from"), to: str = "", date: str = "",
+                         return_date: str = Query("", alias="return")) -> dict[str, Any]:
+        # Live Buddha Air tickets (times + fares) for a route + date. Pass `return` (a YYYY-MM-DD
+        # return date) to get a ROUND-TRIP quote (outbound + inbound legs + round-trip total).
+        return await do.flights(origin, to, date, return_date)
 
     @app.get("/do/buses")
     async def do_buses(origin: str = Query("Kathmandu", alias="from"), to: str = "", date: str = "") -> dict[str, Any]:
@@ -1371,9 +1373,12 @@ def create_app() -> FastAPI:
             return {"ok": True, "cities": []}
 
     @app.get("/do/trip")
-    async def do_trip(dest: str, days: int = 2, style: str = "comfort") -> dict[str, Any]:
-        # A premium trip plan — budget, hotels, where-to-eat + a day-by-day roadmap (grounded in OSM).
-        return await do.trip(dest, days, style)
+    async def do_trip(dest: str, days: int = 2, style: str = "comfort", date: str = "",
+                      round_trip: bool = True) -> dict[str, Any]:
+        # A premium trip plan — budget, hotels, where-to-eat + a day-by-day roadmap (grounded in OSM),
+        # now date-aware: a real weather forecast for the stay + round-trip travel legs. `date` is the
+        # departure (YYYY-MM-DD; defaults inside the forecast window); `round_trip` carries return legs.
+        return await do.trip(dest, days, style, date=(date or None), round_trip=round_trip)
 
     @app.get("/do/trip/export")
     async def do_trip_export(dest: str, days: int = 2, style: str = "comfort",
@@ -1395,6 +1400,45 @@ def create_app() -> FastAPI:
             return {"ok": False, "message": trip.get("message") or "Couldn't build a plan to export."}
         title, markdown = _trip_export_markdown(trip, cfg)
         return {"ok": True, "title": title, "markdown": markdown}
+
+    @app.get("/do/weather")
+    async def do_weather(lat: float, lon: float, start: str = "", end: str = "") -> dict[str, Any]:
+        """An honest weather forecast for a point (keyless Open-Meteo).
+
+        Returns the shared forecast dict (current + per-day chips + the Nepal season line + a single
+        honest summary). When the requested dates sit beyond Open-Meteo's ~16-day horizon the daily
+        forecast is omitted and the summary leads with the SEASON instead of a fake forecast.
+
+        Validates ``lat``/``lon`` are finite numbers in range and that any ``start``/``end`` are ISO
+        (``YYYY-MM-DD``) dates, so a bad caller gets a 400 rather than a confusing empty plan.
+        """
+        import datetime as _dt
+        import math as _math
+
+        from himmy_app import weather as _weather
+
+        # lat/lon: finite floats inside the geographic range.
+        if not (_math.isfinite(lat) and _math.isfinite(lon)):
+            raise HTTPException(status_code=400, detail="lat/lon must be finite numbers.")
+        if not (-90.0 <= lat <= 90.0):
+            raise HTTPException(status_code=400, detail="lat must be between -90 and 90.")
+        if not (-180.0 <= lon <= 180.0):
+            raise HTTPException(status_code=400, detail="lon must be between -180 and 180.")
+
+        # start/end: optional, but if present must parse as ISO dates.
+        s = (start or "").strip() or None
+        e = (end or "").strip() or None
+        for label, value in (("start", s), ("end", e)):
+            if value is not None:
+                try:
+                    _dt.date.fromisoformat(value)
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{label} must be an ISO date (YYYY-MM-DD).",
+                    ) from exc
+
+        return await _weather.forecast(lat, lon, start=s, end=e)
 
     # the tray — a Himmy-side cart the user checks out themselves (opening the place's page)
     @app.get("/do/cart")

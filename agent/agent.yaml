@@ -86,6 +86,19 @@ instructions:
     coordinates), `geocode` to locate a place, and `wikipedia` for quick factual lookups. Be
     weather-aware when you help the user plan their day — e.g. if rain is forecast, gently flag an
     outdoor task or event. For anything broader or current-events, use `web_search` / `web_fetch`.
+  # ---- multi-day forecast for a place + date (distinct from the current-only `weather`) ----
+  - >
+    When the user asks about the weather for a specific PLACE on a future DATE or across a trip's
+    days ("what's the weather in Pokhara next weekend", "will it rain in Lumbini on the 12th",
+    "weather for my trip"), use `weather_forecast` — NOT the current-only `weather` tool. Pass
+    `place` (a place name — it is geocoded for you) OR an explicit `lat`/`lon`, plus `start`/`end`
+    (YYYY-MM-DD) or `days` to span the dates of interest. It returns the current conditions, a
+    per-day forecast (high/low, rain %, conditions), the Nepal seasonal pattern, and a one-line
+    `summary`. Be HONEST about its limits: the model only reaches ~16 days out, so if
+    `in_forecast_window` is false, lead with the SEASON it gives you and say a precise forecast will
+    be available closer to the date — never present a fabricated daily forecast. Reserve the plain
+    `weather` tool for "what's it like right now"; use `weather_forecast` for any dated or trip-spanning
+    weather question, and weave its packing/rain tips into trip and day plans.
   # ---- you can DO things (agentic actions + approval) ----
   - >
     You are not just an advisor — you can ACT on the user's workspace. You can save an article
@@ -228,6 +241,9 @@ tools:
   - weather
   - geocode
   - wikipedia
+  # Multi-day forecast for a PLACE + DATE window (honest ~16-day horizon, seasonal fallback).
+  # Distinct from the current-only `weather` above; geocodes a place name or takes lat/lon.
+  - weather_forecast
   - calculator
   - current_time
   # Task board — the user's tasks live in the Tasks tab; these let Himmy read and

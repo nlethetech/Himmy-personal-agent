@@ -14,9 +14,66 @@ crashing the agent. Returns the registered tool names.
 
 from __future__ import annotations
 
+from typing import Any
+
 from himmy.services.tools.registry import ToolRegistry
 
 from himmy_app.connectors import PapersRagConnector
+from himmy_app.connectors._register import safe_register_local_tool
+
+
+async def _weather_forecast_tool(args: dict[str, Any]) -> dict[str, Any]:
+    """Read-only forecast handler: a place name (geocoded) OR lat/lon -> weather.forecast(...).
+
+    Accepts either ``place`` (a place name resolved to coordinates via the SAME keyless
+    OpenStreetMap Nominatim lookup ``do_concierge`` uses) or an explicit ``lat``/``lon`` pair,
+    plus optional ``start`` / ``end`` (``YYYY-MM-DD``) or ``days``. Returns the shared honest
+    forecast contract from :func:`himmy_app.weather.forecast`. Never raises: a bad place or
+    upstream hiccup comes back as a well-formed ``{"ok": False, ...}`` dict.
+    """
+    from himmy_app import weather
+
+    place = (args.get("place") or "").strip()
+    lat = args.get("lat")
+    lon = args.get("lon")
+
+    # Resolve a place name to coordinates with the SAME Nominatim helper do_concierge uses,
+    # only when explicit coordinates weren't supplied.
+    if (lat is None or lon is None) and place:
+        try:
+            from himmy_app.do_concierge import DoConcierge
+
+            geo = await DoConcierge()._geocode(place)
+        except Exception:  # noqa: BLE001 - geocoding is best-effort
+            geo = None
+        if geo is None:
+            return {
+                "ok": False,
+                "current": None,
+                "daily": [],
+                "in_forecast_window": False,
+                "season": "",
+                "summary": f"Couldn't locate “{place}”. Try a clearer place name or pass lat/lon.",
+            }
+        lat, lon = geo
+
+    if lat is None or lon is None:
+        return {
+            "ok": False,
+            "current": None,
+            "daily": [],
+            "in_forecast_window": False,
+            "season": "",
+            "summary": "Need a place name or a lat/lon pair to fetch a forecast.",
+        }
+
+    return await weather.forecast(
+        float(lat),
+        float(lon),
+        start=args.get("start"),
+        end=args.get("end"),
+        days=int(args.get("days") or 7),
+    )
 
 #: himmy built-in tool packs to bind alongside the academic tools.
 #: ``tasks`` gives the agent list_tasks / add_task / complete_task over the shared task
@@ -116,6 +173,35 @@ def register(registry: ToolRegistry) -> list[str]:
 
         registered += DarazConnector().register_tools(registry)
     except Exception:  # noqa: BLE001 - best-effort; shopping search just won't be offered
+        pass
+
+    # --- Weather forecast: a place name (geocoded) OR lat/lon -> honest dated forecast ----
+    # READ-ONLY. Distinct from the current-only `weather` data-source tool: this returns a
+    # multi-day forecast for a SPECIFIC place + date window (honest about the ~16-day horizon).
+    try:
+        name = safe_register_local_tool(
+            registry, name="weather_forecast", read_only=True,
+            handler=_weather_forecast_tool,
+            description=(
+                "Get an honest multi-day WEATHER FORECAST for a specific place and date window. "
+                "Pass `place` (a place name — it is geocoded for you) OR an explicit `lat`/`lon` "
+                "pair, plus optional `start` and `end` (YYYY-MM-DD) or `days` (default 7). Returns "
+                "the current conditions, a per-day forecast (high/low, rain %, conditions with an "
+                "emoji), the Nepal seasonal pattern, and a one-line `summary`. It is honest about "
+                "the model's ~16-day horizon: if the requested dates are beyond it, "
+                "`in_forecast_window` is false and the summary leads with the SEASON instead of a "
+                "fabricated daily forecast. Use this (NOT the current-only `weather` tool) whenever "
+                "the user asks about the weather for a PLACE on a future DATE or over a trip's days."
+            ),
+            args_json_schema={"type": "object", "properties": {
+                "place": {"type": "string"},
+                "lat": {"type": "number"}, "lon": {"type": "number"},
+                "start": {"type": "string"}, "end": {"type": "string"},
+                "days": {"type": "integer"}}},
+        )
+        if name:
+            registered.append(name)
+    except Exception:  # noqa: BLE001 - best-effort; forecast just won't be offered
         pass
 
     # De-dup while preserving order.

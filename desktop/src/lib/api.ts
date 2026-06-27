@@ -214,6 +214,12 @@ export type DoFlight = { flight: string; depart: string; arrive: string; from: s
 export type DoFlights = {
   ok: boolean; fares_available?: boolean; from: string; to: string; date: string;
   currency?: string; flights: DoFlight[]; cheapest?: DoFlight | null; booking_link?: string; message?: string;
+  // Round-trip extras (only present when a return date was requested; one-way responses omit these).
+  round_trip?: boolean;
+  return_date?: string | null;          // "DD-Mon-YYYY" of the return leg
+  return_flights?: DoFlight[];          // cheapest-first inbound legs
+  return_cheapest?: DoFlight | null;
+  round_trip_total_npr?: number | null; // cheapest outbound + cheapest return
 };
 // Bus tickets (bussewa) — live departures + fares + seats for a route, with a booking deep-link.
 export type DoBus = {
@@ -261,11 +267,33 @@ export type DoTripTransportCompare = {
   verdict: DoTripTransportVerdict;
   disclaimer: string;       // "Flight time is door-to-door estimate incl. airport buffer."
 };
+// Weather for a destination — a current snapshot + per-day forecast (Open-Meteo, keyless). When the
+// requested dates fall beyond the ~16-day forecast horizon, `in_forecast_window` is false and the UI
+// leads with the seasonal `season` line instead of fake daily numbers.
+export type DoWeatherCurrent = {
+  temp_c: number; code: number; label: string; emoji: string; humidity: number; wind_kmh: number;
+};
+export type DoWeatherDay = {
+  date: string;        // YYYY-MM-DD
+  code: number; label: string; emoji: string;
+  t_max: number; t_min: number; rain_pct: number; rain_mm: number;
+};
+export type DoWeather = {
+  ok: boolean;
+  current: DoWeatherCurrent | null;
+  daily: DoWeatherDay[];
+  season: string;             // Nepal seasonal pattern, e.g. "Monsoon (Jun-Sep): afternoon showers likely"
+  summary: string;            // one honest line (real forecast if in-window, else seasonal)
+  in_forecast_window: boolean;
+};
 export type DoTrip = {
   ok: boolean; destination: string; days: number; style?: string; summary?: string;
+  date?: string | null; return_date?: string | null;   // depart / return, ISO YYYY-MM-DD
   getting_there?: DoTripFlight | null; by_bus?: DoTripBus | null; budget?: DoTripBudget; hotels?: DoTripHotel[]; eat?: DoTripEat[];
   // Only present (non-null) when both a flight and a bus exist for the route.
   transport_compare?: DoTripTransportCompare | null;
+  // Forecast for the destination over the trip window (graceful: absent when unavailable).
+  weather?: DoWeather | null;
   itinerary: DoTripDay[]; tips?: string[]; message?: string;
 };
 
@@ -615,13 +643,24 @@ export const api = {
     search: (q: string, kind: "food" | "shop") =>
       jget<{ ok: boolean; kind: string; query: string; results: DoPick[] }>(
         `/do/search?q=${encodeURIComponent(q)}&kind=${kind}`),
-    flights: (from: string, to: string, date?: string) =>
-      jget<DoFlights>(`/do/flights?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}${date ? `&date=${date}` : ""}`),
+    // Pass returnDate (YYYY-MM-DD) to fetch a round-trip — the response then carries return_flights +
+    // round_trip_total_npr. Omit it for a one-way search (the response stays backwards-compatible).
+    flights: (from: string, to: string, date?: string, returnDate?: string) =>
+      jget<DoFlights>(
+        `/do/flights?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}` +
+        `${date ? `&date=${date}` : ""}${returnDate ? `&return=${returnDate}` : ""}`),
     buses: (from: string, to: string, date?: string) =>
       jget<DoBuses>(`/do/buses?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}${date ? `&date=${date}` : ""}`),
     busCities: () => jget<{ ok: boolean; cities: string[] }>(`/do/bus-cities`),
-    trip: (dest: string, days = 2, style = "comfort") =>
-      jget<DoTrip>(`/do/trip?dest=${encodeURIComponent(dest)}&days=${days}&style=${style}`),
+    // Weather forecast for a point over a date window (Open-Meteo, keyless). Honest out-of-window:
+    // when start/end fall beyond the ~16-day horizon the result leads with the seasonal pattern.
+    weather: (lat: number, lon: number, start: string, end: string) =>
+      jget<DoWeather>(
+        `/do/weather?lat=${lat}&lon=${lon}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`),
+    // date = depart date (YYYY-MM-DD); when supplied the trip carries a real weather forecast + uses it.
+    trip: (dest: string, days = 2, style = "comfort", date?: string) =>
+      jget<DoTrip>(
+        `/do/trip?dest=${encodeURIComponent(dest)}&days=${days}&style=${style}${date ? `&date=${date}` : ""}`),
     // Export a trip as a SANITIZED shareable itinerary (markdown). The backend strips any
     // profile-derived phrasing, the user's name/email, and vault facts — it reads as a generic plan.
     tripExport: (dest: string, days = 2, style = "comfort") =>

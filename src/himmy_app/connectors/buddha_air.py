@@ -250,36 +250,10 @@ async def _availability_post(body_str: str) -> Any:
         raise NetError(f"invalid JSON body ({exc.__class__.__name__})") from None
 
 
-async def buddha_air_flights(args: dict[str, Any]) -> dict[str, Any]:
-    frm_in = str(args.get("origin") or args.get("from") or "").strip()
-    to_in = str(args.get("destination") or args.get("to") or "").strip()
-    date = _fmt_date(str(args.get("date") or ""))
-    adults = str(max(1, int(args.get("adults") or 1)))
-    children = str(max(0, int(args.get("children") or 0)))
-    if not frm_in or not to_in or not date:
-        return {"ok": False, "message": "Need origin, destination, and a date (YYYY-MM-DD)."}
-    frm, to = _resolve(frm_in), _resolve(to_in)
-    if not frm:
-        return {"ok": False, "message": f"Couldn't recognise '{frm_in}' as a Buddha Air city."}
-    if not to:
-        return {"ok": False, "message": f"Couldn't recognise '{to_in}' as a Buddha Air city."}
-    link = _booking_link(frm, to)
-    body = {
-        "sector": f"{frm}-{to}", "is_royal_club": False, "triptype": "O", "departdate": date,
-        "nationalityid": "NP", "adult": adults, "child": children, "type": "web",
-    }
-    body_str = json.dumps(body, separators=(",", ":"))
-    try:
-        d = await _availability_post(body_str)
-    except Exception as exc:  # noqa: BLE001 - the deep-link is the fallback
-        return {"ok": True, "fares_available": False, "from": frm, "to": to, "date": date,
-                "booking_link": link,
-                "message": f"Couldn't read live fares ({type(exc).__name__}); open the link to see fares and book."}
-    if not d.get("success"):
-        return {"ok": True, "fares_available": False, "from": frm, "to": to, "date": date, "booking_link": link,
-                "message": d.get("message") or "No fares came back; open the link to check availability."}
+def _parse_leg(items: Any) -> list[dict[str, Any]]:
+    """Parse one availability leg (``outbound`` or ``inbound``) into cheapest-first flights."""
     flights: list[dict[str, Any]] = []
-    for f in (d.get("data") or {}).get("outbound", []) or []:
+    for f in items or []:
         try:
             fare = f["airfare"]["faredetail"]["adult"]["totalfarenprusd"]
         except Exception:  # noqa: BLE001
@@ -292,11 +266,68 @@ async def buddha_air_flights(args: dict[str, Any]) -> dict[str, Any]:
             "fare_npr": round(float(fare), 2), "class": f.get("classcode"),
         })
     flights.sort(key=lambda x: x["fare_npr"])
-    return {
+    return flights
+
+
+async def buddha_air_flights(args: dict[str, Any]) -> dict[str, Any]:
+    frm_in = str(args.get("origin") or args.get("from") or "").strip()
+    to_in = str(args.get("destination") or args.get("to") or "").strip()
+    date = _fmt_date(str(args.get("date") or ""))
+    return_in = str(args.get("return_date") or "").strip()
+    return_date = _fmt_date(return_in) if return_in else None
+    is_round_trip = bool(return_date)
+    adults = str(max(1, int(args.get("adults") or 1)))
+    children = str(max(0, int(args.get("children") or 0)))
+    if not frm_in or not to_in or not date:
+        return {"ok": False, "message": "Need origin, destination, and a date (YYYY-MM-DD)."}
+    frm, to = _resolve(frm_in), _resolve(to_in)
+    if not frm:
+        return {"ok": False, "message": f"Couldn't recognise '{frm_in}' as a Buddha Air city."}
+    if not to:
+        return {"ok": False, "message": f"Couldn't recognise '{to_in}' as a Buddha Air city."}
+    link = _booking_link(frm, to)
+
+    def _fail(message: str) -> dict[str, Any]:
+        out: dict[str, Any] = {"ok": True, "fares_available": False, "from": frm, "to": to,
+                               "date": date, "booking_link": link, "message": message}
+        if is_round_trip:
+            out.update({"round_trip": True, "return_date": return_date,
+                        "return_flights": [], "return_cheapest": None, "round_trip_total_npr": None})
+        return out
+
+    body: dict[str, Any] = {
+        "sector": f"{frm}-{to}", "is_royal_club": False,
+        "triptype": "R" if is_round_trip else "O", "departdate": date,
+        "nationalityid": "NP", "adult": adults, "child": children, "type": "web",
+    }
+    if is_round_trip:
+        body["returndate"] = return_date
+    body_str = json.dumps(body, separators=(",", ":"))
+    try:
+        d = await _availability_post(body_str)
+    except Exception as exc:  # noqa: BLE001 - the deep-link is the fallback
+        return _fail(f"Couldn't read live fares ({type(exc).__name__}); open the link to see fares and book.")
+    if not d.get("success"):
+        return _fail(d.get("message") or "No fares came back; open the link to check availability.")
+    data = d.get("data") or {}
+    flights = _parse_leg(data.get("outbound", []))
+    result: dict[str, Any] = {
         "ok": True, "fares_available": bool(flights), "from": frm, "to": to, "date": date,
         "currency": "NPR", "flights": flights, "cheapest": (flights[0] if flights else None),
         "booking_link": link,
     }
+    if is_round_trip:
+        return_flights = _parse_leg(data.get("inbound", []))
+        return_cheapest = return_flights[0] if return_flights else None
+        total = None
+        if flights and return_cheapest:
+            total = int(round(flights[0]["fare_npr"] + return_cheapest["fare_npr"]))
+        result.update({
+            "round_trip": True, "return_date": return_date,
+            "return_flights": return_flights, "return_cheapest": return_cheapest,
+            "round_trip_total_npr": total,
+        })
+    return result
 
 
 class BuddhaAirConnector:

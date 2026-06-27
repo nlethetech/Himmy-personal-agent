@@ -49,6 +49,12 @@ _RAIL_TIMEOUT = float(os.environ.get("HIMMY_DO_RAIL_TIMEOUT") or "40")
 #: resolutions are NEVER cached (a transient miss must not poison the entry).
 _AIR_CACHE_MAX = 256
 
+#: How far ahead a travel date may be before we treat it as un-bookable. ~330 days mirrors a
+#: typical airline/bus booking window: beyond it the providers can't sell a ticket, so a live
+#: fare lookup would just return an empty/confusing result. trip() clamps to this; flights/buses
+#: reject past it with a friendly message.
+_MAX_BOOK_HORIZON_DAYS = 330
+
 #: "For You" shopping seeds (Daraz, interest-driven not discount-driven) + the vault labels we
 #: read them from. Falls back to broad lifestyle categories until the user saves interests.
 _SHOP_SEEDS = ["books", "home decor", "kitchen", "backpack", "headphones"]
@@ -435,28 +441,83 @@ def _fmt_duration(hours: float) -> str:
     return f"{h}h" if m == 0 else f"{h}h {m}m"
 
 
+def _parse_travel_date(date: str | None) -> tuple[datetime.date | None, str]:
+    """Validate a ``YYYY-MM-DD`` travel date for a LIVE fare lookup (flights / buses).
+
+    Unlike :meth:`DoConcierge._parse_trip_date` (which silently *defaults* a bad/empty date so the
+    planner always produces something), this is the strict gate the booking-style endpoints use:
+    it returns ``(date, "")`` only for a parseable date that is neither in the past nor beyond the
+    ~330-day booking horizon, and otherwise ``(None, message)`` with a friendly reason. An empty
+    string is treated as "no date supplied" (``(None, "")``) so callers can apply their own default.
+    """
+    s = (date or "").strip()
+    if not s:
+        return None, ""
+    try:
+        parsed = datetime.date.fromisoformat(s[:10])
+    except (TypeError, ValueError):
+        return None, "Please give the date as YYYY-MM-DD."
+    today = datetime.date.today()
+    if parsed < today:
+        return None, "That date is in the past — pick a date from today onwards."
+    if parsed > today + datetime.timedelta(days=_MAX_BOOK_HORIZON_DAYS):
+        return None, "That date is too far ahead to book — try a date within the next ~11 months."
+    return parsed, ""
+
+
+def _round_trip_fare(leg: dict[str, Any] | None) -> tuple[int | None, bool]:
+    """Return ``(round_trip_fare_npr, is_round_trip)`` for a flight/bus getting-there leg.
+
+    Prefers the connector's authoritative ``round_trip_total_npr`` (cheapest out + cheapest back).
+    Falls back, in order, to: cheapest-out + cheapest-return when both legs are present; otherwise
+    the one-way ``cheapest`` fare DOUBLED as an estimate (so a comparison can still be drawn). The
+    second element flags whether a true return leg was used (vs a doubled one-way estimate). The
+    fare is ``None`` only when even the one-way fare can't be parsed — the caller treats that as a
+    missing leg and skips the comparison. NO network or model calls.
+    """
+    if not isinstance(leg, dict):
+        return None, False
+
+    def _as_int(value: Any) -> int | None:
+        try:
+            return int(round(float(value)))
+        except (TypeError, ValueError):
+            return None
+
+    # 1) connector-computed round-trip total (cheapest out + cheapest back) — most trustworthy.
+    total = _as_int(leg.get("round_trip_total_npr"))
+    if total is not None:
+        return total, True
+    out_fare = _as_int((leg.get("cheapest") or {}).get("fare_npr"))
+    # 2) compose it ourselves if a return leg came back.
+    ret_fare = _as_int((leg.get("return_cheapest") or {}).get("fare_npr"))
+    if out_fare is not None and ret_fare is not None:
+        return out_fare + ret_fare, True
+    # 3) honest fallback: double the one-way fare (no real return data).
+    if out_fare is not None:
+        return out_fare * 2, False
+    return None, False
+
+
 def _transport_compare(getting_there: dict[str, Any] | None,
                        by_bus: dict[str, Any] | None) -> dict[str, Any] | None:
     """Deterministic fly-vs-bus comparison built ONLY from already-fetched flight + bus data.
 
-    Returns ``None`` unless BOTH a flight and a bus exist. The flight's ``duration_label`` is an
-    ESTIMATE (air time + ~3h airport buffer) and is flagged ``duration_is_estimate``; the bus uses
-    the connector's REAL ``journey_hours``. No network or model calls.
+    Returns ``None`` unless BOTH a flight and a bus exist. Fares are ROUND-TRIP totals (cheapest
+    outbound + cheapest return, via :func:`_round_trip_fare`) so the two options compare like for
+    like; when a leg has no real return data its one-way fare is doubled as an estimate (flagged in
+    ``fare_is_estimate``). The flight's ``duration_label`` is an ESTIMATE (air time + ~3h airport
+    buffer) and is flagged ``duration_is_estimate``; the bus uses the connector's REAL
+    ``journey_hours``. No network or model calls.
     """
     if not (getting_there and by_bus):
         return None
     fc = getting_there.get("cheapest") or {}
     bc = by_bus.get("cheapest") or {}
 
-    flight_fare = fc.get("fare_npr")
-    bus_fare = bc.get("fare_npr")
-    try:
-        flight_fare_i = int(round(float(flight_fare)))
-    except (TypeError, ValueError):
-        return None
-    try:
-        bus_fare_i = int(round(float(bus_fare)))
-    except (TypeError, ValueError):
+    flight_fare_i, flight_rt_real = _round_trip_fare(getting_there)
+    bus_fare_i, bus_rt_real = _round_trip_fare(by_bus)
+    if flight_fare_i is None or bus_fare_i is None:
         return None
 
     # Flight door-to-door is an ESTIMATE: in-air hop + the airport buffer.
@@ -469,11 +530,13 @@ def _transport_compare(getting_there: dict[str, Any] | None,
 
     flight_opt = {
         "mode": "flight", "label": "Flight (Buddha Air)", "fare_npr": flight_fare_i,
+        "fare_is_round_trip": True, "fare_is_estimate": not flight_rt_real,
         "duration_label": _fmt_duration(flight_hours), "duration_is_estimate": True,
         "depart": fc.get("depart"), "book_link": getting_there.get("booking_link"),
     }
     bus_opt = {
         "mode": "bus", "label": "Bus (bussewa)", "fare_npr": bus_fare_i,
+        "fare_is_round_trip": True, "fare_is_estimate": not bus_rt_real,
         "duration_label": (_fmt_duration(bus_hours) if bus_hours > 0 else "—"),
         "duration_is_estimate": False,
         "depart": bc.get("depart"), "book_link": by_bus.get("booking_link"),
@@ -481,27 +544,29 @@ def _transport_compare(getting_there: dict[str, Any] | None,
 
     fare_delta = abs(flight_fare_i - bus_fare_i)
     # Verdict: the flight wins on time, the bus on price. Pick the time winner as the default
-    # "winner" (most people fly to save the day) but be honest about the price trade-off.
+    # "winner" (most people fly to save the day) but be honest about the price trade-off. Fares are
+    # round-trip, so the "saves a day" framing covers both legs.
     if bus_hours > 0 and flight_hours < bus_hours:
         winner = "flight"
         saved_h = bus_hours - flight_hours
-        reason = (f"Flying saves about {_fmt_duration(saved_h)} door-to-door for "
-                  f"NPR {fare_delta:,} more.")
-        time_note = (f"Flight ~{_fmt_duration(flight_hours)} door-to-door (estimate) vs "
+        reason = (f"Flying saves about {_fmt_duration(saved_h)} each way door-to-door for "
+                  f"NPR {fare_delta:,} more round-trip.")
+        time_note = (f"Flight ~{_fmt_duration(flight_hours)} door-to-door each way (estimate) vs "
                      f"bus {_fmt_duration(bus_hours)}.")
     else:
         winner = "bus"
-        reason = (f"The bus is NPR {fare_delta:,} cheaper"
+        reason = (f"The bus is NPR {fare_delta:,} cheaper round-trip"
                   + (" with comparable time." if bus_hours > 0 else "."))
         time_note = (f"Bus {_fmt_duration(bus_hours)} vs flight ~{_fmt_duration(flight_hours)} "
-                     f"door-to-door (estimate)." if bus_hours > 0
+                     f"door-to-door each way (estimate)." if bus_hours > 0
                      else "Bus journey time unavailable.")
 
     return {
         "options": [flight_opt, bus_opt],
         "verdict": {"winner": winner, "reason": reason, "fare_delta_npr": fare_delta,
-                    "time_note": time_note},
-        "disclaimer": "Flight time is door-to-door estimate incl. airport buffer.",
+                    "time_note": time_note, "fares_are_round_trip": True},
+        "disclaimer": ("Fares are round-trip (cheapest outbound + return); flight time is "
+                       "door-to-door estimate incl. airport buffer."),
     }
 
 
@@ -665,20 +730,47 @@ class DoConcierge:
             self._air_cache[key] = resolved
         return resolved
 
-    async def flights(self, origin: str, destination: str, date: str = "") -> dict[str, Any]:
+    async def flights(self, origin: str, destination: str, date: str = "",
+                      return_date: str = "") -> dict[str, Any]:
         if not self._on("flights"):
             return {"ok": False, "flights": [], "from": origin, "to": destination, "date": date,
                     "message": "Flights (Buddha Air) is turned off in Settings → Permissions."}
         from himmy_app.connectors.buddha_air import buddha_air_flights
 
-        if not date:
-            date = (datetime.date.today() + datetime.timedelta(days=8)).isoformat()
+        # Bound the outbound date: reject a past / malformed / too-far-ahead date (a live fare lookup
+        # for an un-sellable date is just empty/confusing). An empty date defaults to today+8.
+        depart_d, msg = _parse_travel_date(date)
+        if msg:
+            return {"ok": False, "flights": [], "from": origin, "to": destination, "date": date,
+                    "message": msg}
+        if depart_d is None:
+            depart_d = datetime.date.today() + datetime.timedelta(days=8)
+        date = depart_d.isoformat()
+        # Validate the return leg the same way AND enforce the depart<=return invariant trip() gets
+        # for free — a return before the outbound would yield a nonsensical "inbound precedes
+        # outbound" quote. On any problem we simply drop the return leg and quote one-way.
+        ret = ""
+        if (return_date or "").strip():
+            ret_d, ret_msg = _parse_travel_date(return_date)
+            if ret_msg:
+                return {"ok": False, "flights": [], "from": origin, "to": destination, "date": date,
+                        "message": f"Return date: {ret_msg}"}
+            if ret_d is not None:
+                if ret_d < depart_d:
+                    return {"ok": False, "flights": [], "from": origin, "to": destination,
+                            "date": date,
+                            "message": "Return date must be on or after the departure date."}
+                ret = ret_d.isoformat()
         # Smart-route both endpoints first (so "Bhairawa", "Lumbini", typos all work).
         o = await self._resolve_airport(origin)
         d = await self._resolve_airport(destination)
-        return await buddha_air_flights({
-            "origin": o or origin, "destination": d or destination, "date": date,
-        })
+        req: dict[str, Any] = {"origin": o or origin, "destination": d or destination, "date": date}
+        # When a return date is given the connector parses data.inbound too and adds the round-trip
+        # fields (round_trip / return_flights / return_cheapest / round_trip_total_npr); one-way is
+        # unchanged when it's absent.
+        if ret:
+            req["return_date"] = ret
+        return await buddha_air_flights(req)
 
     async def buses(self, origin: str, destination: str, date: str = "") -> dict[str, Any]:
         if not self._on("buses"):
@@ -686,20 +778,34 @@ class DoConcierge:
                     "message": "Buses (bussewa) is turned off in Settings → Permissions."}
         from himmy_app.connectors.bussewa import bussewa_buses
 
-        if not date:
-            date = (datetime.date.today() + datetime.timedelta(days=3)).isoformat()
+        # Bound the date the same way flights does: a past / malformed / too-far-ahead date can't be
+        # sold, so reject it with a friendly message rather than fetch an empty result. Empty → today+3.
+        travel_d, msg = _parse_travel_date(date)
+        if msg:
+            return {"ok": False, "buses": [], "from": origin, "to": destination, "date": date,
+                    "message": msg}
+        if travel_d is None:
+            travel_d = datetime.date.today() + datetime.timedelta(days=3)
+        date = travel_d.isoformat()
         return await bussewa_buses({"origin": origin, "destination": destination, "date": date})
 
     # ---- trips: a day-by-day roadmap of places/activities (grounded in real OSM spots) -------
     async def _geocode(self, place: str) -> tuple[float, float] | None:
-        """Resolve a place name to coords via OpenStreetMap Nominatim (keyless, best-effort)."""
-        import httpx
+        """Resolve a place name to coords via OpenStreetMap Nominatim (keyless, best-effort).
 
+        The ``place`` here is model/agent-controlled (the weather_forecast tool routes through this),
+        so the fetch goes through the SAME guarded helper every connector uses — SSRF/redirect/
+        content-type/size guards plus a fixed host allow-list — rather than a raw httpx client.
+        """
         try:
-            async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "HimmyApp/1.0 (concierge)"}) as c:
-                r = await c.get("https://nominatim.openstreetmap.org/search",
-                                params={"q": place, "format": "json", "limit": 1})
-            d = r.json()
+            d = await _net.safe_get_json(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": place, "format": "json", "limit": 1},
+                headers={"User-Agent": "HimmyApp/1.0 (concierge)"},
+                allow_hosts=("nominatim.openstreetmap.org",),
+                timeout=15,
+                max_bytes=1_000_000,
+            )
             if d:
                 return float(d[0]["lat"]), float(d[0]["lon"])
         except Exception:  # noqa: BLE001
@@ -708,9 +814,10 @@ class DoConcierge:
 
     async def _osm_places(self, lat: float, lon: float) -> dict[str, list[dict[str, Any]]]:
         """ONE Overpass call → real attractions, hotels and restaurants near a point (keyless).
-        Combined into a single request to stay polite to the free server (no rate-limit storms)."""
-        import httpx
+        Combined into a single request to stay polite to the free server (no rate-limit storms).
 
+        Goes through the guarded POST helper (fixed host allow-list + SSRF/redirect/content-type/
+        size caps) for the same reason :meth:`_geocode` does."""
         q = (f'[out:json][timeout:30];('
              f'node["tourism"~"attraction|viewpoint|museum|theme_park"](around:8000,{lat},{lon});'
              f'node["historic"](around:8000,{lat},{lon});'
@@ -723,9 +830,15 @@ class DoConcierge:
         restaurants: list[dict[str, Any]] = []
         seen: set[str] = set()
         try:
-            async with httpx.AsyncClient(timeout=40, headers={"User-Agent": "HimmyApp/1.0 (concierge)"}) as c:
-                r = await c.post("https://overpass-api.de/api/interpreter", data={"data": q})
-            for e in r.json().get("elements", []):
+            resp = await _net.safe_post_json(
+                "https://overpass-api.de/api/interpreter",
+                data={"data": q},
+                headers={"User-Agent": "HimmyApp/1.0 (concierge)"},
+                allow_hosts=("overpass-api.de",),
+                timeout=40,
+                max_bytes=10_000_000,
+            )
+            for e in (resp.get("elements", []) if isinstance(resp, dict) else []):
                 t = e.get("tags", {})
                 name = (t.get("name") or "").strip()
                 if not name or name.isdigit() or name.lower() in seen:
@@ -751,13 +864,72 @@ class DoConcierge:
 
         return f"https://www.booking.com/searchresults.html?ss={quote_plus(f'{name}, {dest}')}"
 
-    async def trip(self, destination: str, days: int = 2, style: str = "comfort") -> dict[str, Any]:
+    @staticmethod
+    def _weather_brief(weather: dict[str, Any] | None) -> str:
+        """A COMPACT, planner-ready weather brief (a few short lines) the itinerary can adapt to.
+
+        Honest by construction — it forwards exactly what :mod:`himmy_app.weather` reports: the real
+        per-day chips when the dates are inside the ~16-day forecast window, otherwise just the
+        season line (never a fabricated daily forecast). Returns ``""`` when no usable weather is
+        available so the planner simply omits the weather-shaping instruction.
+        """
+        if not isinstance(weather, dict):
+            return ""
+        season = str(weather.get("season") or "").strip()
+        summary = str(weather.get("summary") or "").strip()
+        daily = weather.get("daily") if isinstance(weather.get("daily"), list) else []
+        in_window = bool(weather.get("in_forecast_window"))
+        lines: list[str] = []
+        if season:
+            lines.append(f"Season: {season}")
+        if in_window and daily:
+            chips: list[str] = []
+            for d in daily[:7]:
+                if not isinstance(d, dict):
+                    continue
+                date = str(d.get("date") or "").strip()
+                label = str(d.get("label") or "").strip()
+                try:
+                    hi = round(float(d.get("t_max")))
+                    lo = round(float(d.get("t_min")))
+                except (TypeError, ValueError):
+                    hi = lo = None  # type: ignore[assignment]
+                try:
+                    rain = int(d.get("rain_pct"))
+                except (TypeError, ValueError):
+                    rain = None  # type: ignore[assignment]
+                bits = [date] if date else []
+                if label:
+                    bits.append(label)
+                if hi is not None and lo is not None:
+                    bits.append(f"{hi}/{lo}°C")
+                if rain is not None:
+                    bits.append(f"rain {rain}%")
+                if bits:
+                    chips.append(" ".join(bits))
+            if chips:
+                lines.append("Daily forecast (real): " + "; ".join(chips))
+        elif summary:
+            # Out of the forecast window: forward the honest seasonal summary, not a fake forecast.
+            lines.append(summary)
+        return "\n".join(lines)
+
+    async def trip(self, destination: str, days: int = 2, style: str = "comfort",
+                   date: str | None = None, round_trip: bool = True) -> dict[str, Any]:
         destination = (destination or "").strip()
         if not destination:
             return {"ok": False, "message": "Where would you like to go?"}
         days = max(1, min(int(days or 2), 7))
         style = style if style in ("budget", "comfort", "luxury") else "comfort"
-        cache_key = f"{destination.lower()}|{days}|{style}"
+        # DEPARTURE date. Default to today+7 so it sits inside the ~16-day forecast window and the
+        # weather we attach is a REAL forecast, not just a seasonal guess. The RETURN date is the
+        # departure plus the trip length, so both travel legs and the forecast cover the whole stay.
+        depart_d = self._parse_trip_date(date)
+        return_d = depart_d + datetime.timedelta(days=days)
+        depart_iso, return_iso = depart_d.isoformat(), return_d.isoformat()
+        # cache_key carries the date (+ round-trip flag) so different departure dates / trip kinds
+        # never collide on a stale plan (the weather + fares are date-specific).
+        cache_key = f"{destination.lower()}|{days}|{style}|{depart_iso}|{'rt' if round_trip else 'ow'}"
         cached = self._trip_cache().get(cache_key)
         if cached:
             return cached
@@ -765,6 +937,8 @@ class DoConcierge:
         geo = await self._geocode(destination)
         places = await self._osm_places(*geo) if geo else {"attractions": [], "hotels": [], "restaurants": []}
         # Getting there — a Buddha Air flight from the user's home airport (also feeds the budget).
+        # Fetched ROUND-TRIP (pass return_date) when round_trip is on, so the trip carries both legs
+        # and a round_trip_total; the budget/compare then price the whole journey, not one way.
         getting_there, flight_fare = None, None
         if self._on("flights"):
             code = await self._resolve_airport(destination)
@@ -773,15 +947,26 @@ class DoConcierge:
                 try:
                     from himmy_app.connectors.buddha_air import buddha_air_flights
 
-                    date = (datetime.date.today() + datetime.timedelta(days=14)).isoformat()
-                    fr = await buddha_air_flights({"origin": home, "destination": code, "date": date})
+                    req: dict[str, Any] = {"origin": home, "destination": code, "date": depart_iso}
+                    if round_trip:
+                        req["return_date"] = return_iso
+                    fr = await buddha_air_flights(req)
                     if fr.get("ok") and fr.get("cheapest"):
                         flight_fare = fr["cheapest"].get("fare_npr")
-                        getting_there = {"from": home, "to": code, "cheapest": fr["cheapest"],
-                                         "booking_link": fr.get("booking_link")}
+                        getting_there = {
+                            "from": home, "to": code, "cheapest": fr["cheapest"],
+                            "booking_link": fr.get("booking_link"),
+                            "round_trip": bool(fr.get("round_trip")),
+                            "return_date": fr.get("return_date"),
+                            "return_flights": fr.get("return_flights") or [],
+                            "return_cheapest": fr.get("return_cheapest"),
+                            "round_trip_total_npr": fr.get("round_trip_total_npr"),
+                        }
                 except Exception:  # noqa: BLE001
                     pass
         # Getting there by BUS — covers routes flights don't (Chitwan, Lumbini) and budget travel.
+        # Fetch the RETURN bus leg too so the ground option is round-trip like the flight; missing
+        # one direction must never break the plan (the return leg is purely additive).
         by_bus, bus_fare = None, None
         if self._on("buses"):
             try:
@@ -789,31 +974,92 @@ class DoConcierge:
 
                 vault = _vault(self.cfg)
                 home_city = (vault.get("Home city") or vault.get("home_city") or "Kathmandu").strip()
-                date = (datetime.date.today() + datetime.timedelta(days=14)).isoformat()
-                br = await bussewa_buses({"origin": home_city, "destination": destination, "date": date})
+                br = await bussewa_buses({"origin": home_city, "destination": destination,
+                                          "date": depart_iso})
                 if br.get("ok") and br.get("cheapest"):
                     bus_fare = br["cheapest"].get("fare_npr")
                     by_bus = {"from": br.get("from"), "to": br.get("to"), "cheapest": br["cheapest"],
                               "count": br.get("count"), "via": br.get("via"),
                               "booking_link": br.get("booking_link")}
+                    if round_trip:
+                        # The return bus leg (best-effort): reverse the route on the return date.
+                        try:
+                            rb = await bussewa_buses({"origin": destination, "destination": home_city,
+                                                      "date": return_iso})
+                            if rb.get("ok") and rb.get("cheapest"):
+                                ret_fare = rb["cheapest"].get("fare_npr")
+                                by_bus.update({
+                                    "round_trip": True, "return_date": return_iso,
+                                    "return_cheapest": rb["cheapest"],
+                                    "return_count": rb.get("count"),
+                                })
+                                try:
+                                    by_bus["round_trip_total_npr"] = int(round(
+                                        float(bus_fare) + float(ret_fare)))
+                                except (TypeError, ValueError):
+                                    pass
+                        except Exception:  # noqa: BLE001 - the return leg is additive, never required
+                            pass
             except Exception:  # noqa: BLE001
                 pass
-        plan = await self._plan_trip(destination, days, style, places, flight_fare, bus_fare)
+        # WEATHER — reuse the SAME geocoded lat/lon we already fetched for OSM places (no extra
+        # geocode) and ask for a forecast spanning the stay. Honest + graceful: out-of-window dates
+        # come back as a seasonal-only forecast, and any failure returns a well-formed {"ok": False}.
+        weather: dict[str, Any] | None = None
+        if geo:
+            try:
+                from himmy_app import weather as weather_mod
+
+                weather = await weather_mod.forecast(geo[0], geo[1], start=depart_iso, end=return_iso)
+            except Exception:  # noqa: BLE001 - missing weather must NEVER break the plan
+                weather = None
+        weather_brief = self._weather_brief(weather)
+        # Round-trip fares for the budget line — so "Stay/Food + Travel" prices the whole journey.
+        flight_rt_fare = _round_trip_fare(getting_there)[0] if getting_there else None
+        bus_rt_fare = _round_trip_fare(by_bus)[0] if by_bus else None
+        plan = await self._plan_trip(destination, days, style, places, flight_rt_fare, bus_rt_fare,
+                                     weather_brief=weather_brief)
         if not plan:
             return {"ok": False, "message": "Couldn't build a plan just now — try again."}
         for h in plan.get("hotels", []):  # a booking deep-link for each picked hotel
             h["book_link"] = self._hotel_book_link(str(h.get("name") or ""), destination)
         out = {"ok": True, "destination": destination, "days": days, "style": style,
-               "getting_there": getting_there, "by_bus": by_bus, **plan}
+               "date": depart_iso, "return_date": return_iso, "round_trip": bool(round_trip),
+               "getting_there": getting_there, "by_bus": by_bus, "weather": weather, **plan}
         # Deterministic fly-vs-bus compare (reuses what we already fetched — no extra calls). Only
-        # present when BOTH a flight and a bus exist; flight duration is an explicit ESTIMATE.
+        # present when BOTH a flight and a bus exist; totals are ROUND-TRIP and the flight duration
+        # is an explicit ESTIMATE.
         out["transport_compare"] = _transport_compare(getting_there, by_bus)
         self._trip_cache_write(cache_key, out)
         return out
 
+    @staticmethod
+    def _parse_trip_date(date: str | None) -> datetime.date:
+        """The trip's DEPARTURE date. Parses a ``YYYY-MM-DD`` string; an absent/invalid/past date
+        defaults to today+7 so the dates sit inside the ~16-day forecast window (real weather). An
+        absurd far-future date (beyond the ~330-day booking horizon, e.g. year 9999) is CLAMPED to
+        the horizon so the downstream live-fare lookups stay meaningful instead of driving calls for
+        dates the providers can't sell."""
+        today = datetime.date.today()
+        default = today + datetime.timedelta(days=7)
+        s = (date or "").strip()
+        if not s:
+            return default
+        try:
+            parsed = datetime.date.fromisoformat(s[:10])
+        except (TypeError, ValueError):
+            return default
+        # Never plan into the past — a stale date would also fall outside the forecast horizon.
+        if parsed < today:
+            return default
+        # Cap absurd far-future dates at the booking horizon so fares stay sellable.
+        horizon = today + datetime.timedelta(days=_MAX_BOOK_HORIZON_DAYS)
+        return parsed if parsed <= horizon else horizon
+
     async def _plan_trip(self, destination: str, days: int, style: str,
                          places: dict[str, list[dict[str, Any]]], flight_fare: float | None,
-                         bus_fare: float | None = None) -> dict[str, Any] | None:
+                         bus_fare: float | None = None,
+                         weather_brief: str = "") -> dict[str, Any] | None:
         from himmy.cli.provider import build_inference_for
         from himmy.services.inference.models import InferenceMessage, InferenceRequest
 
@@ -826,22 +1072,43 @@ class DoConcierge:
             f"{', ' + h['area'] if h.get('area') else ''}]" for h in places["hotels"]) or "(none found)"
         rest_lines = "; ".join(f"{r['name']}{' (' + r['cuisine'] + ')' if r.get('cuisine') else ''}"
                                for r in places["restaurants"]) or "(none found)"
+        # The fares handed in are already ROUND-TRIP totals (cheapest out + cheapest back, computed
+        # by the caller) — use them directly for the travel line; do NOT double them again.
         if flight_fare:
-            fare_note = (f"Use ~NPR {int(flight_fare) * 2} for the round-trip TRAVEL budget line "
-                         f"(NPR {int(flight_fare)} each way by Buddha Air flight).")
+            fare_note = (f"Use ~NPR {int(flight_fare)} for the round-trip TRAVEL budget line "
+                         f"(Buddha Air flight, return included).")
             if bus_fare:
-                fare_note += (f" A cheaper bus is also available (~NPR {int(bus_fare)} each way, bussewa) — "
+                fare_note += (f" A cheaper round-trip bus is also available (~NPR {int(bus_fare)}, bussewa) — "
                               f"if the style is 'budget', use the bus fare for the travel line instead.")
         elif bus_fare:
-            fare_note = (f"No flight is available — use ~NPR {int(bus_fare) * 2} for the round-trip TRAVEL "
-                         f"budget line (NPR {int(bus_fare)} each way by bus, bussewa).")
+            fare_note = (f"No flight is available — use ~NPR {int(bus_fare)} for the round-trip TRAVEL "
+                         f"budget line (bus, bussewa, return included).")
         else:
             fare_note = "No flight/bus fare available — omit the travel line or set it to 0."
+        # Weather shaping: when we have a (real or seasonal) brief, tell the planner to ADAPT the
+        # itinerary to it and ALWAYS add a packing tip. Honest — the brief only carries a real daily
+        # forecast when the dates are inside the ~16-day window (else it's the season line only).
+        if weather_brief.strip():
+            weather_note = (
+                "\n\nWeather for the trip dates (adapt the plan to it):\n"
+                f"{weather_brief.strip()}\n"
+                "ADAPT the itinerary to this weather: on rainy/wet days favour INDOOR or cultural "
+                "options (museums, temples, cafes, markets); on clear mornings front-load outdoor "
+                "highlights (a sunrise viewpoint, a hike, a lake). ALWAYS include one weather-aware "
+                "PACKING tip in 'tips' (e.g. a rain layer for showers, warm layers for cold mornings, "
+                "sun protection for clear hot days)."
+            )
+        else:
+            # No usable weather — still guarantee a packing tip so the plan always carries one.
+            weather_note = ("\n\nNo specific weather is available; still include one sensible PACKING "
+                            "tip in 'tips' for this destination and season.")
         system = (
             "You are Himmy, a sharp Nepal travel planner. Produce a PREMIUM, realistic plan shaped by the "
             "traveller's STYLE (budget/comfort/luxury) — style drives the hotel choice, the budget, and the "
             "pace. GROUND everything in the real data given: pick HOTELS only from the hotel list and EAT "
             "spots only from the restaurant list (you may add a famous attraction from your own knowledge). "
+            "When weather for the trip dates is provided, ADAPT the day plan to it (indoor/cultural on wet "
+            "days, outdoor highlights on clear mornings) and ALWAYS add a weather-aware packing tip. "
             "Estimate costs from typical Nepal prices and give realistic NPR ranges. Reply with ONLY JSON: {"
             '"summary":"<one warm sentence>",'
             '"budget":{"currency":"NPR","per_person":true,"total_min":<int>,"total_max":<int>,'
@@ -855,7 +1122,8 @@ class DoConcierge:
             '"tip":"<short optional>"}]}],"tips":["<short practical tip>"]}. '
             "Pick 3 hotels and 3-4 eat spots that fit the style; 2-4 items per day; be specific and local."
         )
-        user = (f"Destination: {destination}\nDays: {days}\nTravel style: {style}\n{fare_note}\n\n"
+        user = (f"Destination: {destination}\nDays: {days}\nTravel style: {style}\n{fare_note}"
+                f"{weather_note}\n\n"
                 f"Hotels (real, OSM): {hotel_lines}\n\nRestaurants (real, OSM): {rest_lines}\n\n"
                 f"Attractions (real, OSM): {attr}\n\nTraveller preferences (do NOT name the "
                 f"traveller or restate these facts in your prose; just let them shape the plan):\n"

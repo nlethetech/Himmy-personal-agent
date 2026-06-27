@@ -12,6 +12,7 @@ import {
   Info, StickyNote, Highlighter,
   ShoppingBag, Plane, Bus, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart, ArrowRight, ConciergeBell,
   Route, Lightbulb, BedDouble, Wallet, Send, Armchair, ArrowRightLeft, Share2, Printer,
+  CloudRain, Umbrella,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -29,6 +30,7 @@ import {
   type PermsCatalog, type PermSurface, type ActivityItem,
   type DoTrip, type DoTripDay, type DoTripItem, type DoTripHotel, type DoTripEat,
   type DoTripTransportCompare,
+  type DoWeather, type DoWeatherDay,
 } from "./lib/api";
 import { apa, mla, bibtex } from "./lib/cite";
 import Reader from "./Reader";
@@ -422,12 +424,16 @@ function DoTab() {
   const [trayOpen, setTrayOpen] = useState(false);
   // restaurant menu modal
   const [detail, setDetail] = useState<DoPick | null>(null);
-  // flight tickets modal + flight search fields
-  const [flightRoute, setFlightRoute] = useState<{ from: string; to: string; date: string } | null>(null);
+  // flight tickets modal + flight search fields. `returnDate` is set only when the round-trip
+  // toggle is on → the modal then fetches an inbound leg + a round-trip total (one-way otherwise).
+  const [flightRoute, setFlightRoute] = useState<{ from: string; to: string; date: string; returnDate?: string } | null>(null);
   const defaultDate = new Date(Date.now() + 8 * 86400000).toISOString().slice(0, 10);
+  const flReturnDefault = new Date(Date.now() + 11 * 86400000).toISOString().slice(0, 10);
   const [flFrom, setFlFrom] = useState("KTM");
   const [flTo, setFlTo] = useState("PKR");
   const [flDate, setFlDate] = useState(defaultDate);
+  const [flRoundTrip, setFlRoundTrip] = useState(false);
+  const [flReturnDate, setFlReturnDate] = useState(flReturnDefault);
   // bus tickets modal + bus search fields
   const busDefaultDate = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
   const [busRoute, setBusRoute] = useState<{ from: string; to: string; date: string } | null>(null);
@@ -435,11 +441,14 @@ function DoTab() {
   const [busTo, setBusTo] = useState("Pokhara");
   const [busDate, setBusDate] = useState(busDefaultDate);
   const [busCities, setBusCities] = useState<string[]>([]);
-  // trip roadmap
+  // trip roadmap — depart date defaults a week out so the attached weather is a real in-window
+  // forecast rather than a seasonal fallback.
+  const tripDefaultDate = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
   const [tripDest, setTripDest] = useState("");
   const [tripDays, setTripDays] = useState(2);
   const [tripStyle, setTripStyle] = useState<"budget" | "comfort" | "luxury">("comfort");
-  const [tripOpen, setTripOpen] = useState<{ dest: string; days: number; style: string } | null>(null);
+  const [tripDate, setTripDate] = useState(tripDefaultDate);
+  const [tripOpen, setTripOpen] = useState<{ dest: string; days: number; style: string; date: string } | null>(null);
   // inline search
   const [searchQ, setSearchQ] = useState("");
   const [searchKind, setSearchKind] = useState<SearchKind>("food");
@@ -588,10 +597,25 @@ function DoTab() {
               <ArrowRight size={13} className="text-mac-ink3 shrink-0" />
               <input value={flTo} onChange={(e) => setFlTo(e.target.value)}
                 className="w-16 bg-transparent text-[13px] font-medium text-mac-ink placeholder:text-mac-ink3 outline-none uppercase" placeholder="To" />
+              <span className="text-[10px] text-mac-ink3 shrink-0 ml-1">Depart</span>
               <input type="date" value={flDate} onChange={(e) => setFlDate(e.target.value)}
                 className="bg-transparent text-[12.5px] text-mac-ink2 outline-none [color-scheme:dark]" />
+              {/* Round-trip toggle — when on, reveal a return-date field; the modal then fetches an
+                  inbound leg + round-trip total. Off = unchanged one-way search. */}
+              <button onClick={() => setFlRoundTrip((v) => !v)} title="Round trip"
+                className={`h-7 px-2.5 shrink-0 rounded-[8px] text-[11px] font-medium inline-flex items-center gap-1.5 transition-colors ${
+                  flRoundTrip ? "bg-[rgba(10,132,255,0.16)] text-mac-accentHi ring-1 ring-inset ring-mac-accentHi/30" : "bg-white/[0.05] text-mac-ink3 hover:text-mac-ink ring-1 ring-inset ring-white/10"}`}>
+                <ArrowRightLeft size={11} /> Round trip
+              </button>
+              {flRoundTrip && (
+                <>
+                  <span className="text-[10px] text-mac-ink3 shrink-0">Return</span>
+                  <input type="date" value={flReturnDate} min={flDate} onChange={(e) => setFlReturnDate(e.target.value)}
+                    className="bg-transparent text-[12.5px] text-mac-ink2 outline-none [color-scheme:dark]" />
+                </>
+              )}
               <div className="flex-1" />
-              <button onClick={() => flFrom.trim() && flTo.trim() && setFlightRoute({ from: flFrom.trim(), to: flTo.trim(), date: flDate })}
+              <button onClick={() => flFrom.trim() && flTo.trim() && setFlightRoute({ from: flFrom.trim(), to: flTo.trim(), date: flDate, returnDate: flRoundTrip ? flReturnDate : undefined })}
                 className="h-8 px-4 rounded-[9px] text-[12px] font-semibold text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 shadow-[0_2px_8px_-2px_rgba(10,132,255,0.5)] hover:brightness-[1.06] transition-all inline-flex items-center gap-1.5">
                 <Search size={13} /> Search
               </button>
@@ -618,9 +642,16 @@ function DoTab() {
             <div className="flex-1 flex items-center gap-2">
               <Route size={15} className="text-mac-ink3 shrink-0" />
               <input value={tripDest} onChange={(e) => setTripDest(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && tripDest.trim()) setTripOpen({ dest: tripDest.trim(), days: tripDays, style: tripStyle }); }}
+                onKeyDown={(e) => { if (e.key === "Enter" && tripDest.trim()) setTripOpen({ dest: tripDest.trim(), days: tripDays, style: tripStyle, date: tripDate }); }}
                 placeholder="Where to? e.g. Pokhara, Chitwan, Lumbini…"
                 className="flex-1 min-w-0 bg-transparent text-[13px] text-mac-ink placeholder:text-mac-ink3 outline-none" />
+              {/* Depart date — drives a REAL weather forecast for the trip window when it's inside
+                  the ~16-day horizon; the modal leads with the season otherwise. */}
+              <div className="flex items-center gap-1 shrink-0">
+                <Calendar size={12} className="text-mac-ink3" />
+                <input type="date" value={tripDate} onChange={(e) => setTripDate(e.target.value)} title="Depart date"
+                  className="bg-transparent text-[12.5px] text-mac-ink2 outline-none [color-scheme:dark] cursor-pointer" />
+              </div>
               <div className="flex items-center p-0.5 rounded-[8px] bg-black/20 ring-1 ring-inset ring-white/[0.06] shrink-0">
                 {(["budget", "comfort", "luxury"] as const).map((s) => (
                   <button key={s} onClick={() => setTripStyle(s)} title={`${s} travel`}
@@ -634,7 +665,7 @@ function DoTab() {
                 className="bg-transparent text-[12.5px] text-mac-ink2 outline-none [color-scheme:dark] cursor-pointer shrink-0">
                 {[1, 2, 3, 4, 5, 6, 7].map((n) => <option key={n} value={n}>{n} day{n > 1 ? "s" : ""}</option>)}
               </select>
-              <button onClick={() => tripDest.trim() && setTripOpen({ dest: tripDest.trim(), days: tripDays, style: tripStyle })}
+              <button onClick={() => tripDest.trim() && setTripOpen({ dest: tripDest.trim(), days: tripDays, style: tripStyle, date: tripDate })}
                 className="h-8 px-4 shrink-0 rounded-[9px] text-[12px] font-semibold text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 shadow-[0_2px_8px_-2px_rgba(10,132,255,0.5)] hover:brightness-[1.06] transition-all inline-flex items-center gap-1.5">
                 <Sparkles size={13} /> Plan
               </button>
@@ -661,7 +692,7 @@ function DoTab() {
                 <span className="text-[11px] text-mac-ink3 mr-0.5">Try</span>
                 {DO_FLIGHT_EXAMPLES.map((ex) => (
                   <button key={ex.label}
-                    onClick={() => { setFlFrom(ex.from); setFlTo(ex.to); setFlightRoute({ from: ex.from, to: ex.to, date: flDate }); }}
+                    onClick={() => { setFlFrom(ex.from); setFlTo(ex.to); setFlightRoute({ from: ex.from, to: ex.to, date: flDate, returnDate: flRoundTrip ? flReturnDate : undefined }); }}
                     className="h-8 px-3 rounded-full text-[11.5px] inline-flex items-center gap-1.5 bg-white/[0.04] ring-1 ring-inset ring-white/10 text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.08] transition-colors">
                     <Plane size={11} className="text-mac-ink3" /> {ex.label}
                   </button>
@@ -683,7 +714,7 @@ function DoTab() {
                 <span className="text-[11px] text-mac-ink3 mr-0.5">Try</span>
                 {DO_TRIP_EXAMPLES.map((ex) => (
                   <button key={ex.label}
-                    onClick={() => { setTripDest(ex.dest); setTripDays(ex.days); setTripOpen({ dest: ex.dest, days: ex.days, style: tripStyle }); }}
+                    onClick={() => { setTripDest(ex.dest); setTripDays(ex.days); setTripOpen({ dest: ex.dest, days: ex.days, style: tripStyle, date: tripDate }); }}
                     className="h-8 px-3 rounded-full text-[11.5px] inline-flex items-center gap-1.5 bg-white/[0.04] ring-1 ring-inset ring-white/10 text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.08] transition-colors">
                     <Route size={11} className="text-mac-ink3" /> {ex.label}
                   </button>
@@ -788,14 +819,15 @@ function DoTab() {
       {flightRoute && (
         <FlightModal route={flightRoute} onClose={() => setFlightRoute(null)} />
       )}
+      {/* (round-trip is carried on flightRoute.returnDate; one-way when absent) */}
       {busRoute && (
         <BusModal route={busRoute} onClose={() => setBusRoute(null)} />
       )}
       <datalist id="bus-cities">{busCities.map((c) => <option key={c} value={c} />)}</datalist>
       {tripOpen && (
-        <TripModal dest={tripOpen.dest} days={tripOpen.days} style={tripOpen.style} onClose={() => setTripOpen(null)}
-          onFlights={(from, to) => { setTripOpen(null); setFlightRoute({ from, to, date: defaultDate }); }}
-          onBuses={(from, to) => { setTripOpen(null); setBusRoute({ from, to, date: busDefaultDate }); }} />
+        <TripModal dest={tripOpen.dest} days={tripOpen.days} style={tripOpen.style} date={tripOpen.date} onClose={() => setTripOpen(null)}
+          onFlights={(from, to) => { setTripOpen(null); setFlightRoute({ from, to, date: tripOpen.date || defaultDate }); }}
+          onBuses={(from, to) => { setTripOpen(null); setBusRoute({ from, to, date: tripOpen.date || busDefaultDate }); }} />
       )}
       {trayOpen && (
         <DoTray cart={cart} onClose={() => setTrayOpen(false)} onChange={setCart} />
@@ -1236,8 +1268,75 @@ function TripTransportCompare({ cmp }: { cmp: DoTripTransportCompare }) {
   );
 }
 
-function TripModal({ dest, days, style, onClose, onFlights, onBuses }: {
-  dest: string; days: number; style: string; onClose: () => void;
+// A short, friendly date label for a weather chip — "Mon 14".
+function weatherDayLabel(iso: string): string {
+  const d = new Date(iso + "T00:00:00");
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+}
+
+// One weather chip — emoji + day, Hi/Lo, and a rain-% line that only shows when it's worth a
+// raincoat. Today (first in-window day) gets a subtle accent ring.
+function WeatherChip({ d, today }: { d: DoWeatherDay; today: boolean }) {
+  const rainy = d.rain_pct >= 30;
+  return (
+    <div className={`shrink-0 w-[88px] p-2.5 rounded-xl border text-center ${
+      today ? "border-mac-accentHi/35 bg-[rgba(10,132,255,0.07)]" : "border-mac-stroke bg-mac-fill"}`}>
+      <div className="text-[10px] font-medium text-mac-ink3 mb-1">{weatherDayLabel(d.date)}</div>
+      <div className="text-[20px] leading-none mb-1" title={d.label}>{d.emoji}</div>
+      <div className="text-[12.5px] font-semibold text-mac-ink tnum leading-none">
+        {Math.round(d.t_max)}°<span className="text-mac-ink3 font-normal"> / {Math.round(d.t_min)}°</span>
+      </div>
+      <div className={`mt-1.5 text-[10px] inline-flex items-center gap-0.5 ${rainy ? "text-mac-accentHi" : "text-mac-ink3"}`}>
+        <Umbrella size={9} /> {d.rain_pct}%
+      </div>
+    </div>
+  );
+}
+
+// The premium WEATHER STRIP shown at the top of a trip plan. When the requested dates fall inside
+// Open-Meteo's ~16-day horizon it renders the real per-day forecast; otherwise it stays HONEST —
+// leading with the Nepal seasonal pattern and a muted "forecast available closer to your dates".
+function WeatherStrip({ w }: { w: DoWeather }) {
+  const inWindow = w.in_forecast_window && (w.daily || []).length > 0;
+  const cur = w.current;
+  return (
+    <div className="mb-5 rounded-xl border border-mac-stroke bg-mac-fill p-3.5">
+      <div className="flex items-center gap-2 mb-2.5">
+        <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-mac-ink2">
+          {inWindow ? <Sun size={12} className="text-amber-400" /> : <CloudRain size={12} className="text-mac-accentHi" />} Weather
+        </div>
+        {inWindow && cur && (
+          <span className="ml-auto inline-flex items-center gap-1.5 text-[11.5px] text-mac-ink2">
+            <span className="text-[14px] leading-none" title={cur.label}>{cur.emoji}</span>
+            <span className="font-semibold text-mac-ink tnum">{Math.round(cur.temp_c)}°</span>
+            <span className="text-mac-ink3">now · {cur.humidity}% hum · {Math.round(cur.wind_kmh)} km/h</span>
+          </span>
+        )}
+      </div>
+      {/* Honest summary line — a real forecast read when in-window, else the seasonal pattern. */}
+      <p className="text-[12.5px] text-mac-ink leading-snug">{w.summary}</p>
+      {/* Season pattern — always shown; it's the steady context behind any forecast. */}
+      {w.season && (
+        <p className="text-[11px] text-mac-ink3 leading-snug mt-1 flex items-start gap-1.5">
+          <Calendar size={11} className="text-mac-ink3 shrink-0 mt-[1px]" /> {w.season}
+        </p>
+      )}
+      {inWindow ? (
+        <div className="mt-3 flex gap-2 overflow-x-auto pb-1 -mx-0.5 px-0.5">
+          {w.daily.map((d, i) => <WeatherChip key={d.date} d={d} today={i === 0} />)}
+        </div>
+      ) : (
+        <div className="mt-2.5 flex items-center gap-2 text-[11px] text-mac-ink3/85 italic">
+          <Clock size={11} className="shrink-0" /> Day-by-day forecast available closer to your dates.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TripModal({ dest, days, style, date, onClose, onFlights, onBuses }: {
+  dest: string; days: number; style: string; date?: string; onClose: () => void;
   onFlights: (from: string, to: string) => void; onBuses: (from: string, to: string) => void;
 }) {
   const [data, setData] = useState<DoTrip | null>(null);
@@ -1245,12 +1344,14 @@ function TripModal({ dest, days, style, onClose, onFlights, onBuses }: {
   const [shareOpen, setShareOpen] = useState(false);
   useEffect(() => {
     let alive = true; setLoading(true);
-    api.do.trip(dest, days, style)
+    // `date` (depart) makes the backend attach a real weather forecast + round-trip totals; the
+    // call stays valid without it (backend defaults to ~a week out).
+    api.do.trip(dest, days, style, date)
       .then((d) => { if (alive) setData(d.ok ? d : null); })
       .catch(() => { if (alive) setData(null); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [dest, days, style]);
+  }, [dest, days, style, date]);
   const gt = data?.getting_there;
   const bb = data?.by_bus;
   const cur = data?.budget?.currency || "NPR";
@@ -1285,6 +1386,7 @@ function TripModal({ dest, days, style, onClose, onFlights, onBuses }: {
             </div>
           ) : (
             <>
+              {data.weather && <WeatherStrip w={data.weather} />}
               {data.budget && (data.budget.total_min || (data.budget.breakdown || []).length > 0) && (
                 <TripBudget budget={data.budget} />
               )}
@@ -1458,12 +1560,14 @@ function TripShareSheet({ dest, days, style, fallbackTitle, onClose }: {
   );
 }
 
-function FlightModal({ route, onClose }: { route: { from: string; to: string; date: string }; onClose: () => void }) {
+function FlightModal({ route, onClose }: { route: { from: string; to: string; date: string; returnDate?: string }; onClose: () => void }) {
   const [data, setData] = useState<DoFlights | null>(null);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     let alive = true; setLoading(true);
-    api.do.flights(route.from, route.to, route.date)
+    // Pass route.returnDate to fetch a round-trip — the response then carries return_flights +
+    // round_trip_total_npr. Omitting it keeps the one-way path exactly as before.
+    api.do.flights(route.from, route.to, route.date, route.returnDate)
       .then((d) => { if (alive) setData(d); })
       .catch(() => { if (alive) setData(null); })
       .finally(() => { if (alive) setLoading(false); });
@@ -1471,11 +1575,18 @@ function FlightModal({ route, onClose }: { route: { from: string; to: string; da
   }, [route]);
 
   const flights = data?.flights || [];
-  const dateLabel = (() => {
-    const d = new Date(route.date + "T00:00:00");
-    return isNaN(d.getTime()) ? route.date : d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
-  })();
+  // The response is authoritative about round-trip-ness; fall back to the request only before data
+  // lands (so the header reads correctly while loading).
+  const roundTrip = data ? !!data.round_trip : !!route.returnDate;
+  const returnFlights = data?.return_flights || [];
+  const fmtDate = (iso: string) => {
+    const d = new Date(iso + "T00:00:00");
+    return isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  };
+  const dateLabel = fmtDate(route.date);
+  const returnLabel = route.returnDate ? fmtDate(route.returnDate) : (data?.return_date || null);
   const cheapest = data?.cheapest?.fare_npr;
+  const rtTotal = data?.round_trip_total_npr;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/45 backdrop-blur-sm" onClick={onClose}>
@@ -1484,12 +1595,20 @@ function FlightModal({ route, onClose }: { route: { from: string; to: string; da
         {/* header banner */}
         <div className="relative shrink-0 px-5 pt-5 pb-4 border-b border-mac-stroke">
           <button onClick={onClose} className="absolute top-3 right-3 h-7 w-7 grid place-items-center rounded-full bg-mac-fillHi text-mac-ink3 hover:text-mac-ink transition-colors"><X size={15} /></button>
-          <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-mac-accentHi mb-2"><Plane size={12} /> Buddha Air · one way</div>
+          <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-mac-accentHi mb-2">
+            {roundTrip ? <ArrowRightLeft size={12} /> : <Plane size={12} />} Buddha Air · {roundTrip ? "round trip" : "one way"}
+          </div>
           <div className="flex items-center gap-3 text-[23px] font-semibold text-white tracking-[-0.015em]">
-            <span>{data?.from || route.from}</span><ArrowRight size={19} className="text-mac-accentHi" /><span>{data?.to || route.to}</span>
+            <span>{data?.from || route.from}</span>
+            {roundTrip ? <ArrowRightLeft size={18} className="text-mac-accentHi" /> : <ArrowRight size={19} className="text-mac-accentHi" />}
+            <span>{data?.to || route.to}</span>
           </div>
           <div className="text-[12px] text-white/70 mt-1.5">
-            {dateLabel}{flights.length ? ` · ${flights.length} flights` : ""}{cheapest ? ` · from Rs ${Math.round(cheapest).toLocaleString()}` : ""}
+            {dateLabel}{roundTrip && returnLabel ? ` → ${returnLabel}` : ""}
+            {flights.length ? ` · ${flights.length} flight${flights.length === 1 ? "" : "s"}` : ""}
+            {roundTrip
+              ? (rtTotal ? ` · round trip from Rs ${Math.round(rtTotal).toLocaleString()}` : "")
+              : (cheapest ? ` · from Rs ${Math.round(cheapest).toLocaleString()}` : "")}
           </div>
         </div>
         {/* flight list */}
@@ -1501,14 +1620,40 @@ function FlightModal({ route, onClose }: { route: { from: string; to: string; da
               {data?.message || "No live fares came back — open Buddha Air to check this route."}
             </div>
           ) : (
-            flights.map((f, i) => <FlightRow key={`${f.flight}-${f.depart}-${i}`} f={f} best={i === 0} bookLink={data?.booking_link} />)
+            <>
+              {roundTrip && (
+                <div className="flex items-center gap-2 px-1 mb-2 text-[10.5px] font-semibold uppercase tracking-[0.14em] text-mac-ink3">
+                  <Plane size={11} className="text-mac-accentHi" /> Outbound · {data?.from || route.from} → {data?.to || route.to}
+                </div>
+              )}
+              {flights.map((f, i) => <FlightRow key={`out-${f.flight}-${f.depart}-${i}`} f={f} best={i === 0} bookLink={data?.booking_link} />)}
+              {roundTrip && (
+                <>
+                  <div className="flex items-center gap-2 px-1 mt-4 mb-2 text-[10.5px] font-semibold uppercase tracking-[0.14em] text-mac-ink3">
+                    <Plane size={11} className="text-mac-accentHi rotate-180" /> Return · {data?.to || route.to} → {data?.from || route.from}{returnLabel ? ` · ${returnLabel}` : ""}
+                  </div>
+                  {returnFlights.length ? (
+                    returnFlights.map((f, i) => <FlightRow key={`ret-${f.flight}-${f.depart}-${i}`} f={f} best={i === 0} bookLink={data?.booking_link} />)
+                  ) : (
+                    <div className="px-3 py-5 text-center text-[12px] text-mac-ink3">No live return fares came back for that date.</div>
+                  )}
+                </>
+              )}
+            </>
           )}
         </div>
         {/* footer */}
         <div className="shrink-0 flex items-center justify-between gap-3 px-5 py-3 border-t border-mac-stroke">
-          <span className="text-[11px] text-mac-ink3">Live fares · you complete the booking on Buddha Air</span>
+          {roundTrip && rtTotal ? (
+            <span className="text-[12px] text-mac-ink2">
+              Round-trip total <span className="font-semibold text-mac-ink tnum">Rs {Math.round(rtTotal).toLocaleString()}</span>
+              <span className="text-[10.5px] text-mac-ink3"> · cheapest each way</span>
+            </span>
+          ) : (
+            <span className="text-[11px] text-mac-ink3">Live fares · you complete the booking on Buddha Air</span>
+          )}
           <a href={data?.booking_link || "#"} target="_blank" rel="noreferrer"
-            className="h-9 px-4 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">
+            className="h-9 px-4 shrink-0 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">
             Open Buddha Air <ArrowUpRight size={14} strokeWidth={2.5} />
           </a>
         </div>

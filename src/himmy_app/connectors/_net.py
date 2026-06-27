@@ -52,6 +52,7 @@ import httpx
 __all__ = [
     "NetError",
     "safe_get_json",
+    "safe_post_json",
     "safe_get_text",
     "atomic_write_text",
     "read_json_snapshot",
@@ -197,7 +198,9 @@ async def _send_once(
     client: httpx.AsyncClient,
     url: str,
     *,
+    method: str = "GET",
     params: dict[str, Any] | None,
+    data: dict[str, Any] | None = None,
     headers: dict[str, str] | None,
     allow_hosts: frozenset[str] | None,
     max_bytes: int,
@@ -208,20 +211,24 @@ async def _send_once(
     Validates every hop's host (SSRF), rejects an unexpected ``content-type`` (per ``content_ok``)
     BEFORE reading the body, and caps the body size. Raises NetError on guard violations; re-raises
     httpx.HTTPStatusError so the caller's retry logic can inspect the status code. Decoding/parsing
-    the returned bytes is the caller's job.
+    the returned bytes is the caller's job. ``data`` is a form body for POST requests.
     """
     current_url = url
     current_params = params
     for hop in range(2):  # original request + at most one manual redirect
         _validate_url(current_url, allow_hosts)
-        request = client.build_request("GET", current_url, params=current_params, headers=headers)
+        request = client.build_request(
+            method, current_url, params=current_params, data=data, headers=headers
+        )
         response = await client.send(request, stream=True)
         try:
             if response.is_redirect:
                 location = response.headers.get("location")
                 if not location or hop == 1:
                     raise NetError("unexpected/looping redirect")
-                # Resolve relative redirects against the current URL, then re-validate.
+                # Resolve relative redirects against the current URL, then re-validate. We do NOT
+                # follow a redirect across an HTTP method change beyond the first hop; the body is
+                # only sent on the original request.
                 current_url = str(response.url.join(location))
                 current_params = None  # params already encoded into the original URL
                 continue
@@ -278,6 +285,29 @@ async def safe_get_json(
     )
 
 
+async def safe_post_json(
+    url: str,
+    *,
+    data: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    allow_hosts: list[str] | set[str] | tuple[str, ...] | None = None,
+    allow_any: bool = False,
+    timeout: float = 20.0,
+    max_bytes: int = 5_000_000,
+    retries: int = 1,
+) -> Any:
+    """POST ``data`` (form-encoded) to ``url`` and return parsed JSON, with the SAME SSRF / redirect /
+    content-type / size / retry guards as :func:`safe_get_json` (see that docstring for argument
+    semantics). Used for the few open endpoints (e.g. Overpass) that only accept a POST body.
+    """
+    return await _fetch_guarded(
+        url, method="POST", data=data, params=params, headers=headers, allow_hosts=allow_hosts,
+        allow_any=allow_any, timeout=timeout, max_bytes=max_bytes, retries=retries,
+        content_ok=_is_json_content_type, decode=_decode_json,
+    )
+
+
 def _decode_json(body: bytes) -> Any:
     try:
         return json.loads(body)
@@ -319,7 +349,9 @@ async def safe_get_text(
 async def _fetch_guarded(
     url: str,
     *,
+    method: str = "GET",
     params: dict[str, Any] | None,
+    data: dict[str, Any] | None = None,
     headers: dict[str, str] | None,
     allow_hosts: list[str] | set[str] | tuple[str, ...] | None,
     allow_any: bool,
@@ -329,7 +361,7 @@ async def _fetch_guarded(
     content_ok: Callable[[str | None], bool],
     decode: Callable[[bytes], Any],
 ) -> Any:
-    """Shared SSRF/redirect/content-type/size/retry-guarded GET; returns ``decode(body)``."""
+    """Shared SSRF/redirect/content-type/size/retry-guarded request; returns ``decode(body)``."""
     hosts = _normalise_allow_hosts(allow_hosts)
     if not hosts and not allow_any:
         # Mandatory allow-list: refuse a wide-open fetch rather than rely on the advisory per-IP
@@ -346,7 +378,9 @@ async def _fetch_guarded(
                 body = await _send_once(
                     client,
                     url,
+                    method=method,
                     params=params,
+                    data=data,
                     headers=headers,
                     allow_hosts=hosts,
                     max_bytes=max_bytes,
