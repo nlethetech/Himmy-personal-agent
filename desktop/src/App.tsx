@@ -11,7 +11,7 @@ import {
   Star, BellOff, Users, TrendingUp, Cpu, Sparkle,
   Info, StickyNote, Highlighter,
   ShoppingBag, Plane, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart, ArrowRight, ConciergeBell,
-  Route, Lightbulb, BedDouble, Wallet,
+  Route, Lightbulb, BedDouble, Wallet, Send,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -19,6 +19,7 @@ import {
   type NewsArticle, type SavedArticle, type ArticleContent, type NewsFolder, type NewsHighlight, type RecPaper,
   type Task, type ChatSession, type ResearchResult, type Pending,
   type GoogleStatus, type MailMessage, type MailFull, type CalendarEvent, type Usage, type UsageTotals,
+  type TelegramStatus,
   type ModelProvider,
   type Routine, type RoutineSchedule, type NotificationItem, type ReadingStats,
   type RecThread, type TaskExtras, type Subtask,
@@ -2709,29 +2710,112 @@ function SectionHeader({ title, sub }: { title: string; sub: string }) {
 
 function ConnectionsSection({ g }: { g: ReturnType<typeof useGoogle> }) {
   const s = g.status;
-  if (!s?.connected) {
-    return (
-      <div className="space-y-4">
-        <SectionHeader title="Connections" sub="Connect accounts so Himmy can work across your mail and calendar." />
+  return (
+    <div className="space-y-4">
+      <SectionHeader title="Connections" sub="Connect accounts and channels so Himmy can work across your life." />
+      {!s?.connected ? (
         <GoogleConnect icon={Link2} title="Connect Google"
           blurb="Connect a Google account to read your inbox and manage your calendar from Himmy." g={g} />
+      ) : (
+        <div className="rounded-xl border border-mac-stroke bg-mac-fill p-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <AccountAvatar email={s.email} size={36} />
+            <div className="min-w-0">
+              <div className="text-[13px] text-mac-ink font-medium">Google</div>
+              <div className="text-[12px] text-mac-ink3 truncate">{s.email} · Gmail &amp; Calendar</div>
+            </div>
+          </div>
+          <button onClick={g.disconnect}
+            className="shrink-0 h-8 px-3 rounded-[9px] bg-mac-fill border border-mac-stroke text-[12.5px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">Disconnect</button>
+        </div>
+      )}
+      <TelegramConnect />
+    </div>
+  );
+}
+
+function TelegramConnect() {
+  const [st, setSt] = useState<TelegramStatus | null>(null);
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const load = () => api.telegram.status().then(setSt).catch(() => {});
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+  // While configured-but-not-yet-linked, poll so "Linked!" appears the moment the user messages it.
+  useEffect(() => {
+    if (st?.configured && !st?.linked) { const t = setInterval(load, 4000); return () => clearInterval(t); }
+    /* eslint-disable-next-line */
+  }, [st?.configured, st?.linked]);
+
+  const connect = async () => {
+    if (!token.trim()) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await api.telegram.setToken(token.trim());
+      if (!r.ok) setErr(r.message || "Couldn't verify that token."); else { setToken(""); setSt(r); }
+    } catch { setErr("Couldn't reach the backend."); } finally { setBusy(false); }
+  };
+  const unlink = async () => { try { setSt(await api.telegram.unlink()); } catch { /* */ } };
+  const disconnect = async () => { try { setSt(await api.telegram.disconnect()); setToken(""); } catch { /* */ } };
+
+  const head = (
+    <div className="flex items-center gap-3 min-w-0">
+      <div className="h-9 w-9 shrink-0 grid place-items-center rounded-full bg-[rgba(10,132,255,0.14)]">
+        <Send size={16} className="text-mac-accentHi" />
+      </div>
+      <div className="min-w-0">
+        <div className="text-[13px] text-mac-ink font-medium">Telegram</div>
+        <div className="text-[12px] text-mac-ink3 truncate">
+          {st?.configured ? (st.linked ? `Linked · @${st.username || "your bot"}` : `@${st.username || "your bot"} · waiting to link`)
+            : "Chat with Himmy from your phone"}
+        </div>
+      </div>
+    </div>
+  );
+
+  if (st?.configured) {
+    return (
+      <div className="rounded-xl border border-mac-stroke bg-mac-fill p-4">
+        <div className="flex items-center justify-between gap-3">
+          {head}
+          <div className="shrink-0 flex items-center gap-1.5">
+            {st.linked && (
+              <button onClick={unlink} title="Forget the linked chat (re-pair on next message)"
+                className="h-8 px-3 rounded-[9px] bg-mac-fill border border-mac-stroke text-[12px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">Unlink</button>
+            )}
+            <button onClick={disconnect}
+              className="h-8 px-3 rounded-[9px] bg-mac-fill border border-mac-stroke text-[12px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">Disconnect</button>
+          </div>
+        </div>
+        {!st.linked && (
+          <div className="mt-3 pt-3 border-t border-mac-stroke flex items-center gap-2 text-[12px] text-mac-accentHi">
+            <Loader2 size={13} className="animate-spin" />
+            Open Telegram, message <span className="font-medium">@{st.username || "your bot"}</span>, and it links to you automatically.
+          </div>
+        )}
       </div>
     );
   }
+
   return (
-    <div className="space-y-4">
-      <SectionHeader title="Connections" sub="Accounts Himmy is connected to." />
-      <div className="rounded-xl border border-mac-stroke bg-mac-fill p-4 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3 min-w-0">
-          <AccountAvatar email={s.email} size={36} />
-          <div className="min-w-0">
-            <div className="text-[13px] text-mac-ink font-medium">Google</div>
-            <div className="text-[12px] text-mac-ink3 truncate">{s.email} · Gmail &amp; Calendar</div>
-          </div>
-        </div>
-        <button onClick={g.disconnect}
-          className="shrink-0 h-8 px-3 rounded-[9px] bg-mac-fill border border-mac-stroke text-[12.5px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">Disconnect</button>
+    <div className="rounded-xl border border-mac-stroke bg-mac-fill p-4">
+      <div className="flex items-center gap-3 mb-3">{head}</div>
+      <ol className="text-[12px] text-mac-ink3 space-y-1 mb-3 list-decimal pl-4 marker:text-mac-ink3">
+        <li>In Telegram, message <span className="text-mac-ink2 font-medium">@BotFather</span> → <span className="text-mac-ink2">/newbot</span> → pick a name.</li>
+        <li>Copy the <span className="text-mac-ink2">bot token</span> it gives you and paste it below.</li>
+        <li>Message your new bot — the first chat becomes you. It's private (only you).</li>
+      </ol>
+      <div className="flex items-center gap-2">
+        <input value={token} onChange={(e) => { setToken(e.target.value); setErr(""); }}
+          onKeyDown={(e) => { if (e.key === "Enter") connect(); }}
+          placeholder="Paste your bot token (123456:ABC-…)"
+          className="flex-1 h-9 px-3 rounded-[9px] bg-white/[0.04] ring-1 ring-inset ring-white/10 focus:ring-white/20 text-[12.5px] text-mac-ink placeholder:text-mac-ink3 outline-none font-mono" />
+        <button onClick={connect} disabled={busy || !token.trim()}
+          className="h-9 px-4 rounded-[9px] text-[12.5px] font-medium bg-mac-accent text-white hover:bg-mac-accentHi transition-colors disabled:opacity-60 inline-flex items-center gap-1.5">
+          {busy ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />} Connect
+        </button>
       </div>
+      {err && <div className="text-[11.5px] text-mac-red mt-2">{err}</div>}
     </div>
   );
 }

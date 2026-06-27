@@ -246,6 +246,10 @@ class PermissionsUpdate(BaseModel):
     levels: dict[str, str]
 
 
+class TelegramConfig(BaseModel):
+    token: str
+
+
 def _advance_due(due: str | None, recur: str) -> str:
     """Next due date for a recurring task: advance from its due (or today) by the repeat interval."""
     import calendar
@@ -595,6 +599,13 @@ def create_app() -> FastAPI:
         news_task = asyncio.create_task(_refresh_news())
         learn_task = asyncio.create_task(_auto_learn())
         nudge_task = asyncio.create_task(_nudge_loop())
+        # Telegram bridge — only does anything if the user has set a bot token.
+        try:
+            from himmy_app import telegram as _tg
+
+            _tg.get_bridge(cfg).start()
+        except Exception:  # noqa: BLE001 - the bridge must never block startup
+            pass
         try:
             yield
         finally:
@@ -602,6 +613,12 @@ def create_app() -> FastAPI:
             news_task.cancel()
             learn_task.cancel()
             nudge_task.cancel()
+            try:
+                from himmy_app import telegram as _tg
+
+                await _tg.get_bridge(cfg).stop()
+            except Exception:  # noqa: BLE001
+                pass
             # Await the cancelled tasks so in-flight I/O unwinds before we stop the scheduler.
             await asyncio.gather(
                 warm_task, news_task, learn_task, nudge_task, return_exceptions=True
@@ -1317,6 +1334,36 @@ def create_app() -> FastAPI:
     @app.get("/google/status")
     async def google_status() -> dict[str, Any]:
         return _google_status_dict()
+
+    # ---- Telegram bridge: chat with Himmy from Telegram ----------------------------------
+    from himmy_app import telegram as _tg
+
+    @app.get("/telegram/status")
+    async def telegram_status() -> dict[str, Any]:
+        return _tg.status(cfg)
+
+    @app.put("/telegram/config")
+    async def telegram_set(body: TelegramConfig) -> dict[str, Any]:
+        token = body.token.strip()
+        check = await _tg.verify_token(token)
+        if not check.get("ok"):
+            return {"ok": False, "message": check.get("message", "Invalid token.")}
+        # New token → drop any previous link so the next chat re-pairs with this bot.
+        _tg.save_tg({"token": token, "username": check.get("username"), "owner_chat_id": None, "offset": 0}, cfg)
+        await _tg.get_bridge(cfg).restart()
+        return {**_tg.status(cfg), "ok": True, "username": check.get("username")}
+
+    @app.post("/telegram/unlink")
+    async def telegram_unlink() -> dict[str, Any]:
+        # Forget the linked chat (the next person to message re-pairs); keep the token.
+        _tg.save_tg({"owner_chat_id": None}, cfg)
+        return _tg.status(cfg)
+
+    @app.post("/telegram/disconnect")
+    async def telegram_disconnect() -> dict[str, Any]:
+        _tg.save_tg({"token": "", "owner_chat_id": None, "username": None}, cfg)
+        await _tg.get_bridge(cfg).stop()
+        return _tg.status(cfg)
 
     # ---- permissions: what Himmy is allowed to do, per connection -----------------------
     from himmy_app import permissions as _perms

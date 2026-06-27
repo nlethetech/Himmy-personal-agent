@@ -203,6 +203,11 @@ export type PermsCatalog = { ok: boolean; surfaces: PermSurface[]; levels: Recor
 export type ActivityItem = {
   ts: number; tool: string; surface: string; title: string; detail: string; status: string;
 };
+// Telegram bridge status.
+export type TelegramStatus = {
+  ok: boolean; configured: boolean; linked: boolean; owner_chat_id?: number | null;
+  username?: string | null; running: boolean; message?: string;
+};
 
 // Live flight tickets (Buddha Air) for a route + date.
 export type DoFlight = { flight: string; depart: string; arrive: string; from: string; to: string; fare_npr: number; class: string };
@@ -576,6 +581,14 @@ export const api = {
   activity: {
     get: (limit = 60) => jget<{ ok: boolean; items: ActivityItem[] }>(`/activity?limit=${limit}`),
     clear: () => jdelete<{ ok: boolean }>("/activity"),
+  },
+
+  // Telegram bridge — chat with Himmy from Telegram.
+  telegram: {
+    status: () => jget<TelegramStatus>("/telegram/status"),
+    setToken: (token: string) => jput<TelegramStatus>("/telegram/config", { token }),
+    unlink: () => jpost<TelegramStatus>("/telegram/unlink", {}),
+    disconnect: () => jpost<TelegramStatus>("/telegram/disconnect", {}),
   },
 
   // The daily brief — Himmy's proactive "here's your day", shown on Today.
