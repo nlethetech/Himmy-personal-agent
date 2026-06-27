@@ -36,6 +36,11 @@ _MAX_DETAILS = 24          # cap the label→value "vault" (home airport, budget
 #: How fresh the learned layer must be before the background auto-learn re-runs (24h).
 LEARN_MIN_INTERVAL_S = 24 * 3600
 
+#: Confidence buckets allowed on a pending vault suggestion (frontend renders these verbatim).
+_CONFIDENCE = ("low", "med", "high")
+#: Cap on stored pending suggestions (keeps the file + the confirm UI small).
+_MAX_SUGGESTIONS = 12
+
 
 def _empty_layer() -> dict[str, Any]:
     return {"about": "", "voice": "", "projects": [], "people": [], "topics": [],
@@ -71,6 +76,43 @@ def _clean_layer(src: dict[str, Any] | None) -> dict[str, Any]:
     return layer
 
 
+def _clean_suggestion(src: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalise one pending vault suggestion, or ``None`` if it isn't usable.
+
+    Shape (the contract the /profile/suggestions endpoint serves and the confirm UI renders):
+        {"key": str, "value": str, "source": str, "confidence": "low"|"med"|"high"}
+    Provenance is always ``inferred`` — a suggestion is a *candidate*, never an applied fact.
+    """
+    if not isinstance(src, dict):
+        return None
+    key = str(src.get("key") or "").strip()[:60]
+    value = str(src.get("value") or "").strip()[:200]
+    if not key or not value:
+        return None
+    conf = str(src.get("confidence") or "low").strip().lower()
+    if conf not in _CONFIDENCE:
+        conf = "low"
+    source = str(src.get("source") or "inferred from your activity").strip()[:160]
+    return {"key": key, "value": value, "source": source,
+            "confidence": conf, "provenance": "inferred"}
+
+
+def _clean_suggestions(raw: Any) -> list[dict[str, Any]]:
+    """De-dup (by key, case-insensitive) and cap a list of pending suggestions."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for s in (raw or []):
+        c = _clean_suggestion(s)
+        if not c:
+            continue
+        kk = c["key"].lower()
+        if kk in seen:
+            continue
+        seen.add(kk)
+        out.append(c)
+    return out[:_MAX_SUGGESTIONS]
+
+
 def _path(cfg: HimmyConfig):
     return cfg.data_dir / "user_profile.json"
 
@@ -87,6 +129,9 @@ def load(cfg: HimmyConfig | None = None) -> dict[str, Any]:
         "user": _clean_layer(data.get("user")),
         "learned": _clean_layer(data.get("learned")),
         "learned_at": float(data.get("learned_at") or 0.0),
+        # Pending vault facts Himmy INFERRED but must not auto-write — they wait for the user to
+        # confirm them (POST /profile/suggestions/apply) before they ever enter the real vault.
+        "suggestions": _clean_suggestions(data.get("suggestions")),
     }
 
 
@@ -167,6 +212,8 @@ def render_for_prompt(prof: dict[str, Any] | None = None, cfg: HimmyConfig | Non
 _SIGNAL_KEYS = (
     "papers", "tags", "notes", "tasks", "interests",
     "correspondents", "task_notes", "chat_topics", "read_papers",
+    # Concierge "Do" taste — what the user actually orders / thumbs (cross-pollination).
+    "do_orders", "do_liked", "do_disliked",
 )
 
 
@@ -300,6 +347,39 @@ def gather_signals(cfg: HimmyConfig | None = None) -> dict[str, list[str]]:
     except Exception:  # noqa: BLE001
         pass
 
+    # Concierge "Do" taste — fold the user's REAL orders + thumbs into the durable profile, so
+    # what they actually buy/eat/like (not just what they read) feeds every Cmd-K turn. Pure
+    # local SQLite via the existing stores; each is its own fail-open island.
+    try:  # what they've put in / ordered via the Do cart (dishes + products), grouped by place
+        from himmy_app.do_concierge import DoCart
+
+        for grp in DoCart(cfg).view().get("groups", []):
+            place = (grp.get("place") or "").strip()
+            for it in grp.get("items", []):
+                name = (it.get("name") or "").strip()
+                if not name:
+                    continue
+                sig["do_orders"].append(
+                    f"{name} (from {place})" if place and place.lower() != "other" else name
+                )
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:  # the tags/picks they've thumbed up / down on concierge cards
+        from himmy_app.do_concierge import DoFeedback
+
+        dismissed, weights = DoFeedback(cfg).signals()
+        for tag, net in sorted(weights.items(), key=lambda kv: kv[1], reverse=True):
+            t = (tag or "").strip()
+            if not t:
+                continue
+            if net > 0:
+                sig["do_liked"].append(t)
+            elif net < 0:
+                sig["do_disliked"].append(t)
+    except Exception:  # noqa: BLE001
+        pass
+
     # de-dup + cap each source so the prompt stays lean
     for k in sig:
         sig[k] = list(dict.fromkeys(sig[k]))[:40]
@@ -367,6 +447,9 @@ def _build_learn_prompt(prof: dict[str, Any], sig: dict[str, list[str]]) -> str:
         f"People who recur in their email:\n{_bul(sig['correspondents'])}\n\n"
         f"What they've recently asked Himmy about:\n{_bul(sig['chat_topics'])}\n\n"
         f"Topics they said they're interested in:\n{_bul(sig['interests'])}\n\n"
+        f"Food / products they've actually ordered (Do cart):\n{_bul(sig['do_orders'])}\n\n"
+        f"Things they've thumbed UP on the concierge:\n{_bul(sig['do_liked'])}\n\n"
+        f"Things they've thumbed DOWN on the concierge:\n{_bul(sig['do_disliked'])}\n\n"
         "=== WHAT YOU PREVIOUSLY INFERRED (refine/keep what still holds, drop the stale) ===\n"
         f"{json.dumps(learned, ensure_ascii=False)}\n\n"
         "=== OUTPUT ===\n"
@@ -397,7 +480,118 @@ def _parse_learned(content: str) -> dict[str, Any] | None:
         return None
     if not isinstance(data, dict):
         return None
-    return _clean_layer(data)
+    layer = _clean_layer(data)
+    # SECURITY: the learned (machine-inferred) layer must NEVER carry the `details` vault.
+    # Vault facts (home airport, budget, address, …) are *gated* — they may only enter the vault
+    # via infer_suggestions → apply_suggestions after the user confirms them. The learn prompt
+    # never asks for `details`, but a prompt-injected paper/note/email could try to smuggle one
+    # in; dropping it here closes that silent auto-write + flights-auto-misroute path.
+    layer["details"] = {}
+    return layer
+
+
+#: City name -> Buddha Air-style airport code, for inferring a *candidate* home airport from where
+#: the user most often appears to fly/travel. Kept tiny + local (no network, no model).
+_CITY_TO_AIRPORT = {
+    "kathmandu": "KTM", "ktm": "KTM", "pokhara": "PKR", "pkr": "PKR",
+    "bhairahawa": "BWA", "bhairawa": "BWA", "lumbini": "BWA", "siddharthanagar": "BWA",
+    "biratnagar": "BIR", "bharatpur": "BHR", "chitwan": "BHR", "nepalgunj": "KEP",
+    "janakpur": "JKR", "dhangadhi": "DHI", "simara": "SIF", "tumlingtar": "TMI",
+}
+#: Words that, near a money amount, hint at a travel/spend budget the user mentioned.
+_BUDGET_HINT_WORDS = ("budget", "spend", "afford", "per day", "/day", "a day", "max", "under",
+                      "around", "roughly", "trip", "travel")
+
+
+def _count_mentions(needle: str, haystacks: list[str]) -> int:
+    """How many distinct signal strings mention ``needle`` (case-insensitive whole-ish word)."""
+    n = needle.lower()
+    pat = re.compile(rf"\b{re.escape(n)}", re.IGNORECASE)
+    return sum(1 for h in haystacks if pat.search(h or ""))
+
+
+def infer_suggestions(sig: dict[str, list[str]], learned: dict[str, Any] | None = None,
+                      existing_details: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """Infer CANDIDATE vault facts from local signals — never written, only offered.
+
+    Returns pending suggestions for: home airport, favourite cuisines, budget band. Per the
+    contract, a fact is only offered at 'med'/'high' confidence when **>= 2 corroborating
+    signals** back it (a single mention stays 'low'); gated keys (home airport / budget) are
+    NEVER auto-written — they live here until the user confirms them. Pure-local, fail-open.
+    """
+    existing = {k.lower() for k in (existing_details or {})}
+    learned = learned or {}
+    suggestions: list[dict[str, Any]] = []
+
+    # One flat corpus of the user's free-text + structured traces to corroborate against.
+    corpus: list[str] = []
+    for k in ("do_orders", "chat_topics", "task_notes", "notes", "interests", "topics",
+              "do_liked", "tasks", "papers"):
+        corpus.extend(sig.get(k, []) or [])
+    corpus.extend(learned.get("topics") or [])
+    corpus.extend(learned.get("projects") or [])
+    about = str(learned.get("about") or "")
+    if about:
+        corpus.append(about)
+
+    def _conf(n: int) -> str:
+        return "high" if n >= 3 else "med" if n >= 2 else "low"
+
+    # 1) Home airport — from the city that recurs most across the user's travel/chat traces.
+    if "home airport" not in existing:
+        city_hits: dict[str, int] = {}
+        for city in _CITY_TO_AIRPORT:
+            c = _count_mentions(city, corpus)
+            if c:
+                city_hits[city] = c
+        if city_hits:
+            top_city, n = max(city_hits.items(), key=lambda kv: kv[1])
+            code = _CITY_TO_AIRPORT[top_city]
+            suggestions.append({
+                "key": "home airport", "value": code,
+                "source": f"You mention {top_city.title()} most ({n}× in your activity)",
+                "confidence": _conf(n)})
+
+    # 2) Favourite cuisines — what they actually order + thumb up (a SAFE, non-gated key, but still
+    #    offered for confirmation so the vault stays user-owned).
+    if "favourite cuisines" not in existing and "favorite cuisines" not in existing:
+        cuisines = ("momo", "pizza", "newari", "thakali", "chowmein", "burger", "sekuwa",
+                    "biryani", "sushi", "korean", "thai", "indian", "italian", "chinese")
+        hits: dict[str, int] = {}
+        food_corpus = (sig.get("do_orders") or []) + (sig.get("do_liked") or []) \
+            + (sig.get("interests") or [])
+        for cu in cuisines:
+            c = _count_mentions(cu, food_corpus)
+            if c:
+                hits[cu] = c
+        ranked = sorted(hits.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        if ranked:
+            total = sum(c for _, c in ranked)
+            suggestions.append({
+                "key": "favourite cuisines",
+                "value": ", ".join(cu.title() for cu, _ in ranked),
+                "source": "From what you order and thumb up on the Do page",
+                "confidence": _conf(total)})
+
+    # 3) Budget band — a money amount that recurs near budget/spend language.
+    if "budget" not in existing and "trip budget" not in existing:
+        amounts: dict[str, int] = {}
+        for line in corpus:
+            low = (line or "").lower()
+            if not any(w in low for w in _BUDGET_HINT_WORDS):
+                continue
+            for m in re.findall(r"(?:rs\.?|npr|रू)\s?([\d,]{3,})", low):
+                amt = m.replace(",", "")
+                if amt.isdigit():
+                    amounts[amt] = amounts.get(amt, 0) + 1
+        if amounts:
+            top_amt, n = max(amounts.items(), key=lambda kv: kv[1])
+            suggestions.append({
+                "key": "budget", "value": f"NPR {int(top_amt):,}",
+                "source": "A spend figure that recurs when you talk about budget",
+                "confidence": _conf(n)})
+
+    return _clean_suggestions(suggestions)
 
 
 async def learn(cfg: HimmyConfig | None = None) -> dict[str, Any]:
@@ -434,8 +628,63 @@ async def learn(cfg: HimmyConfig | None = None) -> dict[str, Any]:
                 "message": "Himmy couldn't form a clear picture this time — try again later."}
     prof["learned"] = learned
     prof["learned_at"] = time.time()
+    # GATED auto-fill: infer candidate vault facts (home airport, cuisines, budget) but DO NOT
+    # write them — stash them as pending suggestions the user must confirm. Merge with any
+    # still-pending ones so an existing suggestion isn't lost, and never re-offer a fact the user
+    # has already saved into the real vault. Fully fail-open.
+    try:
+        # Only the user-confirmed vault gates re-offers (the learned layer carries no details).
+        confirmed_details = dict((prof.get("user", {}).get("details") or {}))
+        inferred = infer_suggestions(sig, learned, confirmed_details)
+        prof["suggestions"] = _clean_suggestions(inferred + (prof.get("suggestions") or []))
+    except Exception:  # noqa: BLE001 - suggestions are a nicety, never block a good learn
+        prof["suggestions"] = prof.get("suggestions") or []
     save(prof, cfg)
     return {"ok": True, "profile": prof}
+
+
+# ---- gated vault auto-fill: pending suggestions the user confirms ------------------------
+def get_suggestions(cfg: HimmyConfig | None = None) -> dict[str, Any]:
+    """The pending vault facts Himmy inferred and is offering for confirmation.
+
+    Backs ``GET /profile/suggestions``. Each item is
+    ``{"key", "value", "source", "confidence": low|med|high}`` (plus ``provenance: inferred``).
+    A suggestion never enters the real vault until :func:`apply_suggestions` confirms it.
+    """
+    cfg = cfg or load_config()
+    return {"ok": True, "suggestions": load(cfg).get("suggestions", [])}
+
+
+def apply_suggestions(keys: list[str], cfg: HimmyConfig | None = None) -> dict[str, Any]:
+    """Confirm specific pending suggestions → write ONLY those into ``profile.user.details``.
+
+    Backs ``POST /profile/suggestions/apply`` with body ``{"keys": [str]}``. This is the *only*
+    path by which an inferred fact (incl. the gated home-airport / budget) ever reaches the vault —
+    and only for the keys the user explicitly confirmed. Applied suggestions are then dropped from
+    the pending list. Unknown keys are ignored.
+    """
+    cfg = cfg or load_config()
+    prof = load(cfg)
+    wanted = {str(k).strip().lower() for k in (keys or []) if str(k).strip()}
+    pending = prof.get("suggestions") or []
+    applied: list[dict[str, str]] = []
+
+    details = dict((prof.get("user") or {}).get("details") or {})
+    keep: list[dict[str, Any]] = []
+    for s in pending:
+        if s["key"].lower() in wanted:
+            details[s["key"]] = s["value"]          # confirmed → into the real user vault
+            applied.append({"key": s["key"], "value": s["value"]})
+        else:
+            keep.append(s)                           # not confirmed → stays pending
+
+    # Re-clean the user layer through the vault rules (caps keys/values), drop applied suggestions.
+    user_layer = dict(prof.get("user") or {})
+    user_layer["details"] = details
+    prof["user"] = _clean_layer(user_layer)
+    prof["suggestions"] = _clean_suggestions(keep)
+    save(prof, cfg)
+    return {"ok": True, "applied": applied, "profile": prof}
 
 
 async def maybe_auto_learn(cfg: HimmyConfig | None = None) -> dict[str, Any]:
@@ -459,4 +708,5 @@ async def maybe_auto_learn(cfg: HimmyConfig | None = None) -> dict[str, Any]:
 
 
 __all__ = ["load", "save_user_layer", "render_for_prompt", "gather_signals",
-           "gather_signals_async", "learn", "maybe_auto_learn"]
+           "gather_signals_async", "learn", "maybe_auto_learn",
+           "infer_suggestions", "get_suggestions", "apply_suggestions"]

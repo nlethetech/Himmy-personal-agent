@@ -43,9 +43,30 @@ NUDGE_INTERVAL_S = float(os.environ.get("HIMMY_NUDGE_INTERVAL") or 3 * 3600)
 UNREPLIED_DAYS = 3
 #: How far ahead we look for calendar events/trips.
 CAL_HORIZON_DAYS = 2
+#: How far ahead we look for a major festival worth a heads-up (the example says ~10 days).
+FESTIVAL_HORIZON_DAYS = 10
 #: Caps so a noisy inbox/calendar can't flood the bell in one pass.
 MAX_MAIL_NUDGES = 5
 MAX_CAL_NUDGES = 10
+#: A nudge per *every* almanac row would be noisy (Dashain alone has ~6 sub-day rows). We only
+#: nudge on the headline festivals people actually plan around, and we collapse each festival's
+#: sub-days + aliases into one FAMILY. Each entry maps a tuple of case-insensitive substrings of
+#: the festival name (from :func:`himmy_app.festivals.upcoming`) to a stable family slug used in
+#: the dedup key. Order matters: first match wins (so "fagu" → holi before any later entry).
+_FESTIVAL_FAMILIES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("dashain",), "dashain"),
+    (("tihar", "deepawali", "bhai tika", "laxmi puja"), "tihar"),
+    (("chhath",), "chhath"),
+    (("holi", "fagu"), "holi"),
+    (("nepali new year",), "nepali-new-year"),
+    (("lhosar",), "lhosar"),
+    (("teej",), "teej"),
+    (("buddha jayanti",), "buddha-jayanti"),
+    (("shivaratri",), "shivaratri"),
+    (("janai purnima",), "janai-purnima"),
+)
+#: For "everyone travels home" festivals we add a concierge travel hook (the Dashain example).
+_TRAVEL_FESTIVALS = ("dashain", "tihar", "deepawali", "nepali new year")
 
 #: Light keyword check to phrase a trip/flight nudge differently from a normal event.
 _TRIP_WORDS = (
@@ -77,6 +98,10 @@ async def generate(cfg: HimmyConfig | None = None) -> dict[str, Any]:
     checked: dict[str, Any] = {}
 
     try:
+        created += _festival_nudges(inbox, today, checked)
+    except Exception as exc:  # noqa: BLE001 - one bad source never blocks the others
+        checked["festivals_error"] = f"{type(exc).__name__}: {exc}"
+    try:
         created += _task_nudges(cfg, inbox, today, checked)
     except Exception as exc:  # noqa: BLE001 - one bad source never blocks the others
         checked["tasks_error"] = f"{type(exc).__name__}: {exc}"
@@ -90,6 +115,92 @@ async def generate(cfg: HimmyConfig | None = None) -> dict[str, Any]:
         checked["mail_error"] = f"{type(exc).__name__}: {exc}"
 
     return {"ok": True, "created": created, "checked": checked}
+
+
+# ---------------------------------------------------------------------------------------
+# Festivals — the first proactive *concierge* moment. A heads-up when a major Nepali
+# festival is ~10 days out, with a travel hook for the "everyone goes home" ones. Reuses
+# the reviewed almanac table in himmy_app.festivals; fully deterministic, no model.
+# ---------------------------------------------------------------------------------------
+def _festival_nudges(inbox: Any, today: datetime.date, checked: dict[str, Any]) -> int:
+    from himmy_app.festivals import upcoming
+
+    # A festival like Dashain spans several almanac rows (Ghatasthapana, Ashtami, Navami,
+    # Dashami …). Collapse each FAMILY to its SOONEST in-window row so the bell shows one
+    # "Dashain in N days", not three. First-seen wins because upcoming() is date-sorted.
+    families: dict[str, dict[str, Any]] = {}
+    for fest in upcoming(within_days=FESTIVAL_HORIZON_DAYS, today=today):
+        name = str(fest.get("name") or "").strip()
+        fam = _festival_family(name)
+        if fam is None or fam in families:
+            continue
+        families[fam] = fest
+
+    created = 0
+    for fam, fest in families.items():
+        name = str(fest.get("name") or "").strip()
+        days = int(fest.get("days_away") or 0)
+        # Key on the FAMILY + AD year only (not the sub-day date, not days_away) so neither the
+        # countdown nor which sub-row is soonest can re-fire it — SELECT-before-INSERT dedup
+        # then guarantees exactly one nudge per festival per year.
+        key = f"festival-{str(fest.get('date_ad') or '')[:4]}-{fam}"
+        title, body = _festival_copy(name, days, str(fest.get("note") or ""))
+        if inbox.add_nudge(key=key, title=title, body=body) is not None:
+            created += 1
+    checked["festivals"] = len(families)
+    return created
+
+
+def _festival_family(name: str) -> str | None:
+    """Map an almanac row to a stable major-festival FAMILY slug, or None if not major.
+
+    Several aliases collapse to one family (Deepawali→tihar, Fagu→holi) so all of a
+    festival's sub-days share a single dedup key and a single nudge.
+    """
+    low = name.lower()
+    for keys, fam in _FESTIVAL_FAMILIES:
+        if any(k in low for k in keys):
+            return fam
+    return None
+
+
+def _festival_copy(name: str, days: int, note: str) -> tuple[str, str]:
+    """Short, friendly copy. The 'going home' festivals get a concierge travel hook."""
+    short = _festival_short_name(name)
+    when = "today" if days <= 0 else ("tomorrow" if days == 1 else f"in {days} days")
+    low = name.lower()
+    if any(k in low for k in _TRAVEL_FESTIVALS):
+        # e.g. "Dashain's in 9 days — buses sell out fast. Want me to check
+        # Kathmandu->Pokhara fares?"
+        title = f"{short} {when}"
+        body = (
+            f"{short}'s {when} — buses sell out fast. "
+            "Want me to check Kathmandu->Pokhara fares?"
+        )
+        return title, body
+    title = f"{short} {when}"
+    body = f"{short} is {when}." + (f" {note}" if note else "")
+    return title, body
+
+
+def _festival_short_name(name: str) -> str:
+    """A friendly headline from a full almanac name, e.g.
+
+    'Ghatasthapana (Dashain begins)' -> 'Dashain'; 'Fagu Purnima (Holi — Hill)' -> 'Holi'.
+    Prefer the parenthetical festival-family word when present, else the bare name.
+    """
+    low = name.lower()
+    for fam, label in (
+        ("dashain", "Dashain"), ("tihar", "Tihar"), ("deepawali", "Tihar"),
+        ("chhath", "Chhath"), ("holi", "Holi"), ("fagu", "Holi"),
+        ("nepali new year", "Nepali New Year"), ("lhosar", name.split(" Lhosar")[0] + " Lhosar"
+                                                 if "lhosar" in low else "Lhosar"),
+        ("teej", "Teej"), ("buddha jayanti", "Buddha Jayanti"),
+        ("shivaratri", "Maha Shivaratri"), ("janai purnima", "Janai Purnima"),
+    ):
+        if fam in low:
+            return label
+    return name
 
 
 # ---------------------------------------------------------------------------------------

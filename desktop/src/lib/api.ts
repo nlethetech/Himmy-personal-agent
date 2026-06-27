@@ -215,19 +215,57 @@ export type DoFlights = {
   ok: boolean; fares_available?: boolean; from: string; to: string; date: string;
   currency?: string; flights: DoFlight[]; cheapest?: DoFlight | null; booking_link?: string; message?: string;
 };
+// Bus tickets (bussewa) — live departures + fares + seats for a route, with a booking deep-link.
+export type DoBus = {
+  operator: string; bus_type?: string; route?: string; depart: string; arrive?: string;
+  journey_hours?: number; fare_npr: number; min_bargain_npr?: number | null; seats_available?: number;
+  amenities?: string[]; rating?: number; review_count?: number; trip_id?: string;
+};
+export type DoBusVia = { hub: string; for: string; note?: string };
+export type DoBuses = {
+  ok: boolean; trips_available?: boolean; from: string; to: string; via?: DoBusVia | null;
+  date_bs?: string; date_ad?: string; currency?: string; count?: number;
+  buses: DoBus[]; cheapest?: DoBus | null; booking_link?: string; message?: string;
+};
 // A trip roadmap — day-by-day places/activities for a destination, with budget, hotels & eat.
 export type DoTripItem = { name: string; category?: string; desc?: string; tip?: string };
 export type DoTripDay = { day: number; title: string; items: DoTripItem[] };
 export type DoTripFlight = { from: string; to: string; cheapest?: DoFlight | null; booking_link?: string };
+export type DoTripBus = { from: string; to: string; cheapest?: DoBus | null; count?: number; via?: DoBusVia | null; booking_link?: string };
 export type DoTripBudgetRow = { label: string; min: number; max: number; note?: string };
 export type DoTripBudget = {
   currency?: string; per_person?: boolean; total_min?: number; total_max?: number; breakdown?: DoTripBudgetRow[];
 };
 export type DoTripHotel = { name: string; type?: string; area?: string; why?: string; book_link?: string };
 export type DoTripEat = { name: string; cuisine?: string; why?: string };
+// Deterministic flight-vs-bus comparison, derived from getting_there + by_bus (no extra network/model
+// calls). Only present when BOTH a flight and a bus exist — otherwise the field is null/absent.
+export type DoTripTransportOption = {
+  mode: "flight" | "bus";
+  label: string;            // "Flight (Buddha Air)" | "Bus (bussewa)"
+  fare_npr: number;
+  duration_label: string;   // "~50 min" | "8h"
+  // Flight door-to-door is an ESTIMATE (air time + ~3h airport buffer); bus journey_hours is real.
+  duration_is_estimate: boolean;
+  depart: string | null;
+  book_link: string | null;
+};
+export type DoTripTransportVerdict = {
+  winner: "flight" | "bus";
+  reason: string;
+  fare_delta_npr: number;
+  time_note: string;
+};
+export type DoTripTransportCompare = {
+  options: DoTripTransportOption[];
+  verdict: DoTripTransportVerdict;
+  disclaimer: string;       // "Flight time is door-to-door estimate incl. airport buffer."
+};
 export type DoTrip = {
   ok: boolean; destination: string; days: number; style?: string; summary?: string;
-  getting_there?: DoTripFlight | null; budget?: DoTripBudget; hotels?: DoTripHotel[]; eat?: DoTripEat[];
+  getting_there?: DoTripFlight | null; by_bus?: DoTripBus | null; budget?: DoTripBudget; hotels?: DoTripHotel[]; eat?: DoTripEat[];
+  // Only present (non-null) when both a flight and a bus exist for the route.
+  transport_compare?: DoTripTransportCompare | null;
   itinerary: DoTripDay[]; tips?: string[]; message?: string;
 };
 
@@ -237,6 +275,16 @@ export type ProfileLayer = {
   details: Record<string, string>;
 };
 export type UserProfile = { user: ProfileLayer; learned: ProfileLayer; learned_at: number };
+
+// Gated vault auto-fill: candidate facts Himmy inferred (home airport / budget / cuisines / …) but
+// never auto-writes. Each must be confirmed by the user before it lands in profile.user.details.
+// `confidence` reflects corroboration — only facts seen in >=2 signals are offered as 'med'/'high'.
+export type ProfileSuggestion = {
+  key: string;
+  value: string;
+  source: string;
+  confidence: "low" | "med" | "high";
+};
 
 // Routines — saved automations that run on a schedule (himmy's Schedule model + cron/tz math,
 // fired through the same agent as /ask; results land in notifications below).
@@ -482,6 +530,13 @@ export const api = {
       jput<{ ok: boolean; profile: UserProfile }>("/profile", sections),
     learn: () =>
       jpost<{ ok: boolean; profile: UserProfile; message?: string }>("/profile/learn", {}),
+    // Pending vault facts Himmy inferred but won't auto-write (home airport / budget / cuisines / …).
+    suggestions: () =>
+      jget<{ ok: boolean; suggestions: ProfileSuggestion[] }>("/profile/suggestions"),
+    // Confirm a subset of suggested keys — only these are written into profile.user.details.
+    applySuggestions: (keys: string[]) =>
+      jpost<{ ok: boolean; profile?: UserProfile; applied?: string[]; message?: string }>(
+        "/profile/suggestions/apply", { keys }),
   },
   collections: {
     list: () => jget<{ ok: boolean; collections: Collection[] }>("/collections"),
@@ -562,8 +617,16 @@ export const api = {
         `/do/search?q=${encodeURIComponent(q)}&kind=${kind}`),
     flights: (from: string, to: string, date?: string) =>
       jget<DoFlights>(`/do/flights?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}${date ? `&date=${date}` : ""}`),
+    buses: (from: string, to: string, date?: string) =>
+      jget<DoBuses>(`/do/buses?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}${date ? `&date=${date}` : ""}`),
+    busCities: () => jget<{ ok: boolean; cities: string[] }>(`/do/bus-cities`),
     trip: (dest: string, days = 2, style = "comfort") =>
       jget<DoTrip>(`/do/trip?dest=${encodeURIComponent(dest)}&days=${days}&style=${style}`),
+    // Export a trip as a SANITIZED shareable itinerary (markdown). The backend strips any
+    // profile-derived phrasing, the user's name/email, and vault facts — it reads as a generic plan.
+    tripExport: (dest: string, days = 2, style = "comfort") =>
+      jget<{ ok: boolean; markdown: string; title: string }>(
+        `/do/trip/export?dest=${encodeURIComponent(dest)}&days=${days}&style=${style}&fmt=md`),
     cart: {
       view: () => jget<DoCartView>("/do/cart"),
       add: (item: DoCartAdd) => jpost<DoCartView>("/do/cart/add", item),

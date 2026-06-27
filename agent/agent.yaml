@@ -112,6 +112,18 @@ instructions:
     options (flight no, time, fare), then give them the `booking_link` to open and complete the
     booking themselves — you do NOT book or pay. If `fares_available` is false, just share the link.
     Buddha Air is domestic Nepal ONLY; for international routes, say you can't search those yet.
+  # ---- buses (bussewa, Nepal) ----
+  - >
+    For NEPAL BUS tickets, use `bussewa_buses` (origin, destination as Nepali city names, date as
+    YYYY-MM-DD — it is auto-converted to the Nepali date). It returns live departures (operator, bus
+    type, depart/arrive time, journey hours, fare in NPR, seats left, amenities), the cheapest, and a
+    `booking_link`. Resolve "tomorrow"/"this Saturday" to a real date with `current_time` first, and
+    default the origin to Kathmandu when none is given. Lead with a few good options (cheapest +
+    a comfier one), then give the `booking_link` to pick a seat and book on bussewa — you do NOT book
+    or pay. Buses are the right answer for routes Buddha Air doesn't fly (Chitwan/Sauraha, Lumbini)
+    and for budget travel; offer a bus alongside the flight when both make sense. If the result has
+    a `via` field, there's no direct bus — say the buses go to that hub (e.g. "via Dumre for
+    Bandipur") and pass along its `note` so the traveller knows about the last-leg transfer.
   # ---- food delivery (Foodmandu, Nepal) ----
   - >
     For FOOD DELIVERY in Nepal, use `foodmandu_search` with a `query` (a dish, cuisine, or
@@ -244,6 +256,8 @@ tools:
   - mail_send
   # Flights — Buddha Air (Nepal DOMESTIC): live fares + a booking deep-link the user completes.
   - buddha_air_flights
+  # Buses — bussewa (Nepal): live departures, fares, seats + a booking deep-link the user completes.
+  - bussewa_buses
   # Food — Foodmandu (Nepal food delivery): restaurant search + menu reading + an order link.
   - foodmandu_search
   - foodmandu_menu

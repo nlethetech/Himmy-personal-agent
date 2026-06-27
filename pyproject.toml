@@ -18,9 +18,10 @@ keywords = ["assistant", "research", "rag", "citations", "agent", "himmy", "prod
 #   - api:        fastapi/uvicorn/starlette — `himmy serve` (the API surface) needs this
 #   - openai:     the OpenRouter provider (gemini-2.5-flash) lives here
 #   - embeddings: fastembed local embedder for the papers RAG (no API key needed)
+#   - nepal:      nepali_datetime — AD↔Bikram-Sambat for the bussewa bus connector
 # himmy is NOT on PyPI — install it editable first (see requirements.txt), then `pip install -e .`.
 dependencies = [
-  "himmy[toolkit,api,openai,embeddings]",
+  "himmy[toolkit,api,openai,embeddings,nepal]",
   "httpx>=0.27",
   "pypdf>=4",        # fallback PDF text extraction when Zotero's own text index is unavailable
   "trafilatura>=2",  # clean in-app article extraction for the News reader (Safari-Reader-style)

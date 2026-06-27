@@ -89,6 +89,13 @@ SURFACES: list[dict[str, Any]] = [
         "tools": {"on": ["buddha_air_flights"]},
     },
     {
+        "key": "buses", "label": "Bussewa", "service": "Bus tickets (Nepal)",
+        "desc": "Find live bus departures, fares and seats; book on bussewa.",
+        "default": "on",
+        "levels": [{"value": "off", "label": "Off"}, {"value": "on", "label": "On"}],
+        "tools": {"on": ["bussewa_buses"]},
+    },
+    {
         "key": "web", "label": "Web search", "service": "The open web",
         "desc": "Search and read pages from the wider web.",
         "default": "on",

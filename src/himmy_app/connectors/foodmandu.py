@@ -10,15 +10,15 @@ order themselves — no auto-order, no payment. Defaults to the Kathmandu delive
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import urlencode
-
-import httpx
 
 from himmy.services.tools.registry import ToolRegistry
 
+from himmy_app.connectors._net import NetError, safe_get_json
 from himmy_app.connectors._register import safe_register_local_tool
 
 _API = "https://foodmandu.com/webapi/api"
+# Only ever talk to Foodmandu's own API host; a redirect/DNS answer to anything else is refused.
+_ALLOW_HOSTS = ("foodmandu.com",)
 _HEADERS = {
     "Origin": "https://foodmandu.com",
     "Referer": "https://foodmandu.com/",
@@ -73,13 +73,14 @@ async def foodmandu_menu(args: dict[str, Any]) -> dict[str, Any]:
     if not order_link:
         order_link = _order_link(vid)
     try:
-        async with httpx.AsyncClient(timeout=20) as c:
-            r = await c.get(f"{_API}/v2/Product/GetVendorProductsBySubCategoryV2",
-                            params={"VendorId": vid, "show": ""}, headers=_HEADERS)
-        cats = r.json()
+        cats = await safe_get_json(
+            f"{_API}/v2/Product/GetVendorProductsBySubCategoryV2",
+            params={"VendorId": vid, "show": ""}, headers=_HEADERS,
+            allow_hosts=_ALLOW_HOSTS,
+        )
         if not isinstance(cats, list):
             cats = []
-    except Exception as exc:  # noqa: BLE001
+    except NetError as exc:
         return {"ok": False, "message": f"Couldn't read the menu ({type(exc).__name__})."}
     categories: list[dict[str, Any]] = []
     total = 0
@@ -119,12 +120,13 @@ async def foodmandu_search(args: dict[str, Any]) -> dict[str, Any]:
         "SortBy": 4, "VendorName": "",
     }
     try:
-        async with httpx.AsyncClient(timeout=20) as c:
-            r = await c.get(f"{_API}/Vendor/GetVendors1?{urlencode(params)}", headers=_HEADERS)
-        vendors = r.json()
+        vendors = await safe_get_json(
+            f"{_API}/Vendor/GetVendors1", params=params, headers=_HEADERS,
+            allow_hosts=_ALLOW_HOSTS,
+        )
         if not isinstance(vendors, list):
             vendors = []
-    except Exception as exc:  # noqa: BLE001
+    except NetError as exc:
         return {"ok": False, "message": f"Couldn't reach Foodmandu ({type(exc).__name__})."}
     out: list[dict[str, Any]] = []
     for v in vendors:

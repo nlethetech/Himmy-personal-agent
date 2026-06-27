@@ -148,6 +148,255 @@ def _compose_prompt(message: str, context: str | None) -> str:
     return message
 
 
+# --------------------------------------------------------------------------------------------
+# Trip export — a SANITIZED, shareable itinerary (markdown).
+#
+# The trip plan is grounded in real OSM places + live fares, but its prose fields (summary, the
+# per-hotel/eat "why", per-item tips, the tips list) are model-written WITH the user's profile in
+# context — so they can leak the user's name, email, or vault-derived phrasing ("since you love
+# Thakali, Alex…"). The export must read as a generic plan anyone could use, so we (1) collect a
+# denylist of personal tokens from the profile + the host email, (2) build the markdown ONLY from
+# the structured trip fields, and (3) scrub every free-text field through the sanitizer.
+# --------------------------------------------------------------------------------------------
+def _trip_personal_tokens(cfg: Any) -> list[str]:
+    """Personal strings to strip from a shared itinerary: the user's name(s), email, and every
+    saved vault value/person. Best-effort — a profile hiccup just yields fewer tokens."""
+    tokens: set[str] = set()
+    # Host account email (and its local-part), if Himmy knows it.
+    for env_key in ("HIMMY_APP_USER_EMAIL", "HIMMY_USER_EMAIL"):
+        em = (os.environ.get(env_key) or "").strip()
+        if em:
+            tokens.add(em)
+            tokens.add(em.split("@", 1)[0])
+    try:
+        from himmy_app import user_profile
+        prof = user_profile.load(cfg)
+    except Exception:  # noqa: BLE001 - personalization data is optional
+        prof = {}
+    # Name-like strings get split into their individual words too, so a planted full name also
+    # strips the bare first name ("Alex Morgan" → also "Alex", "Morgan"). We only do this for
+    # name fields, never arbitrary vault values, to avoid mangling common words.
+    def _add_name(s: str) -> None:
+        s = s.strip()
+        if not s:
+            return
+        tokens.add(s)
+        for word in re.split(r"\s+", s):
+            w = word.strip(".,'’\"-")
+            if len(w) >= 3 and not w.isdigit():
+                tokens.add(w)
+
+    # Capitalised words (likely names/places) harvested from a free-text field — so a name that
+    # only ever lived in the `about` paragraph (not a name-keyed vault field) still gets stripped.
+    # We only take Title-case words >= 3 chars and skip common sentence-leading words to avoid
+    # mangling ordinary prose. This is defence-in-depth; the planner no longer receives the
+    # name/free-text profile at all, but cached/legacy trips may still contain it.
+    _STOP = {"The", "This", "That", "They", "Their", "Them", "There", "Then", "These", "Those",
+             "And", "But", "For", "With", "From", "Into", "Your", "You", "When", "What", "Where",
+             "While", "Will", "Who", "Why", "How", "Are", "Was", "Were", "Has", "Have", "Had"}
+
+    def _add_freetext(s: str) -> None:
+        for word in re.findall(r"[A-Z][A-Za-z'’\-]{2,}", str(s or "")):
+            w = word.strip(".,'’\"-")
+            if len(w) >= 3 and w not in _STOP and not w.isdigit():
+                tokens.add(w)
+
+    for layer in ("user", "learned"):
+        lay = prof.get(layer) or {}
+        # Vault values (home address, names, emails, loyalty #s, …) and the people list.
+        for k, v in ((lay.get("details") or {}).items()):
+            s = str(v).strip()
+            if not s:
+                continue
+            if "name" in str(k).lower():
+                _add_name(s)        # name vault field → strip the full name AND each part
+            else:
+                tokens.add(s)       # other vault values → strip verbatim only
+        for person in (lay.get("people") or []):
+            # people entries look like "Name — relationship"; take the name half.
+            name = re.split(r"[—\-:(]", str(person), 1)[0].strip()
+            _add_name(name)
+        # Free-text fields: harvest capitalised tokens (names/places) the model may have echoed.
+        _add_freetext(lay.get("about"))
+        for section in ("projects", "topics", "preferences"):
+            for item in (lay.get(section) or []):
+                _add_freetext(item)
+    # Drop tokens too short/generic to safely strip (avoid mangling common words).
+    return sorted({t for t in tokens if len(t) >= 3}, key=len, reverse=True)
+
+
+def _sanitize_share_text(text: str, tokens: list[str]) -> str:
+    """Neutralise a free-text field for sharing: remove any personal token, then de-personalise
+    second-person phrasing so it reads as a generic plan rather than "your"/"you" copy."""
+    out = str(text or "")
+    if not out.strip():
+        return ""
+    for tok in tokens:  # longest-first (caller sorts) so we strip "Jane Doe" before "Jane"
+        if tok:
+            out = re.sub(re.escape(tok), "", out, flags=re.IGNORECASE)
+    # De-personalise leftover second-person phrasing ("for you", "you'll love", "your trip").
+    for pat, repl in (
+        (r"\bfor you\b", "for travellers"),
+        (r"\byou(?:'|’)ll\b", "you might"),
+        (r"\byou(?:'|’)ve\b", "you have"),
+        (r"\byour\b", "the"),
+        (r"\byours\b", "this"),
+    ):
+        out = re.sub(pat, repl, out, flags=re.IGNORECASE)
+    # Tidy artefacts left by removed tokens (",  ," / "  " / orphaned punctuation).
+    out = re.sub(r"\s*,\s*,", ",", out)
+    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"\s+([,.;:!?])", r"\1", out)        # space before punctuation
+    out = re.sub(r",\s*([.;:!?])", r"\1", out)         # orphaned comma before end punctuation
+    out = re.sub(r"^[\s,;:—\-]+", "", out)             # leading junk after a removed leading token
+    return out.strip()
+
+
+def _trip_export_markdown(trip: dict[str, Any], cfg: Any) -> tuple[str, str]:
+    """Render a sanitized, shareable itinerary (markdown) from a do.trip() result.
+
+    Returns (title, markdown). Sections: summary, budget, getting there (flight + bus), where to
+    stay (with booking links), day-by-day, where to eat, tips. Every prose field is scrubbed of the
+    user's name/email/vault phrasing so the output reads as a generic plan, not "<name>'s trip".
+    """
+    tokens = _trip_personal_tokens(cfg)
+
+    def clean(text: Any) -> str:
+        return _sanitize_share_text(str(text or ""), tokens)
+
+    dest = clean(trip.get("destination")) or "your destination"
+    days = int(trip.get("days") or 0)
+    style = str(trip.get("style") or "").strip()
+    title = f"{dest} — {days}-day trip" if days else f"{dest} trip"
+    if style:
+        title += f" ({style})"
+
+    out: list[str] = [f"# {title}", ""]
+    summary = clean(trip.get("summary"))
+    if summary:
+        out += [summary, ""]
+
+    # Budget --------------------------------------------------------------------------------
+    budget = trip.get("budget") or {}
+    if isinstance(budget, dict) and (budget.get("total_min") or budget.get("total_max")):
+        cur = str(budget.get("currency") or "NPR").strip()
+        lo, hi = budget.get("total_min"), budget.get("total_max")
+        per = " per person" if budget.get("per_person") else ""
+        out += ["## Budget", "", f"**{cur} {lo:,}–{hi:,}{per}**"
+                if isinstance(lo, int) and isinstance(hi, int) else f"**{cur} {lo}–{hi}{per}**", ""]
+        for row in (budget.get("breakdown") or []):
+            if not isinstance(row, dict):
+                continue
+            label = clean(row.get("label")) or "—"
+            rmin, rmax = row.get("min"), row.get("max")
+            note = clean(row.get("note"))
+            line = f"- {label}: {cur} {rmin:,}–{rmax:,}" if isinstance(rmin, int) and isinstance(rmax, int) \
+                else f"- {label}: {cur} {rmin}–{rmax}"
+            if note:
+                line += f" ({note})"
+            out.append(line)
+        out.append("")
+
+    # Getting there (flight + bus) ----------------------------------------------------------
+    gt, bus = trip.get("getting_there"), trip.get("by_bus")
+    if gt or bus:
+        out += ["## Getting there", ""]
+        if isinstance(gt, dict):
+            ch = gt.get("cheapest") or {}
+            fare = ch.get("fare_npr")
+            link = gt.get("booking_link") or ""
+            bit = f"- **Flight** ({clean(gt.get('from'))} → {clean(gt.get('to'))})"
+            if isinstance(fare, (int, float)):
+                bit += f": from NPR {int(fare):,} each way"
+            if link:
+                bit += f" — [book]({link})"
+            out.append(bit)
+        if isinstance(bus, dict):
+            bc = bus.get("cheapest") or {}
+            fare = bc.get("fare_npr")
+            link = bus.get("booking_link") or ""
+            bit = f"- **Bus** ({clean(bus.get('from'))} → {clean(bus.get('to'))})"
+            if isinstance(fare, (int, float)):
+                bit += f": from NPR {int(fare):,} each way"
+            if link:
+                bit += f" — [book]({link})"
+            out.append(bit)
+        out.append("")
+
+    # Where to stay -------------------------------------------------------------------------
+    hotels = trip.get("hotels") or []
+    if hotels:
+        out += ["## Where to stay", ""]
+        for h in hotels:
+            if not isinstance(h, dict):
+                continue
+            name = clean(h.get("name")) or "Hotel"
+            meta = " · ".join(p for p in (clean(h.get("type")), clean(h.get("area"))) if p)
+            link = h.get("book_link") or ""
+            head = f"- **{name}**" + (f" ({meta})" if meta else "")
+            if link:
+                head += f" — [book]({link})"
+            out.append(head)
+            why = clean(h.get("why"))
+            if why:
+                out.append(f"  - {why}")
+        out.append("")
+
+    # Day by day ----------------------------------------------------------------------------
+    itin = trip.get("itinerary") or []
+    if itin:
+        out += ["## Day by day", ""]
+        for d in itin:
+            if not isinstance(d, dict):
+                continue
+            day_no = d.get("day")
+            dtitle = clean(d.get("title"))
+            head = f"### Day {day_no}" if day_no else "### Day"
+            if dtitle:
+                head += f" — {dtitle}"
+            out += [head, ""]
+            for it in (d.get("items") or []):
+                if not isinstance(it, dict):
+                    continue
+                iname = clean(it.get("name")) or "—"
+                cat = clean(it.get("category"))
+                desc = clean(it.get("desc"))
+                tip = clean(it.get("tip"))
+                line = f"- **{iname}**" + (f" ({cat})" if cat else "")
+                if desc:
+                    line += f" — {desc}"
+                out.append(line)
+                if tip:
+                    out.append(f"  - Tip: {tip}")
+            out.append("")
+
+    # Where to eat --------------------------------------------------------------------------
+    eat = trip.get("eat") or []
+    if eat:
+        out += ["## Where to eat", ""]
+        for e in eat:
+            if not isinstance(e, dict):
+                continue
+            name = clean(e.get("name")) or "—"
+            cuisine = clean(e.get("cuisine"))
+            why = clean(e.get("why"))
+            line = f"- **{name}**" + (f" ({cuisine})" if cuisine else "")
+            if why:
+                line += f" — {why}"
+            out.append(line)
+        out.append("")
+
+    # Tips ----------------------------------------------------------------------------------
+    tips = [clean(t) for t in (trip.get("tips") or []) if clean(t)]
+    if tips:
+        out += ["## Tips", ""]
+        out += [f"- {t}" for t in tips]
+        out.append("")
+
+    out.append("_Shared from Himmy._")
+    return title, "\n".join(out).strip() + "\n"
+
+
 class CollectionRequest(BaseModel):
     name: str
 
@@ -240,6 +489,12 @@ class DoCartAddRequest(BaseModel):
 class DoCartQtyRequest(BaseModel):
     key: str
     qty: int
+
+
+class SuggestionApplyRequest(BaseModel):
+    # The pending vault-suggestion keys the user explicitly confirmed (the ONLY ones written
+    # into profile.user.details). Anything not listed stays pending; unknown keys are ignored.
+    keys: list[str] = []
 
 
 class PermissionsUpdate(BaseModel):
@@ -821,6 +1076,24 @@ def create_app() -> FastAPI:
         from himmy_app import user_profile
         return await user_profile.learn(cfg)
 
+    @app.get("/profile/suggestions")
+    async def profile_suggestions() -> dict[str, Any]:
+        """Gated vault auto-fill: the facts Himmy INFERRED (home airport, cuisines, budget) and is
+        offering for confirmation. These are candidates only — nothing here has touched the real
+        vault. Each item is {key, value, source, confidence: low|med|high}."""
+        from himmy_app import user_profile
+        return user_profile.get_suggestions(cfg)
+
+    @app.post("/profile/suggestions/apply")
+    async def profile_suggestions_apply(body: SuggestionApplyRequest) -> dict[str, Any]:
+        """Confirm a subset of suggested keys → write ONLY those into profile.user.details. This is
+        the single path by which an inferred fact (incl. the gated home-airport / budget) reaches
+        the vault, and only for keys the user explicitly confirmed. Validates input; unknown keys
+        are ignored; applied suggestions drop out of the pending list."""
+        from himmy_app import user_profile
+        keys = [str(k).strip() for k in (body.keys or []) if str(k).strip()]
+        return user_profile.apply_suggestions(keys, cfg)
+
     @app.post("/library/dedupe")
     async def library_dedupe() -> dict[str, Any]:
         return lib.dedupe()
@@ -1083,10 +1356,45 @@ def create_app() -> FastAPI:
         # Live Buddha Air tickets (times + fares) for a route + date, so the user can SEE flights.
         return await do.flights(origin, to, date)
 
+    @app.get("/do/buses")
+    async def do_buses(origin: str = Query("Kathmandu", alias="from"), to: str = "", date: str = "") -> dict[str, Any]:
+        # Live bussewa bus tickets (times + fares + seats) for a route + date.
+        return await do.buses(origin, to, date)
+
+    @app.get("/do/bus-cities")
+    async def do_bus_cities() -> dict[str, Any]:
+        # The full list of cities bussewa serves — powers the Buses search autocomplete.
+        from himmy_app.connectors.bussewa import _cities
+        try:
+            return {"ok": True, "cities": _cities()}
+        except Exception:  # noqa: BLE001
+            return {"ok": True, "cities": []}
+
     @app.get("/do/trip")
     async def do_trip(dest: str, days: int = 2, style: str = "comfort") -> dict[str, Any]:
         # A premium trip plan — budget, hotels, where-to-eat + a day-by-day roadmap (grounded in OSM).
         return await do.trip(dest, days, style)
+
+    @app.get("/do/trip/export")
+    async def do_trip_export(dest: str, days: int = 2, style: str = "comfort",
+                             fmt: str = "md") -> dict[str, Any]:
+        """A SANITIZED, shareable itinerary (markdown) built from the same do.trip() plan.
+
+        SECURITY: the prose fields are model-written with the user's profile in context, so the
+        export scrubs the user's name, email, and any vault-derived phrasing — it must read as a
+        generic plan, not "<name>'s trip". Only ``fmt=md`` is supported today.
+        """
+        dest = (dest or "").strip()
+        if not dest:
+            return {"ok": False, "message": "Where would you like to go?"}
+        if (fmt or "md").strip().lower() != "md":
+            return {"ok": False, "message": "Only markdown export (fmt=md) is supported."}
+        trip = await do.trip(dest, days, style)
+        if not trip.get("ok"):
+            # Pass through the concierge's friendly reason (no plan to export).
+            return {"ok": False, "message": trip.get("message") or "Couldn't build a plan to export."}
+        title, markdown = _trip_export_markdown(trip, cfg)
+        return {"ok": True, "title": title, "markdown": markdown}
 
     # the tray — a Himmy-side cart the user checks out themselves (opening the place's page)
     @app.get("/do/cart")

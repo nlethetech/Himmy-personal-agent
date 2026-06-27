@@ -10,8 +10,8 @@ import {
   Gauge, Coins, Zap, CalendarClock, Bell, Play, Flag,
   Star, BellOff, Users, TrendingUp, Cpu, Sparkle,
   Info, StickyNote, Highlighter,
-  ShoppingBag, Plane, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart, ArrowRight, ConciergeBell,
-  Route, Lightbulb, BedDouble, Wallet, Send,
+  ShoppingBag, Plane, Bus, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart, ArrowRight, ConciergeBell,
+  Route, Lightbulb, BedDouble, Wallet, Send, Armchair, ArrowRightLeft, Share2, Printer,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -25,9 +25,10 @@ import {
   type RecThread, type TaskExtras, type Subtask,
   type UserProfile, type ProfileLayer,
   type DoBoard, type DoPick, type DoRestaurant, type DoMenuItem,
-  type DoCartView, type DoCartAdd, type DoFlights, type DoFlight,
+  type DoCartView, type DoCartAdd, type DoFlights, type DoFlight, type DoBuses, type DoBus,
   type PermsCatalog, type PermSurface, type ActivityItem,
   type DoTrip, type DoTripDay, type DoTripItem, type DoTripHotel, type DoTripEat,
+  type DoTripTransportCompare,
 } from "./lib/api";
 import { apa, mla, bibtex } from "./lib/cite";
 import Reader from "./Reader";
@@ -377,10 +378,30 @@ const DO_RAILS: { key: DoRailKey; label: string; icon: LucideIcon; action: strin
   { key: "flights", label: "Fly", icon: Plane, action: "See flights", verb: "find a Buddha Air flight" },
 ];
 const DO_CHIPS = ["Order momos", "Find a gift under Rs 2000", "Best headphone deals", "Newari food near me"];
-const SEARCH_MODES: { key: "food" | "shop" | "flights" | "trips"; label: string; icon: LucideIcon }[] = [
+// Tappable examples for the Flights / Buses / Trips modes, which otherwise show a dead screen
+// until you type. Each chip drives the SAME state the real inputs do (setFlightRoute / setBusRoute
+// / setTripOpen) so a tap behaves exactly like filling the fields and hitting Search/Plan.
+const DO_FLIGHT_EXAMPLES: { label: string; from: string; to: string }[] = [
+  { label: "KTM → PKR", from: "KTM", to: "PKR" },
+  { label: "KTM → BWA", from: "KTM", to: "BWA" },
+  { label: "PKR → KTM", from: "PKR", to: "KTM" },
+];
+const DO_BUS_EXAMPLES: { label: string; from: string; to: string }[] = [
+  { label: "Kathmandu → Pokhara", from: "Kathmandu", to: "Pokhara" },
+  { label: "Kathmandu → Chitwan", from: "Kathmandu", to: "Chitwan" },
+  { label: "Pokhara → Kathmandu", from: "Pokhara", to: "Kathmandu" },
+];
+const DO_TRIP_EXAMPLES: { label: string; dest: string; days: number }[] = [
+  { label: "Pokhara · 2 days", dest: "Pokhara", days: 2 },
+  { label: "Chitwan · 3 days", dest: "Chitwan", days: 3 },
+  { label: "Lumbini · 2 days", dest: "Lumbini", days: 2 },
+];
+type SearchKind = "food" | "shop" | "flights" | "buses" | "trips";
+const SEARCH_MODES: { key: SearchKind; label: string; icon: LucideIcon }[] = [
   { key: "food", label: "Food", icon: UtensilsCrossed },
   { key: "shop", label: "Products", icon: ShoppingBag },
   { key: "flights", label: "Flights", icon: Plane },
+  { key: "buses", label: "Buses", icon: Bus },
   { key: "trips", label: "Trips", icon: Route },
 ];
 
@@ -393,6 +414,8 @@ function DoTab() {
   const [board, setBoard] = useState<DoBoard | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // The board API THREW (network/backend down) — distinct from an ok-but-empty board.
+  const [boardError, setBoardError] = useState(false);
   const [, tick] = useState(0);
   // tray
   const [cart, setCart] = useState<DoCartView | null>(null);
@@ -405,6 +428,13 @@ function DoTab() {
   const [flFrom, setFlFrom] = useState("KTM");
   const [flTo, setFlTo] = useState("PKR");
   const [flDate, setFlDate] = useState(defaultDate);
+  // bus tickets modal + bus search fields
+  const busDefaultDate = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
+  const [busRoute, setBusRoute] = useState<{ from: string; to: string; date: string } | null>(null);
+  const [busFrom, setBusFrom] = useState("Kathmandu");
+  const [busTo, setBusTo] = useState("Pokhara");
+  const [busDate, setBusDate] = useState(busDefaultDate);
+  const [busCities, setBusCities] = useState<string[]>([]);
   // trip roadmap
   const [tripDest, setTripDest] = useState("");
   const [tripDays, setTripDays] = useState(2);
@@ -412,9 +442,11 @@ function DoTab() {
   const [tripOpen, setTripOpen] = useState<{ dest: string; days: number; style: string } | null>(null);
   // inline search
   const [searchQ, setSearchQ] = useState("");
-  const [searchKind, setSearchKind] = useState<"food" | "shop" | "flights" | "trips">("food");
+  const [searchKind, setSearchKind] = useState<SearchKind>("food");
   const [results, setResults] = useState<DoPick[] | null>(null);
   const [searching, setSearching] = useState(false);
+  // The search call THREW — show a retry, not the "0 results" empty copy.
+  const [searchError, setSearchError] = useState(false);
   const openFlight = (p: DoPick) => {
     const [f, t] = (p.key || "").split("-");
     setFlightRoute({ from: f || "KTM", to: t || "PKR", date: p.date || defaultDate });
@@ -424,8 +456,14 @@ function DoTab() {
     try {
       const b = force ? await api.do.refresh() : await api.do.board();
       setBoard(b);
+      setBoardError(false);
       return b;
-    } catch { return null; }
+    } catch {
+      // jget throws on a non-ok / unreachable backend — surface a real error state with Retry
+      // rather than the friendly "no picks" copy (which is only for an ok-but-empty board).
+      setBoardError(true);
+      return null;
+    }
   };
   const loadCart = async () => { try { setCart(await api.do.cart.view()); } catch { /* warming */ } };
 
@@ -467,19 +505,39 @@ function DoTab() {
     } catch { /* ignore */ }
   };
 
-  const runSearch = async (q = searchQ, kind: "food" | "shop" | "flights" | "trips" = searchKind) => {
+  const runSearch = async (q = searchQ, kind: SearchKind = searchKind) => {
     const term = q.trim();
-    if (!term || kind === "flights" || kind === "trips") { setResults(null); return; }
-    setSearching(true);
+    if (!term || kind === "flights" || kind === "buses" || kind === "trips") { setResults(null); return; }
+    setSearching(true); setSearchError(false);
     try { const r = await api.do.search(term, kind); setResults(r.results || []); }
-    catch { setResults([]); } finally { setSearching(false); }
+    // A thrown call → error state (with Retry), NOT a friendly "0 results" — those mean
+    // the search ran fine but matched nothing.
+    catch { setResults([]); setSearchError(true); } finally { setSearching(false); }
   };
+  // Load the bussewa city list once the user first opens the Buses tab (powers autocomplete).
+  useEffect(() => {
+    if (searchKind === "buses" && busCities.length === 0) {
+      api.do.busCities().then((r) => setBusCities(r.cities || [])).catch(() => { /* autocomplete just won't suggest */ });
+    }
+  }, [searchKind, busCities.length]);
 
   const empty = board && !board.food.length && !board.deals.length && !board.foryou.length && !board.flights.length;
+  // The board is showing, but the AI re-rank ("For You" tailoring) is still running in the
+  // background — show a subtle pill + fade the personalized cards in instead of flickering.
+  const personalizing = !!board && !!board.stale && !empty;
   const cartCount = cart?.count || 0;
 
   return (
     <div className="h-full flex flex-col">
+      {/* Concierge-scoped animations: a gentle fade-in for personalized cards (positions are NOT
+          animated — pick.key is a stable key so React reuses nodes and nothing jumps) + a soft
+          pulse on the "Tailoring this for you…" pill while the AI re-rank is pending. */}
+      <style>{`
+        @keyframes do-fade-in { from { opacity: 0; } to { opacity: 1; } }
+        .do-personalizing { animation: do-fade-in 420ms ease-out; }
+        @keyframes do-pill-pulse { 0%,100% { opacity: 0.7; } 50% { opacity: 1; } }
+        .do-shimmer-pill { animation: do-pill-pulse 1.6s ease-in-out infinite; }
+      `}</style>
       {/* header */}
       <div className="relative shrink-0 px-9 pt-8 pb-4 mx-auto w-full max-w-[1180px]">
         <div className="flex items-start justify-between gap-4">
@@ -538,6 +596,24 @@ function DoTab() {
                 <Search size={13} /> Search
               </button>
             </div>
+          ) : searchKind === "buses" ? (
+            <div className="flex-1 flex items-center gap-2">
+              <Bus size={15} className="text-mac-ink3 shrink-0" />
+              <input value={busFrom} onChange={(e) => setBusFrom(e.target.value)} list="bus-cities"
+                onKeyDown={(e) => { if (e.key === "Enter" && busFrom.trim() && busTo.trim()) setBusRoute({ from: busFrom.trim(), to: busTo.trim(), date: busDate }); }}
+                className="w-28 bg-transparent text-[13px] font-medium text-mac-ink placeholder:text-mac-ink3 outline-none" placeholder="From" />
+              <ArrowRight size={13} className="text-mac-ink3 shrink-0" />
+              <input value={busTo} onChange={(e) => setBusTo(e.target.value)} list="bus-cities"
+                onKeyDown={(e) => { if (e.key === "Enter" && busFrom.trim() && busTo.trim()) setBusRoute({ from: busFrom.trim(), to: busTo.trim(), date: busDate }); }}
+                className="w-28 bg-transparent text-[13px] font-medium text-mac-ink placeholder:text-mac-ink3 outline-none" placeholder="To" />
+              <input type="date" value={busDate} onChange={(e) => setBusDate(e.target.value)}
+                className="bg-transparent text-[12.5px] text-mac-ink2 outline-none [color-scheme:dark]" />
+              <div className="flex-1" />
+              <button onClick={() => busFrom.trim() && busTo.trim() && setBusRoute({ from: busFrom.trim(), to: busTo.trim(), date: busDate })}
+                className="h-8 px-4 rounded-[9px] text-[12px] font-semibold text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 shadow-[0_2px_8px_-2px_rgba(10,132,255,0.5)] hover:brightness-[1.06] transition-all inline-flex items-center gap-1.5">
+                <Search size={13} /> Search
+              </button>
+            </div>
           ) : searchKind === "trips" ? (
             <div className="flex-1 flex items-center gap-2">
               <Route size={15} className="text-mac-ink3 shrink-0" />
@@ -576,15 +652,51 @@ function DoTab() {
             </div>
           )}
         </div>
-        {/* quick asks */}
+        {/* quick asks — mode-aware. Flights / Buses / Trips otherwise sit on a dead screen until
+            you type, so we offer tappable examples that drive the real state setters. */}
         {!results && (
           <div className="flex flex-wrap items-center gap-2 mt-3.5">
-            {DO_CHIPS.map((c) => (
-              <button key={c} onClick={() => ask(c)}
-                className="h-8 px-3 rounded-full text-[11.5px] bg-white/[0.04] ring-1 ring-inset ring-white/10 text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.08] transition-colors">
-                {c}
-              </button>
-            ))}
+            {searchKind === "flights" ? (
+              <>
+                <span className="text-[11px] text-mac-ink3 mr-0.5">Try</span>
+                {DO_FLIGHT_EXAMPLES.map((ex) => (
+                  <button key={ex.label}
+                    onClick={() => { setFlFrom(ex.from); setFlTo(ex.to); setFlightRoute({ from: ex.from, to: ex.to, date: flDate }); }}
+                    className="h-8 px-3 rounded-full text-[11.5px] inline-flex items-center gap-1.5 bg-white/[0.04] ring-1 ring-inset ring-white/10 text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.08] transition-colors">
+                    <Plane size={11} className="text-mac-ink3" /> {ex.label}
+                  </button>
+                ))}
+              </>
+            ) : searchKind === "buses" ? (
+              <>
+                <span className="text-[11px] text-mac-ink3 mr-0.5">Try</span>
+                {DO_BUS_EXAMPLES.map((ex) => (
+                  <button key={ex.label}
+                    onClick={() => { setBusFrom(ex.from); setBusTo(ex.to); setBusRoute({ from: ex.from, to: ex.to, date: busDate }); }}
+                    className="h-8 px-3 rounded-full text-[11.5px] inline-flex items-center gap-1.5 bg-white/[0.04] ring-1 ring-inset ring-white/10 text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.08] transition-colors">
+                    <Bus size={11} className="text-mac-ink3" /> {ex.label}
+                  </button>
+                ))}
+              </>
+            ) : searchKind === "trips" ? (
+              <>
+                <span className="text-[11px] text-mac-ink3 mr-0.5">Try</span>
+                {DO_TRIP_EXAMPLES.map((ex) => (
+                  <button key={ex.label}
+                    onClick={() => { setTripDest(ex.dest); setTripDays(ex.days); setTripOpen({ dest: ex.dest, days: ex.days, style: tripStyle }); }}
+                    className="h-8 px-3 rounded-full text-[11.5px] inline-flex items-center gap-1.5 bg-white/[0.04] ring-1 ring-inset ring-white/10 text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.08] transition-colors">
+                    <Route size={11} className="text-mac-ink3" /> {ex.label}
+                  </button>
+                ))}
+              </>
+            ) : (
+              DO_CHIPS.map((c) => (
+                <button key={c} onClick={() => ask(c)}
+                  className="h-8 px-3 rounded-full text-[11.5px] bg-white/[0.04] ring-1 ring-inset ring-white/10 text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.08] transition-colors">
+                  {c}
+                </button>
+              ))
+            )}
           </div>
         )}
       </div>
@@ -601,6 +713,13 @@ function DoTab() {
               </div>
               {searching ? (
                 <div className="h-40 grid place-items-center text-mac-ink3"><Loader2 size={18} className="animate-spin" /></div>
+              ) : searchError ? (
+                <DoErrorState message="Couldn't run that search — the backend didn't respond."
+                  onRetry={() => runSearch(searchQ, searchKind)} />
+              ) : results.length === 0 ? (
+                <div className="h-40 grid place-items-center text-center">
+                  <p className="text-[13px] text-mac-ink2">Nothing matched "{searchQ}" — try a different word.</p>
+                </div>
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
                   {results.map((p) => (
@@ -614,6 +733,9 @@ function DoTab() {
             </section>
           ) : loading && !board ? (
             <div className="h-64 grid place-items-center text-mac-ink3"><Loader2 size={20} className="animate-spin" /></div>
+          ) : boardError && !board ? (
+            <DoErrorState message="Couldn't reach Himmy's concierge — the backend may still be starting up."
+              onRetry={() => { setLoading(true); load().finally(() => setLoading(false)); }} className="h-64" />
           ) : empty ? (
             <div className="h-64 grid place-items-center text-center">
               <div>
@@ -622,7 +744,15 @@ function DoTab() {
               </div>
             </div>
           ) : (
-            DO_RAILS.map((rail) => {
+            <div className={personalizing ? "do-personalizing" : ""}>
+            {personalizing && (
+              <div className="mt-2 mb-1 flex items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 h-7 px-3 rounded-full text-[11.5px] font-medium text-mac-ink2 bg-white/[0.05] ring-1 ring-inset ring-white/10 do-shimmer-pill">
+                  <Sparkles size={12} className="text-mac-accentHi" /> Tailoring this for you…
+                </span>
+              </div>
+            )}
+            {DO_RAILS.map((rail) => {
               const picks = board?.[rail.key] || [];
               if (!picks.length) return null;
               const Ico = rail.icon;
@@ -645,7 +775,8 @@ function DoTab() {
                   </div>
                 </section>
               );
-            })
+            })}
+            </div>
           )}
         </div>
       </div>
@@ -657,13 +788,39 @@ function DoTab() {
       {flightRoute && (
         <FlightModal route={flightRoute} onClose={() => setFlightRoute(null)} />
       )}
+      {busRoute && (
+        <BusModal route={busRoute} onClose={() => setBusRoute(null)} />
+      )}
+      <datalist id="bus-cities">{busCities.map((c) => <option key={c} value={c} />)}</datalist>
       {tripOpen && (
         <TripModal dest={tripOpen.dest} days={tripOpen.days} style={tripOpen.style} onClose={() => setTripOpen(null)}
-          onFlights={(from, to) => { setTripOpen(null); setFlightRoute({ from, to, date: defaultDate }); }} />
+          onFlights={(from, to) => { setTripOpen(null); setFlightRoute({ from, to, date: defaultDate }); }}
+          onBuses={(from, to) => { setTripOpen(null); setBusRoute({ from, to, date: busDefaultDate }); }} />
       )}
       {trayOpen && (
         <DoTray cart={cart} onClose={() => setTrayOpen(false)} onChange={setCart} />
       )}
+    </div>
+  );
+}
+
+// A real error state (the api call THREW) with a Retry — distinct from a friendly "nothing
+// here yet" empty state. Used by the board, the inline search, and any place a fetch can fail.
+function DoErrorState({ message, onRetry, className = "h-40" }: {
+  message: string; onRetry: () => void; className?: string;
+}) {
+  return (
+    <div className={`${className} grid place-items-center text-center`}>
+      <div>
+        <div className="mx-auto mb-3 h-9 w-9 grid place-items-center rounded-full bg-red-500/10 ring-1 ring-inset ring-red-500/25">
+          <Info size={16} className="text-red-400" />
+        </div>
+        <p className="text-[13px] text-mac-ink2 max-w-[40ch] mx-auto leading-snug">{message}</p>
+        <button onClick={onRetry}
+          className="mt-3.5 h-8 px-4 rounded-[9px] text-[12px] font-medium inline-flex items-center gap-1.5 bg-white/[0.06] ring-1 ring-inset ring-white/12 text-mac-ink hover:bg-white/[0.1] transition-colors">
+          <RefreshCw size={13} /> Retry
+        </button>
+      </div>
     </div>
   );
 }
@@ -1024,11 +1181,68 @@ function TripEatRow({ e }: { e: DoTripEat }) {
   );
 }
 
-function TripModal({ dest, days, style, onClose, onFlights }: {
-  dest: string; days: number; style: string; onClose: () => void; onFlights: (from: string, to: string) => void;
+// A compact, premium side-by-side of flight vs bus (fare + duration) with Himmy's verdict line.
+// The flight duration is door-to-door ESTIMATE (air time + airport buffer), so it's marked "est.";
+// the bus journey_hours is real. Derived deterministically on the backend (no extra calls).
+function TripTransportCompare({ cmp }: { cmp: DoTripTransportCompare }) {
+  const flight = cmp.options.find((o) => o.mode === "flight");
+  const bus = cmp.options.find((o) => o.mode === "bus");
+  if (!flight || !bus) return null;
+  const opt = (o: typeof flight, isWinner: boolean) => {
+    const Ico = o.mode === "flight" ? Plane : Bus;
+    return (
+      <div className={`flex-1 min-w-0 p-3 rounded-xl border ${
+        isWinner ? "border-mac-accentHi/35 bg-[rgba(10,132,255,0.07)]" : "border-mac-stroke bg-mac-fill"}`}>
+        <div className="flex items-center gap-2 mb-2">
+          <div className={`h-7 w-7 shrink-0 grid place-items-center rounded-lg ${o.mode === "flight" ? "bg-[rgba(10,132,255,0.12)]" : "bg-white/[0.06]"}`}>
+            <Ico size={13} className={o.mode === "flight" ? "text-mac-accentHi" : "text-mac-ink2"} />
+          </div>
+          <div className="text-[12px] font-medium text-mac-ink truncate">{o.label}</div>
+          {isWinner && <span className="ml-auto shrink-0 text-[9.5px] font-semibold uppercase tracking-[0.1em] text-mac-accentHi px-1.5 py-0.5 rounded-md bg-[rgba(10,132,255,0.12)]">Pick</span>}
+        </div>
+        <div className="flex items-end justify-between gap-2">
+          <div>
+            <div className="text-[16px] font-semibold text-mac-ink tracking-[-0.01em] tnum">Rs {Math.round(o.fare_npr).toLocaleString()}</div>
+            {o.depart && <div className="text-[10px] text-mac-ink3 mt-0.5">departs {o.depart}</div>}
+          </div>
+          <div className="text-right shrink-0">
+            <div className="text-[12.5px] text-mac-ink2 tnum inline-flex items-center gap-1">
+              <Clock size={10} className="text-mac-ink3" />{o.duration_label}
+            </div>
+            {o.duration_is_estimate && <div className="text-[9.5px] text-mac-ink3 italic">est.</div>}
+          </div>
+        </div>
+      </div>
+    );
+  };
+  return (
+    <div className="mb-5">
+      <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-mac-ink2 mb-2.5">
+        <ArrowRightLeft size={12} className="text-mac-accentHi" /> Fly vs bus
+      </div>
+      <div className="flex items-stretch gap-2.5">
+        {opt(flight, cmp.verdict.winner === "flight")}
+        {opt(bus, cmp.verdict.winner === "bus")}
+      </div>
+      <div className="mt-2.5 flex items-start gap-2 p-2.5 rounded-xl border border-mac-stroke bg-mac-fill">
+        <Sparkles size={13} className="text-mac-accentHi shrink-0 mt-0.5" />
+        <div className="min-w-0">
+          <div className="text-[12px] text-mac-ink leading-snug">{cmp.verdict.reason}</div>
+          {cmp.verdict.time_note && <div className="text-[11px] text-mac-ink3 leading-snug mt-0.5">{cmp.verdict.time_note}</div>}
+        </div>
+      </div>
+      <p className="text-[10px] text-mac-ink3/80 italic mt-1.5 px-0.5">{cmp.disclaimer}</p>
+    </div>
+  );
+}
+
+function TripModal({ dest, days, style, onClose, onFlights, onBuses }: {
+  dest: string; days: number; style: string; onClose: () => void;
+  onFlights: (from: string, to: string) => void; onBuses: (from: string, to: string) => void;
 }) {
   const [data, setData] = useState<DoTrip | null>(null);
   const [loading, setLoading] = useState(true);
+  const [shareOpen, setShareOpen] = useState(false);
   useEffect(() => {
     let alive = true; setLoading(true);
     api.do.trip(dest, days, style)
@@ -1038,6 +1252,7 @@ function TripModal({ dest, days, style, onClose, onFlights }: {
     return () => { alive = false; };
   }, [dest, days, style]);
   const gt = data?.getting_there;
+  const bb = data?.by_bus;
   const cur = data?.budget?.currency || "NPR";
 
   return (
@@ -1074,7 +1289,7 @@ function TripModal({ dest, days, style, onClose, onFlights }: {
                 <TripBudget budget={data.budget} />
               )}
               {gt && (
-                <div className="mb-5 flex items-center gap-3 p-3 rounded-xl border border-mac-accentHi/25 bg-[rgba(10,132,255,0.06)]">
+                <div className={`${bb ? "mb-2.5" : "mb-5"} flex items-center gap-3 p-3 rounded-xl border border-mac-accentHi/25 bg-[rgba(10,132,255,0.06)]`}>
                   <div className="h-8 w-8 shrink-0 grid place-items-center rounded-lg bg-[rgba(10,132,255,0.12)]"><Plane size={15} className="text-mac-accentHi" /></div>
                   <div className="flex-1 min-w-0">
                     <div className="text-[12.5px] text-mac-ink font-medium">Getting there · {gt.from} → {gt.to}</div>
@@ -1084,6 +1299,19 @@ function TripModal({ dest, days, style, onClose, onFlights }: {
                     className="h-8 px-3 shrink-0 rounded-[9px] text-[12px] font-medium bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">See flights</button>
                 </div>
               )}
+              {bb && (
+                <div className="mb-5 flex items-center gap-3 p-3 rounded-xl border border-mac-stroke bg-mac-fill">
+                  <div className="h-8 w-8 shrink-0 grid place-items-center rounded-lg bg-white/[0.06]"><Bus size={15} className="text-mac-ink2" /></div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[12.5px] text-mac-ink font-medium">{gt ? "Or by bus" : "Getting there by bus"} · {bb.from} → {bb.to}{bb.via ? ` (for ${bb.via.for})` : ""}{bb.count ? ` · ${bb.count} buses` : ""}</div>
+                    {bb.cheapest && <div className="text-[11.5px] text-mac-ink3">{bb.cheapest.operator} · {bb.cheapest.depart} · from Rs {Math.round(bb.cheapest.fare_npr).toLocaleString()}{bb.cheapest.bus_type ? ` · ${bb.cheapest.bus_type}` : ""}</div>}
+                    {bb.via?.note && <div className="text-[10.5px] text-mac-ink3/80 italic mt-0.5">{bb.via.note}</div>}
+                  </div>
+                  <button onClick={() => onBuses(bb.from, bb.to)}
+                    className="h-8 px-3 shrink-0 rounded-[9px] text-[12px] font-medium bg-white/[0.08] text-mac-ink hover:bg-white/[0.14] transition-colors">See buses</button>
+                </div>
+              )}
+              {data.transport_compare && <TripTransportCompare cmp={data.transport_compare} />}
               {data.hotels && data.hotels.length > 0 && (
                 <TripSection icon={BedDouble} label="Where to stay">
                   <div className="space-y-2">{data.hotels.map((h, i) => <TripHotelRow key={i} h={h} />)}</div>
@@ -1110,11 +1338,120 @@ function TripModal({ dest, days, style, onClose, onFlights }: {
         </div>
         {/* footer */}
         <div className="shrink-0 flex items-center justify-between gap-3 px-5 py-3 border-t border-mac-stroke">
-          <span className="text-[11px] text-mac-ink3">Grounded in real local spots · personalised by Himmy</span>
-          <button onClick={() => { onClose(); ask(`Tweak my ${dest} trip plan`); }}
-            className="h-9 px-4 rounded-[10px] text-[12.5px] font-medium bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors inline-flex items-center gap-1.5">
-            <MessageSquare size={14} /> Ask Himmy to tweak
+          <span className="text-[11px] text-mac-ink3 truncate">Grounded in real local spots · personalised by Himmy</span>
+          <div className="flex items-center gap-2 shrink-0">
+            <button onClick={() => setShareOpen(true)} disabled={!data}
+              className="h-9 px-4 rounded-[10px] text-[12.5px] font-medium bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors inline-flex items-center gap-1.5 disabled:opacity-40 disabled:pointer-events-none">
+              <Share2 size={14} /> Share
+            </button>
+            <button onClick={() => { onClose(); ask(`Tweak my ${dest} trip plan`); }}
+              className="h-9 px-4 rounded-[10px] text-[12.5px] font-medium bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors inline-flex items-center gap-1.5">
+              <MessageSquare size={14} /> Ask Himmy to tweak
+            </button>
+          </div>
+        </div>
+      </div>
+      {shareOpen && (
+        <TripShareSheet dest={dest} days={days} style={style} fallbackTitle={dest} onClose={() => setShareOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+// Share / export a trip as a SANITIZED shareable itinerary. The markdown comes from the backend
+// (/do/trip/export) which strips the user's name/email and any profile-/vault-derived phrasing, so
+// what leaves the app reads as a generic plan. Offers copy-to-clipboard + save-to-file + print/PDF
+// (the print path uses Electron's Chromium renderer → "Save as PDF" in the native dialog).
+function TripShareSheet({ dest, days, style, fallbackTitle, onClose }: {
+  dest: string; days: number; style: string; fallbackTitle: string; onClose: () => void;
+}) {
+  const [md, setMd] = useState<string | null>(null);
+  const [title, setTitle] = useState(fallbackTitle);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const fetchExport = () => {
+    setLoading(true); setError(false);
+    api.do.tripExport(dest, days, style)
+      .then((r) => {
+        if (r.ok && typeof r.markdown === "string") { setMd(r.markdown); if (r.title) setTitle(r.title); }
+        else setError(true);
+      })
+      .catch(() => setError(true))
+      .finally(() => setLoading(false));
+  };
+  useEffect(fetchExport, [dest, days, style]);
+
+  const copy = () => {
+    if (!md) return;
+    navigator.clipboard.writeText(md);
+    setCopied(true); setTimeout(() => setCopied(false), 1500);
+  };
+  const save = () => {
+    if (!md) return;
+    const blob = new Blob([md], { type: "text/markdown" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${title.replace(/[^\w\- ]+/g, "").trim() || "trip"}.md`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+  // Save / print to PDF: render the sanitized markdown into an isolated print window and invoke the
+  // native print dialog (macOS → "Save as PDF"). We render the SAME sanitized markdown, not the
+  // on-screen modal, so nothing personal can leak into the export.
+  const printPdf = () => {
+    if (!md) return;
+    const w = window.open("", "_blank", "width=720,height=900");
+    if (!w) return;
+    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>
+      <style>
+        @page { margin: 18mm; }
+        body { font: 13px/1.6 -apple-system, "SF Pro Text", system-ui, sans-serif; color: #1a1a1a; max-width: 680px; margin: 0 auto; padding: 8px; }
+        pre { white-space: pre-wrap; word-wrap: break-word; font: inherit; }
+        h1 { font-size: 22px; margin: 0 0 12px; }
+      </style></head><body><pre>${esc(md)}</pre></body></html>`);
+    w.document.close();
+    w.focus();
+    // Let layout settle, then open the print/PDF dialog.
+    setTimeout(() => { try { w.print(); } catch { /* user closed it */ } }, 250);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-black/45 backdrop-blur-sm" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()}
+        className="w-[600px] max-w-[calc(100%-2rem)] max-h-[80vh] flex flex-col rounded-2xl bg-[rgba(30,31,37,0.98)] backdrop-blur-xl border border-mac-strokeHi shadow-pop overflow-hidden">
+        <div className="relative shrink-0 px-5 pt-5 pb-4 border-b border-mac-stroke">
+          <button onClick={onClose} className="absolute top-3 right-3 h-7 w-7 grid place-items-center rounded-full bg-mac-fillHi text-mac-ink3 hover:text-mac-ink transition-colors"><X size={15} /></button>
+          <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-mac-accentHi mb-2"><Share2 size={12} /> Share trip</div>
+          <h2 className="font-display text-[19px] font-semibold text-white tracking-[-0.015em]">{title}</h2>
+          <p className="text-[11.5px] text-mac-ink3 mt-1">A clean, shareable plan — no personal details.</p>
+        </div>
+        <div className="flex-1 min-h-0 overflow-y-auto p-4">
+          {loading ? (
+            <div className="h-40 grid place-items-center text-mac-ink3"><Loader2 size={18} className="animate-spin" /></div>
+          ) : error ? (
+            <DoErrorState message="Couldn't build the shareable plan just now." onRetry={fetchExport} />
+          ) : (
+            <pre className="text-[12px] leading-relaxed text-mac-ink2 whitespace-pre-wrap font-mono bg-black/20 ring-1 ring-inset ring-white/[0.06] rounded-xl p-3.5">{md}</pre>
+          )}
+        </div>
+        <div className="shrink-0 flex items-center justify-between gap-2 px-5 py-3 border-t border-mac-stroke">
+          <button onClick={copy} disabled={!md}
+            className="h-9 px-4 rounded-[10px] text-[12.5px] font-medium bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors inline-flex items-center gap-1.5 disabled:opacity-40 disabled:pointer-events-none">
+            {copied ? <Check size={14} className="text-mac-green" /> : <Copy size={14} />} {copied ? "Copied" : "Copy markdown"}
           </button>
+          <div className="flex items-center gap-2">
+            <button onClick={save} disabled={!md}
+              className="h-9 px-4 rounded-[10px] text-[12.5px] font-medium bg-mac-fill border border-mac-stroke text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors inline-flex items-center gap-1.5 disabled:opacity-40 disabled:pointer-events-none">
+              <FileDown size={14} /> Save .md
+            </button>
+            <button onClick={printPdf} disabled={!md}
+              className="h-9 px-4 rounded-[10px] text-[12.5px] font-semibold text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 hover:brightness-[1.06] transition-all inline-flex items-center gap-1.5 disabled:opacity-40 disabled:pointer-events-none">
+              <Printer size={14} /> Save / print PDF
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -1203,6 +1540,97 @@ function FlightRow({ f, best, bookLink }: { f: DoFlight; best: boolean; bookLink
       </div>
       <div className="text-right shrink-0">
         <div className="text-[15px] font-semibold text-mac-ink tracking-[-0.01em]">Rs {Math.round(f.fare_npr).toLocaleString()}</div>
+      </div>
+      <a href={bookLink || "#"} target="_blank" rel="noreferrer"
+        className="h-8 px-3.5 shrink-0 rounded-[9px] text-[12px] font-semibold text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 hover:brightness-[1.06] transition-all inline-flex items-center gap-1.5">
+        Book <ArrowUpRight size={12} strokeWidth={2.5} />
+      </a>
+    </div>
+  );
+}
+
+function BusModal({ route, onClose }: { route: { from: string; to: string; date: string }; onClose: () => void }) {
+  const [data, setData] = useState<DoBuses | null>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true; setLoading(true);
+    api.do.buses(route.from, route.to, route.date)
+      .then((d) => { if (alive) setData(d); })
+      .catch(() => { if (alive) setData(null); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [route]);
+
+  const buses = data?.buses || [];
+  const dateLabel = (() => {
+    const d = new Date(route.date + "T00:00:00");
+    return isNaN(d.getTime()) ? route.date : d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  })();
+  const cheapest = data?.cheapest?.fare_npr;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/45 backdrop-blur-sm" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()}
+        className="w-[660px] max-w-[calc(100%-2rem)] max-h-[82vh] flex flex-col rounded-2xl bg-[rgba(30,31,37,0.98)] backdrop-blur-xl border border-mac-strokeHi shadow-pop overflow-hidden">
+        <div className="relative shrink-0 px-5 pt-5 pb-4 border-b border-mac-stroke">
+          <button onClick={onClose} className="absolute top-3 right-3 h-7 w-7 grid place-items-center rounded-full bg-mac-fillHi text-mac-ink3 hover:text-mac-ink transition-colors"><X size={15} /></button>
+          <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-mac-accentHi mb-2"><Bus size={12} /> Bussewa · one way</div>
+          <div className="flex items-center gap-3 text-[23px] font-semibold text-white tracking-[-0.015em]">
+            <span>{data?.from || route.from}</span><ArrowRight size={19} className="text-mac-accentHi" /><span>{data?.to || route.to}</span>
+          </div>
+          <div className="text-[12px] text-white/70 mt-1.5">
+            {dateLabel}{buses.length ? ` · ${data?.count || buses.length} buses` : ""}{cheapest ? ` · from Rs ${Math.round(cheapest).toLocaleString()}` : ""}
+          </div>
+          {data?.via && <div className="text-[11px] text-mac-accentHi mt-1.5">No direct bus to {data.via.for} — showing buses to {data.via.hub}. {data.via.note}</div>}
+        </div>
+        <div className="flex-1 min-h-0 overflow-y-auto p-3">
+          {loading ? (
+            <div className="h-40 grid place-items-center text-mac-ink3"><Loader2 size={18} className="animate-spin" /></div>
+          ) : !buses.length ? (
+            <div className="h-40 grid place-items-center text-center text-[13px] text-mac-ink2 px-6">
+              {data?.message || "No buses came back — open bussewa to check this route."}
+            </div>
+          ) : (
+            buses.map((b, i) => <BusRow key={`${b.trip_id || b.operator}-${b.depart}-${i}`} b={b} best={i === 0} bookLink={data?.booking_link} />)
+          )}
+        </div>
+        <div className="shrink-0 flex items-center justify-between gap-3 px-5 py-3 border-t border-mac-stroke">
+          <span className="text-[11px] text-mac-ink3">Live departures · you pick a seat &amp; book on bussewa</span>
+          <a href={data?.booking_link || "#"} target="_blank" rel="noreferrer"
+            className="h-9 px-4 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-mac-accent text-white hover:bg-mac-accentHi transition-colors">
+            Open Bussewa <ArrowUpRight size={14} strokeWidth={2.5} />
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BusRow({ b, best, bookLink }: { b: DoBus; best: boolean; bookLink?: string }) {
+  return (
+    <div className={`flex items-center gap-3 sm:gap-4 p-3 rounded-xl border mb-2 transition-colors ${
+      best ? "border-mac-accentHi/30 bg-[rgba(10,132,255,0.06)]" : "border-mac-stroke bg-mac-fill"}`}>
+      <div className="flex items-center gap-2.5 sm:gap-3.5 shrink-0">
+        <div className="text-center w-14">
+          <div className="text-[15px] font-semibold text-mac-ink tnum leading-none">{b.depart}</div>
+          {b.arrive && <div className="text-[10px] text-mac-ink3 mt-1 tnum">{b.arrive}</div>}
+        </div>
+        <div className="flex flex-col items-center gap-0.5 w-10">
+          <div className="h-px w-full bg-mac-stroke relative"><Bus size={11} className="absolute -top-[5px] right-0 text-mac-accentHi" /></div>
+          {b.journey_hours ? <div className="text-[9px] text-mac-ink3 inline-flex items-center gap-0.5"><Clock size={8} />{b.journey_hours}h</div> : null}
+        </div>
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-[12.5px] text-mac-ink font-medium truncate">{b.operator}</div>
+        <div className="text-[10.5px] text-mac-ink3 truncate">
+          {b.bus_type || "Bus"}
+          {typeof b.seats_available === "number" ? <> · <Armchair size={9} className="inline -mt-0.5" /> {b.seats_available} seats</> : null}
+          {b.amenities && b.amenities.length ? ` · ${b.amenities.slice(0, 2).join(", ")}` : ""}
+        </div>
+      </div>
+      <div className="text-right shrink-0">
+        <div className="text-[15px] font-semibold text-mac-ink tracking-[-0.01em]">Rs {Math.round(b.fare_npr).toLocaleString()}</div>
+        {b.min_bargain_npr ? <div className="text-[9.5px] text-mac-accentHi">bargain Rs {Math.round(b.min_bargain_npr).toLocaleString()}</div> : (best ? <div className="text-[9.5px] text-mac-ink3">Cheapest</div> : null)}
       </div>
       <a href={bookLink || "#"} target="_blank" rel="noreferrer"
         className="h-8 px-3.5 shrink-0 rounded-[9px] text-[12px] font-semibold text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 hover:brightness-[1.06] transition-all inline-flex items-center gap-1.5">

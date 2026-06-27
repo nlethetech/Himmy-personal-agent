@@ -32,12 +32,22 @@ import time
 from typing import Any
 
 from himmy_app.config import HimmyConfig, load_config
+from himmy_app.connectors import _net
 
 #: How long a generated board stays fresh before a background refresh recomputes it.
 _TTL = float(os.environ.get("HIMMY_DO_TTL") or str(6 * 3600))
 
 #: How many picks each rail shows (rails are padded to this so the layout stays full).
 _TARGETS = {"food": 4, "deals": 4, "foryou": 4, "flights": 3}
+
+#: Hard ceiling per board rail. Sits ABOVE the slowest warm path (a ~25s connector + the flights
+#: rail's parallel Buddha Air calls) so a healthy-but-slow rail is never trimmed — only a truly
+#: hung connector is dropped (→ []), so one stuck rail can't stall the whole board.
+_RAIL_TIMEOUT = float(os.environ.get("HIMMY_DO_RAIL_TIMEOUT") or "40")
+
+#: Bound on the in-memory positive airport-resolution cache (FIFO-evicted). Empty/failed
+#: resolutions are NEVER cached (a transient miss must not poison the entry).
+_AIR_CACHE_MAX = 256
 
 #: "For You" shopping seeds (Daraz, interest-driven not discount-driven) + the vault labels we
 #: read them from. Falls back to broad lifestyle categories until the user saves interests.
@@ -60,6 +70,14 @@ _FOOD_SEEDS = ["momo", "pizza", "chowmein", "burger", "newari"]
 _DEAL_SEEDS = ["headphones", "smart watch", "kitchen", "sneakers", "power bank"]
 _DEAL_VAULT_HINTS = ("shop", "interest", "buy", "wishlist", "gadget", "hobby")
 _FOOD_VAULT_HINTS = ("food", "cuisine", "diet", "eat", "favourite", "favorite", "dish")
+
+#: Feedback recency: tags decay with this half-life (a thumb from ~21 days ago counts half), and a
+#: thumb-down counts as "recent" (steer the AI away from it) for this window.
+_FB_HALF_LIFE_S = float(os.environ.get("HIMMY_DO_FB_HALF_LIFE") or str(21 * 24 * 3600))
+_FB_RECENT_S = float(os.environ.get("HIMMY_DO_FB_RECENT") or str(14 * 24 * 3600))
+
+#: Coarse price bands (NPR) a thumb is tagged by, so taste generalises across items, not rows.
+_PRICE_BANDS = ((800.0, "cheap"), (3000.0, "mid"))  # <800 cheap, <3000 mid, else premium
 
 
 # --------------------------------------------------------------------------------------------
@@ -97,19 +115,43 @@ class DoFeedback:
             )
         return {"ok": True, "key": key, "kind": kind}
 
-    def signals(self) -> tuple[set[str], dict[str, int]]:
-        """Return (dismissed keys, tag -> net weight) for biasing candidates."""
+    def signals(self) -> tuple[set[str], dict[str, float]]:
+        """Return ``(dismissed keys, tag -> recency-decayed net weight)`` for biasing candidates.
+
+        Taste is keyed by COARSE tags (cuisine + a cheap/mid/premium price band, see
+        :func:`_coarsen_feedback_tags`) — not exact item names — so a thumb teaches a category, not
+        one disposable row. Every signal is weighted by an exponential RECENCY DECAY (half-life
+        ``_FB_HALF_LIFE_S``) so stale taste fades and a fresh thumb dominates.
+        """
+        dismissed, weights, _recent = self._signals_full()
+        return dismissed, weights
+
+    def recent_down_tags(self) -> set[str]:
+        """The coarse tags the user thumbed DOWN recently (within ``_FB_RECENT_S``) — fed into the
+        AI re-rank so it won't immediately re-surface a just-dismissed cuisine / price band."""
+        return self._signals_full()[2]
+
+    def _signals_full(self) -> tuple[set[str], dict[str, float], set[str]]:
+        """``(dismissed keys, recency-decayed tag weights, recently-dismissed tags)`` in one pass."""
         dismissed: set[str] = set()
-        weights: dict[str, int] = {}
+        weights: dict[str, float] = {}
+        recent_down: set[str] = set()
+        now = time.time()
         with self._conn() as c:
-            for r in c.execute("SELECT key, kind, tags FROM do_feedback"):
+            for r in c.execute("SELECT key, kind, tags, at FROM do_feedback"):
                 if r["kind"] == "down":
                     dismissed.add(r["key"])
-                delta = 1 if r["kind"] == "up" else -1
+                age = max(0.0, now - float(r["at"] or now))
+                decay = 0.5 ** (age / _FB_HALF_LIFE_S)        # 1.0 fresh → fades with age
+                delta = (1.0 if r["kind"] == "up" else -1.0) * decay
                 for t in json.loads(r["tags"] or "[]"):
-                    if t:
-                        weights[t.lower()] = weights.get(t.lower(), 0) + delta
-        return dismissed, weights
+                    if not t:
+                        continue
+                    t = t.lower()
+                    weights[t] = weights.get(t, 0.0) + delta
+                    if r["kind"] == "down" and age <= _FB_RECENT_S:
+                        recent_down.add(t)
+        return dismissed, weights, recent_down
 
 
 # --------------------------------------------------------------------------------------------
@@ -196,17 +238,20 @@ class DoCart:
 # helpers
 # --------------------------------------------------------------------------------------------
 def _vault(cfg: HimmyConfig) -> dict[str, str]:
-    """The user's saved label→value details (home airport, cuisines, budget, …)."""
+    """The user's CONFIRMED label→value details (home airport, cuisines, budget, …).
+
+    Reads ONLY the ``user`` layer — the gated, user-confirmed vault. The machine-inferred
+    ``learned`` layer is deliberately excluded so action-affecting reads (flights origin, budget,
+    cuisine seeding) are driven solely by facts the user has explicitly confirmed via
+    ``apply_suggestions`` — never by anything auto-inferred or prompt-injected.
+    """
     try:
         from himmy_app import user_profile
 
         prof = user_profile.load(cfg)
-        merged = prof.get("learned") or {}
-        # render_for_prompt merges layers; for raw details we merge both layers ourselves.
         details: dict[str, str] = {}
-        for layer in ("learned", "user"):
-            for k, v in ((prof.get(layer) or {}).get("details") or {}).items():
-                details[str(k)] = str(v)
+        for k, v in ((prof.get("user") or {}).get("details") or {}).items():
+            details[str(k)] = str(v)
         return details
     except Exception:  # noqa: BLE001 - the vault is optional
         return {}
@@ -239,6 +284,29 @@ def _rating(value: Any) -> float:
         return 0.0
 
 
+def _trip_plan_signals(vault: dict[str, str]) -> str:
+    """Non-identifying planning signals for the trip-planner prompt.
+
+    SECURITY/PRIVACY: the trip plan is a SHAREABLE artifact. We deliberately do NOT pass the full
+    free-text profile (``render_for_prompt``) into the planner — its about/projects/topics/voice
+    prose can embed sensitive FACTS (health, diet, employer) and the user's NAME, which then leak
+    into the exported markdown (denylist scrubbing of paraphrased facts is inherently leaky). Here
+    we hand the model ONLY the few structured, non-identifying levers a plan actually needs —
+    dietary detail and budget band, pulled from the confirmed vault — and nothing else.
+    """
+    lines: list[str] = []
+    for label, value in vault.items():
+        low = label.lower()
+        v = str(value).strip()
+        if not v:
+            continue
+        if any(h in low for h in ("diet", "cuisine", "food", "vegetarian", "vegan", "halal")):
+            lines.append(f"Dietary / food preference: {v}")
+        elif "budget" in low or "spend" in low:
+            lines.append(f"Travel budget: {v}")
+    return "\n".join(lines) if lines else "(no specific dietary or budget preferences saved)"
+
+
 def _home_airport(vault: dict[str, str]) -> str:
     for label, value in vault.items():
         if "airport" in label.lower() or "home base" in label.lower():
@@ -246,6 +314,195 @@ def _home_airport(vault: dict[str, str]) -> str:
             if v:
                 return v.split()[0]
     return "KTM"
+
+
+def _price_band(price: Any) -> str:
+    """Bucket a NPR price into a coarse cheap/mid/premium band (None → '')."""
+    if price is None:
+        return ""
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return ""
+    for ceiling, name in _PRICE_BANDS:
+        if p < ceiling:
+            return name
+    return "premium"
+
+
+def _price_from_subtitle(subtitle: Any) -> float | None:
+    """Pull the NPR amount out of a 'Rs 1,299' style subtitle (None if absent)."""
+    m = re.search(r"([\d,]+)", str(subtitle or ""))
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _coarsen_feedback_tags(tags: list[str] | None) -> list[str]:
+    """Normalise the tags posted with a thumb into COARSE taste keys: keep short cuisine/seed words,
+    turn any 'Rs 1,299' price token into a cheap/mid/premium band, and drop long item-name-looking
+    strings (so taste keys to the category, not one specific dish/product)."""
+    out: list[str] = []
+    for raw in (tags or []):
+        t = str(raw or "").strip()
+        if not t:
+            continue
+        price = _price_from_subtitle(t) if re.search(r"(?i)\brs\b|[\d,]{2,}", t) else None
+        if price is not None:
+            band = _price_band(price)
+            if band:
+                out.append(band)
+            continue
+        # keep short, category-like tokens; skip long free-text (likely an exact item name)
+        if len(t) <= 24 and len(t.split()) <= 3:
+            out.append(t.lower())
+    seen: set[str] = set()
+    return [t for t in out if not (t in seen or seen.add(t))]
+
+
+def _coarse_tags(rail: str, c: dict[str, Any]) -> list[str]:
+    """COARSE taste tags for a candidate: its cuisine/interest seed + a price band — NOT the exact
+    item name. A thumb on one item then teaches the whole category (e.g. 'momo', 'mid')."""
+    tags: list[str] = []
+    seed = str(c.get("tag") or "").strip().lower()
+    if seed:
+        tags.append(seed)
+    if rail == "food":
+        cui = str(c.get("subtitle") or "").split("|")[0].strip().lower()
+        if cui and cui != seed:
+            tags.append(cui)
+    else:  # deals / foryou carry a price in the subtitle ("Rs 1,299")
+        band = _price_band(_price_from_subtitle(c.get("subtitle")))
+        if band:
+            tags.append(band)
+    # de-dup, keep order
+    seen: set[str] = set()
+    return [t for t in tags if not (t in seen or seen.add(t))]
+
+
+#: Airport buffer (hours) added to air time to estimate a flight's true door-to-door duration
+#: (check-in, security, boarding, taxi, baggage, transfers). Labelled an ESTIMATE in the output.
+_FLIGHT_AIRPORT_BUFFER_H = 3.0
+#: Fallback domestic air time (hours) when depart/arrive times can't be parsed (~50 min hop).
+_FLIGHT_DEFAULT_AIR_H = 50.0 / 60.0
+
+
+def _parse_clock_minutes(value: Any) -> int | None:
+    """Parse a clock string ('14:30', '2:30 PM', '1430') into minutes-since-midnight (None if not)."""
+    s = str(value or "").strip()
+    if not s:
+        return None
+    m = re.search(r"(\d{1,2}):(\d{2})\s*([AaPp][Mm])?", s)
+    if not m:
+        m4 = re.fullmatch(r"(\d{2})(\d{2})", s)  # bare HHMM
+        if not m4:
+            return None
+        hh, mm, ap = int(m4.group(1)), int(m4.group(2)), None
+    else:
+        hh, mm, ap = int(m.group(1)), int(m.group(2)), m.group(3)
+    if ap:
+        ap = ap.lower()
+        if ap == "pm" and hh != 12:
+            hh += 12
+        elif ap == "am" and hh == 12:
+            hh = 0
+    if not (0 <= hh < 24 and 0 <= mm < 60):
+        return None
+    return hh * 60 + mm
+
+
+def _flight_air_hours(cheapest: dict[str, Any]) -> float:
+    """Estimate the in-air hop length from the flight's depart/arrive clock times; fall back to the
+    typical domestic ~50 min when they can't be parsed. ALWAYS only an estimate of the air leg."""
+    dep = _parse_clock_minutes(cheapest.get("depart"))
+    arr = _parse_clock_minutes(cheapest.get("arrive"))
+    if dep is not None and arr is not None:
+        diff = (arr - dep) % (24 * 60)  # handle wrap past midnight
+        if 10 <= diff <= 300:           # sane domestic range (10 min–5 h)
+            return diff / 60.0
+    return _FLIGHT_DEFAULT_AIR_H
+
+
+def _fmt_duration(hours: float) -> str:
+    """Human duration label: '~50 min' under an hour, else '2h' / '2h 30m'."""
+    total_min = int(round(hours * 60))
+    if total_min < 60:
+        return f"~{total_min} min"
+    h, m = divmod(total_min, 60)
+    return f"{h}h" if m == 0 else f"{h}h {m}m"
+
+
+def _transport_compare(getting_there: dict[str, Any] | None,
+                       by_bus: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Deterministic fly-vs-bus comparison built ONLY from already-fetched flight + bus data.
+
+    Returns ``None`` unless BOTH a flight and a bus exist. The flight's ``duration_label`` is an
+    ESTIMATE (air time + ~3h airport buffer) and is flagged ``duration_is_estimate``; the bus uses
+    the connector's REAL ``journey_hours``. No network or model calls.
+    """
+    if not (getting_there and by_bus):
+        return None
+    fc = getting_there.get("cheapest") or {}
+    bc = by_bus.get("cheapest") or {}
+
+    flight_fare = fc.get("fare_npr")
+    bus_fare = bc.get("fare_npr")
+    try:
+        flight_fare_i = int(round(float(flight_fare)))
+    except (TypeError, ValueError):
+        return None
+    try:
+        bus_fare_i = int(round(float(bus_fare)))
+    except (TypeError, ValueError):
+        return None
+
+    # Flight door-to-door is an ESTIMATE: in-air hop + the airport buffer.
+    flight_hours = _flight_air_hours(fc) + _FLIGHT_AIRPORT_BUFFER_H
+    # Bus uses the connector's REAL journey_hours (fall back to its label only if absent).
+    try:
+        bus_hours = float(bc.get("journey_hours"))
+    except (TypeError, ValueError):
+        bus_hours = 0.0
+
+    flight_opt = {
+        "mode": "flight", "label": "Flight (Buddha Air)", "fare_npr": flight_fare_i,
+        "duration_label": _fmt_duration(flight_hours), "duration_is_estimate": True,
+        "depart": fc.get("depart"), "book_link": getting_there.get("booking_link"),
+    }
+    bus_opt = {
+        "mode": "bus", "label": "Bus (bussewa)", "fare_npr": bus_fare_i,
+        "duration_label": (_fmt_duration(bus_hours) if bus_hours > 0 else "—"),
+        "duration_is_estimate": False,
+        "depart": bc.get("depart"), "book_link": by_bus.get("booking_link"),
+    }
+
+    fare_delta = abs(flight_fare_i - bus_fare_i)
+    # Verdict: the flight wins on time, the bus on price. Pick the time winner as the default
+    # "winner" (most people fly to save the day) but be honest about the price trade-off.
+    if bus_hours > 0 and flight_hours < bus_hours:
+        winner = "flight"
+        saved_h = bus_hours - flight_hours
+        reason = (f"Flying saves about {_fmt_duration(saved_h)} door-to-door for "
+                  f"NPR {fare_delta:,} more.")
+        time_note = (f"Flight ~{_fmt_duration(flight_hours)} door-to-door (estimate) vs "
+                     f"bus {_fmt_duration(bus_hours)}.")
+    else:
+        winner = "bus"
+        reason = (f"The bus is NPR {fare_delta:,} cheaper"
+                  + (" with comparable time." if bus_hours > 0 else "."))
+        time_note = (f"Bus {_fmt_duration(bus_hours)} vs flight ~{_fmt_duration(flight_hours)} "
+                     f"door-to-door (estimate)." if bus_hours > 0
+                     else "Bus journey time unavailable.")
+
+    return {
+        "options": [flight_opt, bus_opt],
+        "verdict": {"winner": winner, "reason": reason, "fare_delta_npr": fare_delta,
+                    "time_note": time_note},
+        "disclaimer": "Flight time is door-to-door estimate incl. airport buffer.",
+    }
 
 
 # --------------------------------------------------------------------------------------------
@@ -262,24 +519,29 @@ class DoConcierge:
     # ---- public: the board, served warm with a background refresh ---------------------------
     async def board(self, *, force: bool = False) -> dict[str, Any]:
         cached = self._read_cache()
-        fresh = cached and (time.time() - cached.get("generated_at", 0)) < _TTL
-        if cached and fresh and not force:
-            return {**cached["board"], "stale": False, "generated_at": cached["iso"]}
+        # A suppressed/failed write can leave a None or partial cache — guard every field read so
+        # a serving read never TypeErrors on cached["iso"]/cached["board"].
+        valid = bool(cached and isinstance(cached.get("board"), dict))
+        fresh = valid and (time.time() - cached.get("generated_at", 0)) < _TTL
+        if valid and fresh and not force:
+            return {**cached["board"], "stale": False, "generated_at": cached.get("iso")}
         if force:
             board = await self._generate(ai=True)
             self._write_cache(board)
-            return {**board, "stale": False, "generated_at": self._read_cache()["iso"]}
+            return {**board, "stale": False, "generated_at": self._cache_iso()}
         # No cache, or stale: build the free rules board NOW (instant), refresh the AI behind it.
-        if cached:
+        if valid:
             self._spawn_refresh()
-            return {**cached["board"], "stale": True, "generated_at": cached["iso"]}
+            return {**cached["board"], "stale": True, "generated_at": cached.get("iso")}
         board = await self._generate(ai=False)        # cold start: free + fast, no model
         self._write_cache(board)
         self._spawn_refresh()                          # warm the AI layer in the background
-        return {**board, "stale": True, "generated_at": self._read_cache()["iso"]}
+        return {**board, "stale": True, "generated_at": self._cache_iso()}
 
     def feedback(self, kind: str, key: str, rail: str = "", tags: list[str] | None = None) -> dict[str, Any]:
-        out = self.fb.record(kind, key, rail, tags)
+        # Store taste against COARSE tags (cuisine + cheap/mid/premium price band), never the exact
+        # item name, so a single thumb teaches the whole category rather than one disposable row.
+        out = self.fb.record(kind, key, rail, _coarsen_feedback_tags(tags))
         self._spawn_refresh()  # let the next board reflect the new taste
         return out
 
@@ -294,6 +556,18 @@ class DoConcierge:
 
     async def _none(self) -> list[dict[str, Any]]:
         return []
+
+    async def _rail_guarded(self, coro: Any) -> list[dict[str, Any]]:
+        """Run one rail with a hard ceiling so a single hung connector can't stall the whole board.
+
+        The cap sits ABOVE the slowest warm path (a ~25s connector + the flights rail's parallel
+        Buddha Air calls) so a healthy-but-slow rail is never trimmed — only a truly stuck one is
+        dropped, returning ``[]`` so the rest of the board still renders.
+        """
+        try:
+            return await asyncio.wait_for(coro, timeout=_RAIL_TIMEOUT)
+        except (TimeoutError, asyncio.TimeoutError):
+            return []
 
     # ---- restaurant detail: the full menu + dishes recommended for the user ------------------
     def _food_pref_tokens(self) -> set[str]:
@@ -383,7 +657,12 @@ class DoConcierge:
                     resolved = m.group(0).upper()
             except Exception:  # noqa: BLE001 - smart routing is best-effort
                 resolved = ""
-        self._air_cache[key] = resolved
+        # Only cache a POSITIVE resolution — caching the empty miss would poison the entry and
+        # stop a later (transient-failure) retry from ever resolving. Keep the cache bounded.
+        if resolved:
+            if len(self._air_cache) >= _AIR_CACHE_MAX:
+                self._air_cache.pop(next(iter(self._air_cache)), None)
+            self._air_cache[key] = resolved
         return resolved
 
     async def flights(self, origin: str, destination: str, date: str = "") -> dict[str, Any]:
@@ -400,6 +679,16 @@ class DoConcierge:
         return await buddha_air_flights({
             "origin": o or origin, "destination": d or destination, "date": date,
         })
+
+    async def buses(self, origin: str, destination: str, date: str = "") -> dict[str, Any]:
+        if not self._on("buses"):
+            return {"ok": False, "buses": [], "from": origin, "to": destination, "date": date,
+                    "message": "Buses (bussewa) is turned off in Settings → Permissions."}
+        from himmy_app.connectors.bussewa import bussewa_buses
+
+        if not date:
+            date = (datetime.date.today() + datetime.timedelta(days=3)).isoformat()
+        return await bussewa_buses({"origin": origin, "destination": destination, "date": date})
 
     # ---- trips: a day-by-day roadmap of places/activities (grounded in real OSM spots) -------
     async def _geocode(self, place: str) -> tuple[float, float] | None:
@@ -492,32 +781,62 @@ class DoConcierge:
                                          "booking_link": fr.get("booking_link")}
                 except Exception:  # noqa: BLE001
                     pass
-        plan = await self._plan_trip(destination, days, style, places, flight_fare)
+        # Getting there by BUS — covers routes flights don't (Chitwan, Lumbini) and budget travel.
+        by_bus, bus_fare = None, None
+        if self._on("buses"):
+            try:
+                from himmy_app.connectors.bussewa import bussewa_buses
+
+                vault = _vault(self.cfg)
+                home_city = (vault.get("Home city") or vault.get("home_city") or "Kathmandu").strip()
+                date = (datetime.date.today() + datetime.timedelta(days=14)).isoformat()
+                br = await bussewa_buses({"origin": home_city, "destination": destination, "date": date})
+                if br.get("ok") and br.get("cheapest"):
+                    bus_fare = br["cheapest"].get("fare_npr")
+                    by_bus = {"from": br.get("from"), "to": br.get("to"), "cheapest": br["cheapest"],
+                              "count": br.get("count"), "via": br.get("via"),
+                              "booking_link": br.get("booking_link")}
+            except Exception:  # noqa: BLE001
+                pass
+        plan = await self._plan_trip(destination, days, style, places, flight_fare, bus_fare)
         if not plan:
             return {"ok": False, "message": "Couldn't build a plan just now — try again."}
         for h in plan.get("hotels", []):  # a booking deep-link for each picked hotel
             h["book_link"] = self._hotel_book_link(str(h.get("name") or ""), destination)
         out = {"ok": True, "destination": destination, "days": days, "style": style,
-               "getting_there": getting_there, **plan}
+               "getting_there": getting_there, "by_bus": by_bus, **plan}
+        # Deterministic fly-vs-bus compare (reuses what we already fetched — no extra calls). Only
+        # present when BOTH a flight and a bus exist; flight duration is an explicit ESTIMATE.
+        out["transport_compare"] = _transport_compare(getting_there, by_bus)
         self._trip_cache_write(cache_key, out)
         return out
 
     async def _plan_trip(self, destination: str, days: int, style: str,
-                         places: dict[str, list[dict[str, Any]]], flight_fare: float | None) -> dict[str, Any] | None:
-        from himmy_app import user_profile
+                         places: dict[str, list[dict[str, Any]]], flight_fare: float | None,
+                         bus_fare: float | None = None) -> dict[str, Any] | None:
         from himmy.cli.provider import build_inference_for
         from himmy.services.inference.models import InferenceMessage, InferenceRequest
 
-        profile = user_profile.render_for_prompt(cfg=self.cfg) or "(no saved profile)"
+        # PRIVACY: pass only non-identifying planning signals (diet, budget) — NOT the full
+        # free-text profile — because this plan is exported/shared (see _trip_plan_signals).
+        profile = _trip_plan_signals(_vault(self.cfg))
         attr = "; ".join(f"{p['name']} ({p['kind']})" for p in places["attractions"]) or "(use your own knowledge)"
         hotel_lines = "; ".join(
             f"{h['name']} [{h['type']}{', ' + h['stars'] + '★' if h.get('stars') else ''}"
             f"{', ' + h['area'] if h.get('area') else ''}]" for h in places["hotels"]) or "(none found)"
         rest_lines = "; ".join(f"{r['name']}{' (' + r['cuisine'] + ')' if r.get('cuisine') else ''}"
                                for r in places["restaurants"]) or "(none found)"
-        fare_note = (f"Use ~NPR {int(flight_fare) * 2} for the round-trip flights budget line "
-                     f"(NPR {int(flight_fare)} each way, Buddha Air)." if flight_fare else
-                     "No flight is needed/available — omit the flights line or set it to 0.")
+        if flight_fare:
+            fare_note = (f"Use ~NPR {int(flight_fare) * 2} for the round-trip TRAVEL budget line "
+                         f"(NPR {int(flight_fare)} each way by Buddha Air flight).")
+            if bus_fare:
+                fare_note += (f" A cheaper bus is also available (~NPR {int(bus_fare)} each way, bussewa) — "
+                              f"if the style is 'budget', use the bus fare for the travel line instead.")
+        elif bus_fare:
+            fare_note = (f"No flight is available — use ~NPR {int(bus_fare) * 2} for the round-trip TRAVEL "
+                         f"budget line (NPR {int(bus_fare)} each way by bus, bussewa).")
+        else:
+            fare_note = "No flight/bus fare available — omit the travel line or set it to 0."
         system = (
             "You are Himmy, a sharp Nepal travel planner. Produce a PREMIUM, realistic plan shaped by the "
             "traveller's STYLE (budget/comfort/luxury) — style drives the hotel choice, the budget, and the "
@@ -538,7 +857,9 @@ class DoConcierge:
         )
         user = (f"Destination: {destination}\nDays: {days}\nTravel style: {style}\n{fare_note}\n\n"
                 f"Hotels (real, OSM): {hotel_lines}\n\nRestaurants (real, OSM): {rest_lines}\n\n"
-                f"Attractions (real, OSM): {attr}\n\nAbout the traveller:\n{profile}\n\nBuild the plan.")
+                f"Attractions (real, OSM): {attr}\n\nTraveller preferences (do NOT name the "
+                f"traveller or restate these facts in your prose; just let them shape the plan):\n"
+                f"{profile}\n\nBuild the plan.")
         try:
             svc = build_inference_for(self.cfg.provider, self.cfg.model)
             resp = await svc.run(InferenceRequest(
@@ -567,9 +888,10 @@ class DoConcierge:
         # keep the cache small
         if len(cache) > 30:
             cache = dict(list(cache.items())[-30:])
+        # Atomic write (temp + os.replace) so a kill/overlap can't truncate trips_cache.json.
         with contextlib.suppress(Exception):
-            (self.cfg.data_dir / "trips_cache.json").write_text(json.dumps(cache, ensure_ascii=False),
-                                                                encoding="utf-8")
+            _net.atomic_write_text(self.cfg.data_dir / "trips_cache.json",
+                                   json.dumps(cache, ensure_ascii=False))
 
     # ---- inline search over food (Foodmandu) + shopping (Daraz) ------------------------------
     async def search(self, query: str, kind: str = "food") -> dict[str, Any]:
@@ -603,25 +925,39 @@ class DoConcierge:
         return {"ok": True, "kind": "food", "query": query, "results": out}
 
     # ---- candidate generation (free, deterministic, live) -----------------------------------
-    async def _candidates(self, vault: dict[str, str]) -> dict[str, list[dict[str, Any]]]:
-        dismissed, weights = self.fb.signals()
+    async def _candidates(
+        self, vault: dict[str, str]
+    ) -> tuple[dict[str, list[dict[str, Any]]], set[str]]:
+        """Return ``(rails, recent_down_tags)`` — the live candidate rails plus the coarse tags the
+        user thumbed DOWN recently (threaded into the AI re-rank so it won't re-surface them)."""
+        dismissed, weights, recent_down_tags = self.fb._signals_full()
         food_seeds = _seeds_from_vault(vault, _FOOD_VAULT_HINTS, _FOOD_SEEDS)
         deal_seeds = _seeds_from_vault(vault, _DEAL_VAULT_HINTS, _DEAL_SEEDS)
         shop_seeds = _seeds_from_vault(vault, _SHOP_VAULT_HINTS, _SHOP_SEEDS)
-        # Skip any rail whose surface the user turned off in Settings → Permissions.
+        # Skip any rail whose surface the user turned off in Settings → Permissions. Each rail is
+        # wrapped in a per-rail timeout (_rail_guarded) so one hung connector can't stall the board.
         food, deals, foryou, flights = await asyncio.gather(
-            self._food(food_seeds, dismissed, weights) if self._on("food") else self._none(),
-            self._deals(deal_seeds, dismissed, weights) if self._on("shopping") else self._none(),
-            self._shop_foryou(shop_seeds, dismissed, weights) if self._on("shopping") else self._none(),
-            self._flights(vault, dismissed) if self._on("flights") else self._none(),
+            self._rail_guarded(self._food(food_seeds, dismissed, weights)) if self._on("food") else self._none(),
+            self._rail_guarded(self._deals(deal_seeds, dismissed, weights)) if self._on("shopping") else self._none(),
+            self._rail_guarded(self._shop_foryou(shop_seeds, dismissed, weights)) if self._on("shopping") else self._none(),
+            self._rail_guarded(self._flights(vault, dismissed)) if self._on("flights") else self._none(),
             return_exceptions=True,
         )
-        return {
+        rails = {
             "food": food if isinstance(food, list) else [],
             "deals": deals if isinstance(deals, list) else [],
             "foryou": foryou if isinstance(foryou, list) else [],
             "flights": flights if isinstance(flights, list) else [],
         }
+        # Item-level taste: drop candidates whose COARSE tag was just thumbed down (not only the
+        # exact dismissed key), so a freshly-dismissed category doesn't re-appear on this board.
+        if recent_down_tags:
+            for rail_name, items in rails.items():
+                rails[rail_name] = [
+                    c for c in items
+                    if not (set(_coarse_tags(rail_name, c)) & recent_down_tags)
+                ]
+        return rails, recent_down_tags
 
     async def _shop_foryou(self, seeds: list[str], dismissed: set[str], weights: dict[str, int]) -> list[dict[str, Any]]:
         """Daraz items related to the user's interests — ranked by rating, NOT by discount."""
@@ -743,12 +1079,12 @@ class DoConcierge:
     # ---- the one cheap AI pass: re-rank + write the personal "why" ---------------------------
     async def _generate(self, *, ai: bool) -> dict[str, Any]:
         vault = _vault(self.cfg)
-        cands = await self._candidates(vault)
+        cands, recent_down_tags = await self._candidates(vault)
         board = self._deterministic_board(cands)        # always have a free, complete board
         if not ai:
             return board
         try:
-            enriched = await self._personalize(cands, vault)
+            enriched = await self._personalize(cands, vault, recent_down_tags)
             if enriched:
                 board = enriched
         except Exception:  # noqa: BLE001 - the deterministic board is the fallback
@@ -804,7 +1140,8 @@ class DoConcierge:
             "ai": False,
         }
 
-    async def _personalize(self, cands: dict[str, list[dict[str, Any]]], vault: dict[str, str]) -> dict[str, Any] | None:
+    async def _personalize(self, cands: dict[str, list[dict[str, Any]]], vault: dict[str, str],
+                           recent_down_tags: set[str] | None = None) -> dict[str, Any] | None:
         """ONE batched completion: pick + order the best per rail and write a one-line why."""
         # Shrink candidates to just what the model needs (id + the human-readable bits).
         def slim(rail: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -831,10 +1168,17 @@ class DoConcierge:
             '"deals": [...], "foryou": [...], "flights": [...]}. food = restaurants; deals = '
             "discounted products; foryou = products matching the user's interests; flights = trips. "
             "Use up to 4 each (2 flights); ids refer to the candidate 'id' fields within that rail. "
-            "Drop anything weak rather than padding."
+            "Drop anything weak rather than padding. If a 'recently dismissed' list is given, those "
+            "are categories/price-bands the user just thumbed DOWN — deprioritise anything matching "
+            "them and do NOT re-surface a just-dismissed type at the top."
         )
+        # Tell the model what the user just rejected (coarse cuisine / price-band tags) so it won't
+        # immediately re-surface a category they dismissed. Fully local — derived from feedback.
+        down = sorted(t for t in (recent_down_tags or set()) if t)
+        down_note = (f"\n\nRecently dismissed (avoid re-surfacing these): {', '.join(down)}."
+                     if down else "")
         user = (
-            f"Local time: {now:%A %d %b, %I:%M %p}.\n\nAbout the user:\n{profile}\n\n"
+            f"Local time: {now:%A %d %b, %I:%M %p}.\n\nAbout the user:\n{profile}{down_note}\n\n"
             f"Candidates (JSON):\n{json.dumps(payload, ensure_ascii=False)}"
         )
 
@@ -882,6 +1226,14 @@ class DoConcierge:
         with contextlib.suppress(RuntimeError):  # no running loop (e.g. unit test) → skip
             asyncio.get_running_loop().create_task(_run())
 
+    def _cache_iso(self) -> str:
+        """The iso of the cache we just wrote — falls back to now if the write was suppressed,
+        so the served board always carries a sane generated_at (never None from a failed read)."""
+        cached = self._read_cache()
+        if isinstance(cached, dict) and cached.get("iso"):
+            return str(cached["iso"])
+        return datetime.datetime.now().isoformat(timespec="seconds")
+
     def _read_cache(self) -> dict[str, Any] | None:
         try:
             return json.loads(self._cache.read_text(encoding="utf-8"))
@@ -893,8 +1245,9 @@ class DoConcierge:
         payload = {"generated_at": now,
                    "iso": datetime.datetime.fromtimestamp(now).isoformat(timespec="seconds"),
                    "board": board}
+        # Atomic write (temp + os.replace) so a kill/overlap can't truncate do_cache.json.
         with contextlib.suppress(Exception):
-            self._cache.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            _net.atomic_write_text(self._cache, json.dumps(payload, ensure_ascii=False))
 
 
 def _extract_json(text: str) -> Any:

@@ -11,13 +11,14 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
-
 from himmy.services.tools.registry import ToolRegistry
 
+from himmy_app.connectors._net import NetError, safe_get_json
 from himmy_app.connectors._register import safe_register_local_tool
 
 _BASE = "https://www.daraz.com.np"
+#: Hosts ``safe_get_json`` is allowed to reach (and redirect to) for the live catalog call.
+_ALLOW_HOSTS = ("www.daraz.com.np",)
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -58,10 +59,15 @@ async def daraz_search(args: dict[str, Any]) -> dict[str, Any]:
     if sort:
         params["sort"] = sort
     try:
-        async with httpx.AsyncClient(timeout=25, follow_redirects=True) as c:
-            r = await c.get(f"{_BASE}/catalog/", params=params, headers=_HEADERS)
-        items = (r.json().get("mods") or {}).get("listItems") or []
-    except Exception as exc:  # noqa: BLE001 - the search link is the fallback
+        # safe_get_json validates every redirect + the content-type, so a captcha/login 302
+        # (which follow_redirects=True used to chase into an opaque JSONDecodeError) now surfaces
+        # as a clean NetError and we fall back to the search deep-link below.
+        data = await safe_get_json(
+            f"{_BASE}/catalog/", params=params, headers=_HEADERS,
+            allow_hosts=_ALLOW_HOSTS, timeout=25,
+        )
+        items = (data.get("mods") or {}).get("listItems") or []
+    except (NetError, Exception) as exc:  # noqa: BLE001 - NetError (block/captcha) + anything else fall back to the search link
         return {"ok": True, "query": query, "count": 0, "products": [],
                 "search_link": _search_link(query),
                 "message": f"Couldn't read Daraz results ({type(exc).__name__}); open the search link."}

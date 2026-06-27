@@ -94,6 +94,14 @@ def register(registry: ToolRegistry) -> list[str]:
     except Exception:  # noqa: BLE001 - best-effort; flight search just won't be offered
         pass
 
+    # --- Bussewa: live Nepal bus tickets + a booking deep-link -----------------------------
+    try:
+        from himmy_app.connectors.bussewa import BussewaConnector
+
+        registered += BussewaConnector().register_tools(registry)
+    except Exception:  # noqa: BLE001 - best-effort; bus search just won't be offered
+        pass
+
     # --- Foodmandu: Nepal food-delivery restaurant search + an order link ------------------
     try:
         from himmy_app.connectors.foodmandu import FoodmanduConnector
