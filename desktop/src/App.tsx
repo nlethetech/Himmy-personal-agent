@@ -9,7 +9,7 @@ import {
   Inbox, MapPin, KeyRound, ShieldCheck, Minus, ChevronLeft, ChevronRight, Repeat,
   Gauge, Coins, Zap, CalendarClock, Bell, Play, Flag,
   Star, BellOff, Users, TrendingUp, TrendingDown, Wind, Cpu, Sparkle,
-  Info, StickyNote, Highlighter,
+  Info, StickyNote, Highlighter, Eye, EyeOff, BrainCircuit, Cpu as CpuIcon, ServerCog,
   ShoppingBag, Plane, Bus, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart, ArrowRight, ConciergeBell,
   Route, Lightbulb, BedDouble, Wallet, Send, Armchair, ArrowRightLeft, Share2, Printer,
   CloudRain, Umbrella, Square,
@@ -22,6 +22,7 @@ import {
   type GoogleStatus, type MailMessage, type MailFull, type CalendarEvent, type Usage, type UsageTotals,
   type TelegramStatus,
   type ModelProvider,
+  type ProviderInfo, type ProviderKeysResult, type ProviderTestResult,
   type Routine, type RoutineSchedule, type NotificationItem, type ReadingStats,
   type RecThread, type TaskExtras, type Subtask,
   type UserProfile, type ProfileLayer,
@@ -178,6 +179,13 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [routinesOpen, setRoutinesOpen] = useState(false);
+  // First-run onboarding: show the warm "connect your AI brain" flow until the app can
+  // actually run inference. `aiReady === false` (not null) means we've confirmed it's not
+  // set up yet; `onbDismissed` lets the user close it for this session (it re-shows next
+  // launch while still not ready). Settings can force it open via `onbForced`.
+  const [aiReady, setAiReady] = useState<boolean | null>(null);
+  const [onbDismissed, setOnbDismissed] = useState(false);
+  const [onbForced, setOnbForced] = useState(false);
   const [notifs, setNotifs] = useState<NotificationItem[]>([]);
   const [unread, setUnread] = useState(0);
   const { status: account } = useGoogle();   // drives the account-button avatar (connected email)
@@ -195,6 +203,27 @@ export default function App() {
     tick();
     const t = setInterval(tick, 5000);
     return () => { alive = false; clearInterval(t); };
+  }, []);
+
+  // On launch, ask the backend whether Himmy can run inference yet. If not, the first-run
+  // onboarding appears. We retry a few times while the backend is still warming up.
+  useEffect(() => {
+    let alive = true;
+    let tries = 0;
+    const check = async () => {
+      try {
+        const r = await api.providerStatus();
+        if (!alive) return;
+        setAiReady(r.ready);
+        if (r.ready) return; // stop — set up
+      } catch { /* backend still warming */ }
+      if (alive && ++tries < 30) setTimeout(check, 2000);
+    };
+    check();
+    // Let any surface (e.g. Settings) re-open onboarding on demand.
+    const reopen = () => { setOnbForced(true); setOnbDismissed(false); };
+    window.addEventListener("himmy:onboard", reopen);
+    return () => { alive = false; window.removeEventListener("himmy:onboard", reopen); };
   }, []);
 
   // Poll the routine results inbox: keep the bell badge fresh and raise a native macOS
@@ -289,6 +318,12 @@ export default function App() {
         />
       )}
       {routinesOpen && <RoutinesModal onClose={() => setRoutinesOpen(false)} />}
+      {(onbForced || (aiReady === false && !onbDismissed)) && (
+        <OnboardingModal
+          onClose={() => { setOnbDismissed(true); setOnbForced(false); }}
+          onReady={() => { setAiReady(true); api.health().then(setHealth).catch(() => {}); emitRefresh("tasks"); }}
+        />
+      )}
     </div>
   );
 }
@@ -3548,6 +3583,168 @@ function Pill({ tone, children }: { tone: "green" | "orange" | "neutral"; childr
   return <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${cls}`}>{children}</span>;
 }
 
+// Settings → Preferences: the "AI model & key" block. Shows the active provider+model,
+// a per-provider configured/Add-key row (with change + remove + an inline key field), and a
+// Test button that proves the live setup. Mirrors the onboarding plumbing — never shows a key.
+function AiKeysSection({ current }: { current: { provider: string; model: string | null } | null }) {
+  const [providers, setProviders] = useState<ProviderInfo[] | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);   // provider id with its key field open
+  const [keyVal, setKeyVal] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);          // "save:<id>" | "remove:<id>" | "test"
+  const [rowMsg, setRowMsg] = useState<{ id: string; text: string; ok: boolean } | null>(null);
+  const [testMsg, setTestMsg] = useState<{ text: string; ok: boolean } | null>(null);
+
+  const load = () => api.providerKeys().then((r: ProviderKeysResult) => setProviders(r.providers)).catch(() => setProviders([]));
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+
+  const openEdit = (id: string) => { setEditing(id); setKeyVal(""); setShowKey(false); setRowMsg(null); };
+
+  const saveKey = async (id: string) => {
+    setBusy(`save:${id}`); setRowMsg(null);
+    try {
+      const r = await api.setProviderKey(id, keyVal.trim());
+      if (!r.ok) { setRowMsg({ id, text: r.error || "That key was rejected.", ok: false }); return; }
+      setEditing(null); setKeyVal("");
+      setRowMsg({ id, text: "Key saved.", ok: true });
+      await load();
+    } catch { setRowMsg({ id, text: "Couldn't reach Himmy.", ok: false }); }
+    finally { setBusy(null); }
+  };
+
+  const removeKey = async (id: string) => {
+    setBusy(`remove:${id}`); setRowMsg(null);
+    try { await api.clearProviderKey(id); await load(); }
+    catch { /* ignore */ }
+    finally { setBusy(null); }
+  };
+
+  const testNow = async () => {
+    setBusy("test"); setTestMsg(null);
+    try {
+      const t = await api.testProvider();   // tests whatever is currently active
+      setTestMsg(t.ok
+        ? { text: `Working${t.latency_ms != null ? ` · ${t.latency_ms} ms` : ""}.`, ok: true }
+        : { text: t.error || "That didn't work.", ok: false });
+    } catch { setTestMsg({ text: "Couldn't reach Himmy.", ok: false }); }
+    finally { setBusy(null); }
+  };
+
+  const keyProviders = (providers || []).filter((p) => p.needs_key);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2.5">
+        <span className="text-[11px] uppercase tracking-[0.06em] font-semibold text-mac-ink3">AI model &amp; key</span>
+        {current && (
+          <span className="text-[11px] font-mono text-mac-ink3 truncate max-w-[16rem]">
+            active · {current.model || current.provider}
+          </span>
+        )}
+      </div>
+
+      {providers === null ? (
+        <div className="h-20 grid place-items-center rounded-xl border border-mac-stroke"><Loader2 size={15} className="animate-spin text-mac-ink3" /></div>
+      ) : (
+        <div className="rounded-xl border border-mac-stroke overflow-hidden">
+          {keyProviders.map((p, i) => {
+            const Icon = PROVIDER_ICON[p.id] || Sparkles;
+            const isEditing = editing === p.id;
+            const isActive = current?.provider === p.id;
+            return (
+              <div key={p.id} className={i > 0 ? "border-t border-mac-stroke" : ""}>
+                <div className="flex items-center gap-3 px-3.5 py-3 bg-mac-fill">
+                  <div className="h-8 w-8 shrink-0 grid place-items-center rounded-[9px] bg-mac-fillHi">
+                    <Icon size={15} className="text-mac-accentHi" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[13px] text-mac-ink font-medium truncate">{p.label}</span>
+                      {isActive && <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-mac-accent/20 text-mac-accentHi">Active</span>}
+                    </div>
+                    <div className="text-[11.5px] mt-0.5 flex items-center gap-1.5">
+                      {p.configured
+                        ? <span className="text-mac-green inline-flex items-center gap-1"><Check size={12} /> Key configured</span>
+                        : <span className="text-mac-ink3">No key yet</span>}
+                    </div>
+                  </div>
+                  <div className="shrink-0 flex items-center gap-1.5">
+                    {p.configured ? (
+                      <>
+                        <button onClick={() => openEdit(p.id)}
+                          className="h-8 px-3 rounded-[9px] bg-mac-fill border border-mac-stroke text-[12px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">Change</button>
+                        <button onClick={() => removeKey(p.id)} disabled={busy === `remove:${p.id}`} title="Remove key"
+                          className="h-8 w-8 grid place-items-center rounded-[9px] bg-mac-fill border border-mac-stroke text-mac-ink3 hover:text-mac-red hover:border-mac-strokeHi transition-colors disabled:opacity-60">
+                          {busy === `remove:${p.id}` ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                        </button>
+                      </>
+                    ) : (
+                      <button onClick={() => openEdit(p.id)}
+                        className="h-8 px-3.5 rounded-[9px] bg-mac-accent text-white text-[12.5px] font-medium hover:bg-mac-accentHi transition-colors inline-flex items-center gap-1.5">
+                        <KeyRound size={13} /> Add key
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {isEditing && (
+                  <div className="px-3.5 pb-3.5 pt-0.5 bg-mac-fill border-t border-mac-stroke">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[11.5px] text-mac-ink3">Paste your key — saved to your Mac's keychain, never shared.</span>
+                      {p.key_url && (
+                        <button onClick={() => openExternal(p.key_url || "")} className="text-[11.5px] text-mac-accentHi hover:underline inline-flex items-center gap-1">
+                          Get a key <ExternalLink size={11} />
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="relative flex-1">
+                        <input type={showKey ? "text" : "password"} value={keyVal} autoFocus spellCheck={false} autoComplete="off"
+                          onChange={(e) => { setKeyVal(e.target.value); setRowMsg(null); }}
+                          onKeyDown={(e) => { if (e.key === "Enter" && keyVal.trim().length >= 8) saveKey(p.id); if (e.key === "Escape") setEditing(null); }}
+                          placeholder="Paste your key here"
+                          className="w-full h-9 pl-3 pr-10 rounded-[9px] bg-white/[0.04] ring-1 ring-inset ring-white/10 focus:ring-mac-accent text-[12.5px] text-mac-ink placeholder:text-mac-ink3 outline-none font-mono transition-shadow" />
+                        <button onClick={() => setShowKey(!showKey)} type="button"
+                          className="absolute right-1 top-1 h-7 w-7 grid place-items-center rounded-[7px] text-mac-ink3 hover:text-mac-ink hover:bg-mac-fillHi transition-colors">
+                          {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                        </button>
+                      </div>
+                      <button onClick={() => saveKey(p.id)} disabled={keyVal.trim().length < 8 || busy === `save:${p.id}`}
+                        className="h-9 px-4 rounded-[9px] bg-mac-accent text-white text-[12.5px] font-medium hover:bg-mac-accentHi transition-colors disabled:opacity-50 inline-flex items-center gap-1.5">
+                        {busy === `save:${p.id}` ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save
+                      </button>
+                      <button onClick={() => setEditing(null)}
+                        className="h-9 px-3 rounded-[9px] bg-mac-fill border border-mac-stroke text-[12.5px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">Cancel</button>
+                    </div>
+                  </div>
+                )}
+
+                {rowMsg?.id === p.id && (
+                  <div className={`px-3.5 pb-3 -mt-0.5 text-[11.5px] ${rowMsg.ok ? "text-mac-green" : "text-mac-red"}`}>{rowMsg.text}</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="flex items-center justify-between gap-3 mt-3">
+        <p className="text-[11px] text-mac-ink3 leading-relaxed max-w-[40ch]">
+          A key set here is saved securely and read automatically — no files to edit. Local
+          (Ollama) needs no key; pick it in the Model list below.
+        </p>
+        <div className="shrink-0 flex flex-col items-end gap-1.5">
+          <button onClick={testNow} disabled={busy === "test"}
+            className="h-8 px-3.5 rounded-[9px] bg-mac-fill border border-mac-stroke text-[12.5px] text-mac-ink2 hover:text-mac-ink hover:border-mac-strokeHi transition-colors inline-flex items-center gap-1.5 disabled:opacity-60">
+            {busy === "test" ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />} Test connection
+          </button>
+          {testMsg && <span className={`text-[11.5px] ${testMsg.ok ? "text-mac-green" : "text-mac-red"}`}>{testMsg.text}</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PreferencesSection({ dir, onReveal }: { dir: string; onReveal: () => void }) {
   const [providers, setProviders] = useState<ModelProvider[] | null>(null);
   const [current, setCurrent] = useState<{ provider: string; model: string | null } | null>(null);
@@ -3566,6 +3763,10 @@ function PreferencesSection({ dir, onReveal }: { dir: string; onReveal: () => vo
   return (
     <div className="space-y-5">
       <SectionHeader title="Preferences" sub="The AI model Himmy runs on, and where your data lives." />
+
+      <AiKeysSection current={current} />
+
+      <div className="h-px bg-mac-stroke" />
 
       <div>
         <div className="flex items-center justify-between mb-2.5">
@@ -3642,6 +3843,54 @@ function PreferencesSection({ dir, onReveal }: { dir: string; onReveal: () => vo
   );
 }
 
+/* ─────────────────────────────────────────────────────────────────────────────
+   In-app AI setup — a non-coder picks a provider, pastes a key, and confirms it
+   works, all inside Himmy (no .env). The key is written through himmy's writable
+   secrets store (keychain on macOS / encrypted file elsewhere — the same path the
+   Google sign-in uses) and read back automatically by the inference layer. The
+   key VALUE is never displayed, returned, or stored in the frontend.
+   ──────────────────────────────────────────────────────────────────────────── */
+
+// Open a "get a key" page in the user's real browser (Electron shell), with a graceful
+// web fallback. Used by the onboarding key step and the Settings rows.
+function openExternal(url: string) {
+  if (!url) return;
+  const s = (window as any).himmy;
+  if (s?.openExternal) s.openExternal(url);
+  else window.open(url, "_blank");
+}
+
+// A small, friendly menu of sensible model choices per provider for the onboarding
+// dropdown. Kept short on purpose — a non-coder shouldn't have to scan a giant list.
+// The first entry is the default. Ollama is handled separately (we read whatever the
+// user already has installed via /models).
+const MODEL_CHOICES: Record<string, { id: string; label: string; hint?: string }[]> = {
+  openrouter: [
+    { id: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash", hint: "fast · cheap · great default" },
+    { id: "openai/gpt-4o-mini", label: "GPT-4o mini", hint: "fast · cheap" },
+    { id: "anthropic/claude-haiku-4.5", label: "Claude Haiku 4.5", hint: "quick & capable" },
+    { id: "anthropic/claude-sonnet-4.5", label: "Claude Sonnet 4.5", hint: "smartest · pricier" },
+    { id: "openai/gpt-4o", label: "GPT-4o", hint: "smart · pricier" },
+  ],
+  openai: [
+    { id: "gpt-4o-mini", label: "GPT-4o mini", hint: "fast · cheap · great default" },
+    { id: "gpt-4o", label: "GPT-4o", hint: "smart · pricier" },
+  ],
+  anthropic: [
+    { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5", hint: "fast · cheap · great default" },
+    { id: "claude-sonnet-4-5-20250929", label: "Claude Sonnet 4.5", hint: "smartest · pricier" },
+  ],
+};
+
+// The icon shown on each provider card / row.
+const PROVIDER_ICON: Record<string, LucideIcon> = {
+  openrouter: Sparkles,
+  openai: BrainCircuit,
+  anthropic: BrainCircuit,
+  "openai-compatible": ServerCog,
+  ollama: CpuIcon,
+};
+
 type AccountTab = "you" | "connections" | "permissions" | "activity" | "backup" | "preferences";
 const ACCOUNT_SECTIONS: { id: AccountTab; label: string; icon: LucideIcon }[] = [
   { id: "you", label: "You", icon: Sparkles },
@@ -3651,6 +3900,365 @@ const ACCOUNT_SECTIONS: { id: AccountTab; label: string; icon: LucideIcon }[] = 
   { id: "backup", label: "Backup & Sync", icon: FileDown },
   { id: "preferences", label: "Preferences", icon: Settings },
 ];
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   First-run onboarding — the warm, no-jargon "connect your AI brain" flow. A non-
+   coder opens Himmy, picks a provider, pastes a key (or picks a local model), and
+   confirms it works — in well under a minute, no .env. Shown when /provider/status
+   reports the app can't run inference yet; reopenable any time from Settings.
+   ──────────────────────────────────────────────────────────────────────────── */
+
+type OnbStep = "welcome" | "provider" | "key" | "done";
+
+function OnboardingModal({ onClose, onReady, dismissable = true }: {
+  onClose: () => void;          // user dismissed (or finished) — hide the modal
+  onReady?: () => void;         // a working setup was confirmed — let the app refresh state
+  dismissable?: boolean;        // first-run can be dismissed; "Add key" entry is the same flow
+}) {
+  const [step, setStep] = useState<OnbStep>("welcome");
+  const [providers, setProviders] = useState<ProviderInfo[] | null>(null);
+  const [picked, setPicked] = useState<ProviderInfo | null>(null);
+
+  // Key + model state for the active provider.
+  const [keyVal, setKeyVal] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [model, setModel] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");          // only for the custom endpoint
+  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
+
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");              // friendly, inline
+  const [latency, setLatency] = useState<number | null>(null);
+
+  useEffect(() => {
+    api.providerKeys().then((r: ProviderKeysResult) => setProviders(r.providers)).catch(() => setProviders([]));
+  }, []);
+
+  // When a provider is chosen, seed a sensible default model + (for Ollama) load
+  // whatever's installed locally so the user just picks from a dropdown.
+  const choose = (p: ProviderInfo) => {
+    setPicked(p);
+    setError(""); setKeyVal(""); setShowKey(false); setBaseUrl(""); setLatency(null);
+    const def = p.default_model || MODEL_CHOICES[p.id]?.[0]?.id || "";
+    setModel(def);
+    if (p.id === "ollama") {
+      api.models.list().then((r) => {
+        const oll = r.providers.find((x) => x.id === "ollama");
+        const ids = (oll?.models || []).map((m) => m.id);
+        setOllamaModels(ids);
+        if (ids.length && !def) setModel(ids[0]);
+      }).catch(() => setOllamaModels([]));
+    }
+    setStep("key");
+  };
+
+  // Save the key (if any), persist provider+model, then run a one-token "ping" to prove it.
+  const testAndFinish = async () => {
+    if (!picked) return;
+    setBusy(true); setError(""); setLatency(null);
+    try {
+      // 1) Store the pasted key (key providers only). Surfaces a friendly error inline.
+      if (picked.needs_key) {
+        const sk = await api.setProviderKey(picked.id, keyVal.trim());
+        if (!sk.ok) { setError(sk.error || "That key was rejected — check it and try again."); setBusy(false); return; }
+      }
+      // 2) Persist provider + model (reuses the /models path) so every message runs on this choice.
+      const bu = picked.id === "openai-compatible" ? baseUrl.trim() : undefined;
+      await api.models.set(picked.id, model || null, bu).catch(() => {});
+      // 3) Prove it end-to-end with a tiny ping through the real runtime.
+      const t = await api.testProvider(picked.id, model || null, bu);
+      if (!t.ok) { setError(t.error || "Couldn't reach the model — check your key and try again."); setBusy(false); return; }
+      setLatency(t.latency_ms ?? null);
+      setStep("done");
+      onReady?.();
+    } catch {
+      setError("Something went wrong reaching Himmy. Make sure the app is running and try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const back = () => {
+    setError("");
+    if (step === "provider") setStep("welcome");
+    else if (step === "key") setStep("provider");
+  };
+
+  // Can we attempt the test? Key providers need a key; the custom endpoint also needs an address.
+  const canTest = !!picked && (!picked.needs_key || keyVal.trim().length >= 8)
+    && (picked.id !== "openai-compatible" || baseUrl.trim().length > 0);
+
+  const modelChoices = picked ? (MODEL_CHOICES[picked.id] || []) : [];
+
+  return (
+    <div className="absolute inset-0 z-[60] grid place-items-center bg-black/55 backdrop-blur-[2px]"
+      onMouseDown={() => dismissable && onClose()}>
+      <div onMouseDown={(e) => e.stopPropagation()}
+        className="w-[480px] max-w-[calc(100%-3rem)] rounded-[20px] bg-[rgba(28,29,35,0.98)] backdrop-blur-2xl border border-mac-strokeHi shadow-pop overflow-hidden flex flex-col">
+
+        {/* header: a back arrow on inner steps + a dismiss (only when allowed) */}
+        <div className="h-12 px-3 flex items-center justify-between shrink-0">
+          {step !== "welcome" && step !== "done" ? (
+            <button onClick={back} className="h-8 w-8 grid place-items-center rounded-[9px] text-mac-ink3 hover:text-mac-ink hover:bg-mac-fill transition-colors">
+              <ArrowLeft size={16} />
+            </button>
+          ) : <span className="w-8" />}
+          <StepDots step={step} />
+          {dismissable
+            ? <button onClick={onClose} className="h-8 w-8 grid place-items-center rounded-[9px] text-mac-ink3 hover:text-mac-ink hover:bg-mac-fill transition-colors"><X size={16} /></button>
+            : <span className="w-8" />}
+        </div>
+
+        <div className="px-7 pb-7 pt-1">
+          {step === "welcome" && <OnbWelcome onNext={() => setStep("provider")} />}
+
+          {step === "provider" && (
+            <OnbProviders providers={providers} onPick={choose} />
+          )}
+
+          {step === "key" && picked && (
+            <OnbKey
+              p={picked}
+              keyVal={keyVal} setKeyVal={(v) => { setKeyVal(v); setError(""); }}
+              showKey={showKey} setShowKey={setShowKey}
+              model={model} setModel={setModel}
+              baseUrl={baseUrl} setBaseUrl={(v) => { setBaseUrl(v); setError(""); }}
+              modelChoices={modelChoices} ollamaModels={ollamaModels}
+              error={error} busy={busy} canTest={canTest}
+              onGetKey={() => openExternal(picked.key_url || "")}
+              onTest={testAndFinish}
+            />
+          )}
+
+          {step === "done" && picked && (
+            <OnbDone p={picked} model={model} latency={latency} onClose={() => { onClose(); }} />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The little progress dots in the header (welcome · pick · key · done).
+function StepDots({ step }: { step: OnbStep }) {
+  const order: OnbStep[] = ["welcome", "provider", "key", "done"];
+  const idx = order.indexOf(step);
+  return (
+    <div className="flex items-center gap-1.5">
+      {order.map((s, i) => (
+        <span key={s} className={`h-1.5 rounded-full transition-all ${
+          i === idx ? "w-5 bg-mac-accent" : i < idx ? "w-1.5 bg-mac-accentHi/60" : "w-1.5 bg-mac-stroke"}`} />
+      ))}
+    </div>
+  );
+}
+
+function OnbWelcome({ onNext }: { onNext: () => void }) {
+  return (
+    <div className="text-center pt-3 pb-2">
+      <div className="mx-auto h-16 w-16 rounded-[20px] grid place-items-center bg-gradient-to-b from-mac-accent to-mac-accentHi shadow-pop mb-5">
+        <Sparkles size={28} className="text-white" strokeWidth={2} />
+      </div>
+      <h2 className="font-display text-[22px] font-semibold tracking-[-0.02em] text-mac-ink">Welcome to Himmy</h2>
+      <p className="text-[13.5px] leading-relaxed text-mac-ink2 mt-2.5 max-w-[34ch] mx-auto">
+        Your personal assistant for reading, planning, and getting things done. First,
+        let's connect the AI brain that powers it — it takes about a minute.
+      </p>
+      <button onClick={onNext}
+        className="mt-6 h-11 w-full rounded-[12px] bg-mac-accent text-white text-[14px] font-medium hover:bg-mac-accentHi transition-colors inline-flex items-center justify-center gap-2">
+        Get started <ArrowRight size={16} strokeWidth={2.25} />
+      </button>
+      <p className="text-[11.5px] text-mac-ink3 mt-3.5">Your keys stay on this Mac, in the system keychain. Nothing is shared.</p>
+    </div>
+  );
+}
+
+function OnbProviders({ providers, onPick }: { providers: ProviderInfo[] | null; onPick: (p: ProviderInfo) => void }) {
+  return (
+    <div className="pt-1">
+      <h2 className="font-display text-[18px] font-semibold tracking-[-0.01em] text-mac-ink text-center">Connect your AI brain</h2>
+      <p className="text-[12.5px] leading-relaxed text-mac-ink2 mt-1.5 mb-5 text-center max-w-[36ch] mx-auto">
+        Pick where Himmy's intelligence comes from. Not sure? OpenRouter is the easy choice.
+      </p>
+      {providers === null ? (
+        <div className="h-40 grid place-items-center text-mac-ink3"><Loader2 size={20} className="animate-spin" /></div>
+      ) : (
+        <div className="space-y-2">
+          {providers.map((p) => {
+            const Icon = PROVIDER_ICON[p.id] || Sparkles;
+            return (
+              <button key={p.id} onClick={() => onPick(p)}
+                className="group w-full flex items-center gap-3.5 p-3.5 rounded-[14px] bg-mac-fill border border-mac-stroke hover:border-mac-accent hover:bg-mac-fillHi transition-all text-left">
+                <div className="h-10 w-10 shrink-0 grid place-items-center rounded-[11px] bg-mac-fillHi group-hover:bg-mac-accentDim transition-colors">
+                  <Icon size={19} className="text-mac-accentHi" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[14px] font-medium text-mac-ink">{p.label}</span>
+                    {p.recommended && <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-mac-accent/20 text-mac-accentHi">Recommended</span>}
+                    {!p.needs_key && p.configured && <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-mac-green/15 text-mac-green">Running</span>}
+                    {p.configured && p.needs_key && <Check size={13} className="text-mac-green" />}
+                  </div>
+                  <div className="text-[12px] text-mac-ink3 mt-0.5 leading-snug">{p.blurb}</div>
+                </div>
+                <ChevronRight size={16} className="text-mac-ink3 group-hover:text-mac-ink shrink-0 transition-colors" />
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OnbKey({ p, keyVal, setKeyVal, showKey, setShowKey, model, setModel, baseUrl, setBaseUrl,
+  modelChoices, ollamaModels, error, busy, canTest, onGetKey, onTest }: {
+  p: ProviderInfo;
+  keyVal: string; setKeyVal: (v: string) => void;
+  showKey: boolean; setShowKey: (v: boolean) => void;
+  model: string; setModel: (v: string) => void;
+  baseUrl: string; setBaseUrl: (v: string) => void;
+  modelChoices: { id: string; label: string; hint?: string }[];
+  ollamaModels: string[];
+  error: string; busy: boolean; canTest: boolean;
+  onGetKey: () => void; onTest: () => void;
+}) {
+  const Icon = PROVIDER_ICON[p.id] || Sparkles;
+  const isOllama = p.id === "ollama";
+  const isCustom = p.id === "openai-compatible";
+
+  return (
+    <div className="pt-1">
+      <div className="flex items-center gap-2.5 justify-center mb-1">
+        <div className="h-8 w-8 grid place-items-center rounded-[10px] bg-mac-fillHi"><Icon size={16} className="text-mac-accentHi" /></div>
+        <h2 className="font-display text-[18px] font-semibold tracking-[-0.01em] text-mac-ink">{p.label}</h2>
+      </div>
+      <p className="text-[12.5px] leading-relaxed text-mac-ink2 mt-1 mb-5 text-center max-w-[36ch] mx-auto">
+        {isOllama
+          ? "Local & private — runs on your computer, no key needed. Just pick a model."
+          : isCustom
+            ? "Point Himmy at your own OpenAI-compatible endpoint — its address and (optionally) a key."
+            : "Paste your key below. We'll save it securely in your Mac's keychain — never shared."}
+      </p>
+
+      {/* key field (key providers only) */}
+      {p.needs_key && (
+        <div className="mb-4">
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-[11.5px] font-medium text-mac-ink2">Your API key</label>
+            {p.key_url && (
+              <button onClick={onGetKey} className="text-[11.5px] text-mac-accentHi hover:underline inline-flex items-center gap-1">
+                Get a key <ExternalLink size={11} />
+              </button>
+            )}
+          </div>
+          <div className="relative">
+            <input
+              type={showKey ? "text" : "password"}
+              value={keyVal}
+              onChange={(e) => setKeyVal(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && canTest && !busy) onTest(); }}
+              placeholder="Paste your key here"
+              autoFocus
+              spellCheck={false} autoComplete="off"
+              className="w-full h-11 pl-3.5 pr-11 rounded-[11px] bg-white/[0.04] ring-1 ring-inset ring-white/10 focus:ring-mac-accent text-[13px] text-mac-ink placeholder:text-mac-ink3 outline-none font-mono transition-shadow" />
+            <button onClick={() => setShowKey(!showKey)} type="button"
+              title={showKey ? "Hide key" : "Show key"}
+              className="absolute right-1.5 top-1.5 h-8 w-8 grid place-items-center rounded-[8px] text-mac-ink3 hover:text-mac-ink hover:bg-mac-fill transition-colors">
+              {showKey ? <EyeOff size={15} /> : <Eye size={15} />}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* custom endpoint address */}
+      {isCustom && (
+        <div className="mb-4">
+          <label className="text-[11.5px] font-medium text-mac-ink2 mb-1.5 block">Endpoint address</label>
+          <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} spellCheck={false} autoComplete="off"
+            placeholder="http://localhost:8400/v1"
+            className="w-full h-11 px-3.5 rounded-[11px] bg-white/[0.04] ring-1 ring-inset ring-white/10 focus:ring-mac-accent text-[13px] text-mac-ink placeholder:text-mac-ink3 outline-none font-mono transition-shadow" />
+        </div>
+      )}
+
+      {/* model picker */}
+      <div className="mb-1">
+        <label className="text-[11.5px] font-medium text-mac-ink2 mb-1.5 block">Model</label>
+        {isOllama ? (
+          ollamaModels.length > 0 ? (
+            <OnbModelSelect value={model} onChange={setModel}
+              options={ollamaModels.map((id) => ({ id, label: id }))} />
+          ) : (
+            <div className="rounded-[11px] bg-mac-fill border border-mac-stroke px-3.5 py-3 text-[12px] text-mac-ink3 leading-relaxed">
+              No local models found. Install <span className="font-mono text-mac-ink2">ollama</span> and run{" "}
+              <span className="font-mono text-mac-ink2">ollama pull llama3.2</span>, then come back.
+            </div>
+          )
+        ) : isCustom ? (
+          <input value={model} onChange={(e) => setModel(e.target.value)} spellCheck={false} autoComplete="off"
+            placeholder="model name (e.g. gemma-3)"
+            className="w-full h-11 px-3.5 rounded-[11px] bg-white/[0.04] ring-1 ring-inset ring-white/10 focus:ring-mac-accent text-[13px] text-mac-ink placeholder:text-mac-ink3 outline-none font-mono transition-shadow" />
+        ) : (
+          <OnbModelSelect value={model} onChange={setModel} options={modelChoices} />
+        )}
+      </div>
+
+      {error && (
+        <div className="mt-4 rounded-[11px] bg-mac-red/10 border border-mac-red/30 px-3.5 py-2.5 text-[12.5px] text-mac-red leading-snug flex items-start gap-2">
+          <Info size={14} className="mt-0.5 shrink-0" /> <span>{error}</span>
+        </div>
+      )}
+
+      <button onClick={onTest} disabled={!canTest || busy}
+        className="mt-5 h-11 w-full rounded-[12px] bg-mac-accent text-white text-[14px] font-medium hover:bg-mac-accentHi transition-colors inline-flex items-center justify-center gap-2 disabled:opacity-50">
+        {busy ? <><Loader2 size={16} className="animate-spin" /> Checking…</> : <>Test &amp; finish <Check size={16} strokeWidth={2.5} /></>}
+      </button>
+    </div>
+  );
+}
+
+// A compact, native-feeling select used by the onboarding model picker.
+function OnbModelSelect({ value, onChange, options }: {
+  value: string; onChange: (v: string) => void; options: { id: string; label: string; hint?: string }[];
+}) {
+  return (
+    <div className="relative">
+      <select value={value} onChange={(e) => onChange(e.target.value)}
+        className="w-full h-11 pl-3.5 pr-9 rounded-[11px] bg-white/[0.04] ring-1 ring-inset ring-white/10 focus:ring-mac-accent text-[13px] text-mac-ink outline-none appearance-none cursor-pointer transition-shadow">
+        {options.length === 0 && <option value="">Choose a model…</option>}
+        {options.map((o) => (
+          <option key={o.id} value={o.id} className="bg-[#1c1d23] text-mac-ink">
+            {o.label}{o.hint ? ` — ${o.hint}` : ""}
+          </option>
+        ))}
+      </select>
+      <ChevronDown size={15} className="absolute right-3 top-1/2 -translate-y-1/2 text-mac-ink3 pointer-events-none" />
+    </div>
+  );
+}
+
+function OnbDone({ p, model, latency, onClose }: {
+  p: ProviderInfo; model: string; latency: number | null; onClose: () => void;
+}) {
+  return (
+    <div className="text-center pt-3 pb-2">
+      <div className="mx-auto h-16 w-16 rounded-full grid place-items-center bg-mac-green/15 mb-5">
+        <CheckCircle2 size={34} className="text-mac-green" strokeWidth={2} />
+      </div>
+      <h2 className="font-display text-[22px] font-semibold tracking-[-0.02em] text-mac-ink">You're all set</h2>
+      <p className="text-[13.5px] leading-relaxed text-mac-ink2 mt-2.5 max-w-[34ch] mx-auto">
+        Himmy is connected to <span className="text-mac-ink font-medium">{p.label}</span>
+        {model ? <> on <span className="text-mac-ink font-medium">{model}</span></> : null} and answered in a flash
+        {latency != null ? <> ({latency} ms)</> : null}. You can start using it now.
+      </p>
+      <button onClick={onClose}
+        className="mt-6 h-11 w-full rounded-[12px] bg-mac-accent text-white text-[14px] font-medium hover:bg-mac-accentHi transition-colors inline-flex items-center justify-center gap-2">
+        Start using Himmy <ArrowRight size={16} strokeWidth={2.25} />
+      </button>
+      <p className="text-[11.5px] text-mac-ink3 mt-3.5">You can change this any time in Settings → Preferences.</p>
+    </div>
+  );
+}
 
 function AccountPanel({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<AccountTab>("you");

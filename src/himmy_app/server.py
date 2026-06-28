@@ -7,8 +7,10 @@ Endpoints:
   POST /index         -> index_papers stats      body: {force?}
 
 This is deliberately NOT himmy's multi-tenant BFF (``himmy serve``, the /v1 control plane).
-It's a single-user local endpoint sized for an embedded chat. CORS is wide-open because it
-only ever binds to localhost.
+It's a single-user local endpoint sized for an embedded chat. It binds to localhost only, and
+CORS is scoped to the Electron renderer + Vite dev origins (NOT a wildcard) — localhost binding
+alone does not stop a browser-driven cross-origin request, so the sensitive ``/provider/*``
+endpoints are additionally guarded by a per-launch ``X-Himmy-Token`` shared secret.
 """
 
 from __future__ import annotations
@@ -445,6 +447,19 @@ class NewsSummaryRequest(BaseModel):
 
 class ModelSetRequest(BaseModel):
     provider: str
+    model: str | None = None
+    base_url: str | None = None
+
+
+class ProviderKeyRequest(BaseModel):
+    provider: str
+    key: str
+
+
+class ProviderTestRequest(BaseModel):
+    # All optional: when provider/model are supplied we switch to them first (reusing the
+    # /models PUT path), then run a tiny ping against whatever the app is now configured for.
+    provider: str | None = None
     model: str | None = None
     base_url: str | None = None
 
@@ -976,16 +991,72 @@ def create_app() -> FastAPI:
             await routines_mod.get_scheduler().stop()
 
     app = FastAPI(title="Himmy", version="0.1.0", lifespan=_lifespan)
+
+    # --- CORS / cross-origin policy -------------------------------------------------------
+    # SECURITY: this server performs outbound network actions (provider 'ping') and holds the
+    # user's API keys, so it must NOT be callable cross-origin by an arbitrary web page. The
+    # only legitimate front-ends are the Electron renderer (which loads from file:// when
+    # packaged → the browser sends "Origin: null" or no Origin at all, never a real web origin)
+    # and the Vite dev server. We therefore allow-list those explicit origins and do NOT echo
+    # arbitrary origins. A malicious site's Origin will not match → the browser blocks it.
+    _ALLOWED_ORIGINS = [
+        "http://localhost:5173",   # Vite dev server (npm run dev)
+        "http://127.0.0.1:5173",
+    ]
+    # An extra dev/extension origin can be allow-listed explicitly via env (comma-separated);
+    # never a wildcard.
+    _extra = (os.environ.get("HIMMY_APP_ALLOWED_ORIGINS") or "").strip()
+    if _extra:
+        _ALLOWED_ORIGINS.extend(o.strip() for o in _extra.split(",") if o.strip())
     app.add_middleware(
-        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+        CORSMiddleware,
+        allow_origins=_ALLOWED_ORIGINS,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
+    # --- localhost shared-secret guard for sensitive endpoints ----------------------------
+    # The provider endpoints (read which providers are configured, save/delete a key, run the
+    # outbound test) are state-changing and key-adjacent. We protect them with a per-launch
+    # shared secret the Electron renderer injects as `X-Himmy-Token`. When HIMMY_APP_TOKEN is
+    # unset (e.g. a bare `python -m himmy_app.server` for local dev/tests) we fall back to an
+    # Origin check: a request carrying a browser Origin that isn't allow-listed is rejected,
+    # which is exactly the cross-site abuse vector. Same-origin / non-browser callers (no
+    # Origin header) on loopback still work.
+    from starlette.responses import JSONResponse as _JSONResponse
+
+    _APP_TOKEN = (os.environ.get("HIMMY_APP_TOKEN") or "").strip()
+    _GUARDED_PREFIXES = ("/provider/",)
+
+    def _origin_allowed(origin: str | None) -> bool:
+        # No Origin header → not a cross-site browser request (curl, the Electron file://
+        # renderer often sends no Origin or "null"). Treat "null" as not-a-web-origin too.
+        if not origin or origin == "null":
+            return True
+        return origin in _ALLOWED_ORIGINS
+
     @app.middleware("http")
-    async def _allow_private_network(request: Any, call_next: Any) -> Any:
-        # Let the browser extension (a public/secure context) reach this localhost server.
-        response = await call_next(request)
-        response.headers["Access-Control-Allow-Private-Network"] = "true"
-        return response
+    async def _guard_sensitive(request: Any, call_next: Any) -> Any:
+        path = request.url.path
+        if any(path.startswith(p) for p in _GUARDED_PREFIXES):
+            # CORS preflight is handled by the CORS middleware; let OPTIONS through.
+            if request.method != "OPTIONS":
+                origin = request.headers.get("origin")
+                token = (request.headers.get("x-himmy-token") or "").strip()
+                if _APP_TOKEN:
+                    # A token is configured → it is mandatory (constant-time compare).
+                    import hmac
+                    if not hmac.compare_digest(token, _APP_TOKEN):
+                        return _JSONResponse(
+                            {"ok": False, "error": "Not allowed."}, status_code=403,
+                        )
+                elif not _origin_allowed(origin):
+                    # No token configured → at least block disallowed cross-site origins.
+                    return _JSONResponse(
+                        {"ok": False, "error": "Not allowed (cross-origin)."},
+                        status_code=403,
+                    )
+        return await call_next(request)
 
     # The papers RAG index builds lazily on first ask_papers (on the server's own event loop).
     # (A background "warm" was tried — both a thread version, which the GIL still froze, and a
@@ -2437,11 +2508,192 @@ p{{font-size:14px;line-height:1.5;color:#aeaeb2;margin:0}}
                 ok_provider = True
         if not ok_provider:
             return {"ok": False, "message": f"{body.provider} isn't set up on this Mac yet."}
-        set_active_model(body.provider, body.model, body.base_url)
+        from himmy_app.url_guard import BaseUrlError
+        try:
+            set_active_model(body.provider, body.model, body.base_url)
+        except BaseUrlError as exc:
+            return {"ok": False, "message": str(exc)}
         live = load_config()
         return {"ok": True, "current": {"provider": live.provider, "model": live.model}}
 
+    # ---- in-app provider keys: pick a provider, paste a key, test it — NO .env edit -------
+    # A non-coder sets Himmy up entirely in the app. Keys are written through himmy's
+    # WRITABLE secrets backend exactly like the Google sign-in, and read back automatically by
+    # the inference layer. On macOS (the target platform) that backend is the system keychain,
+    # which encrypts at rest. Off-macOS it would be a PLAINTEXT 0600 file, so provider_keys
+    # refuses to store there unless the user explicitly opts in (HIMMY_ALLOW_PLAINTEXT_SECRETS).
+    # The key VALUE is never returned by any endpoint and never logged — only booleans.
+
+    def _ollama_up() -> bool:
+        """True when a local Ollama server answers (the no-key 'ready' signal).
+
+        Probes the tags endpoint synchronously (sub-second) — mirrors the /models check.
+        """
+        try:
+            import httpx as _httpx
+
+            base = (os.environ.get("HIMMY_OLLAMA_URL") or "http://localhost:11434").rstrip("/")
+            return _httpx.get(f"{base}/api/tags", timeout=1.0).status_code == 200
+        except Exception:  # noqa: BLE001 - server down / not installed
+            return False
+
+    def _provider_list() -> list[dict[str, Any]]:
+        """The 5 providers the UI offers, with booleans only — never a key value."""
+        from himmy_app import provider_keys as pk
+
+        out: list[dict[str, Any]] = []
+        for pid in pk.PROVIDER_ORDER:
+            meta = pk.PROVIDER_META.get(pid, {})
+            nk = pk.needs_key(pid)
+            if nk:
+                configured = pk.is_configured(pid)
+            else:  # ollama — "configured" = its local server is reachable
+                configured = _ollama_up()
+            out.append({
+                "id": pid,
+                "label": meta.get("label", pid),
+                "needs_key": nk,
+                "configured": bool(configured),
+                "recommended": bool(meta.get("recommended", False)),
+                "key_url": meta.get("key_url", ""),
+                "blurb": meta.get("blurb", ""),
+                "default_model": meta.get("default_model"),
+            })
+        return out
+
+    def _is_ready() -> bool:
+        """Can the app run inference right now? (a key-needing provider is configured,
+        OR local Ollama is up). Drives whether onboarding should be shown."""
+        from himmy_app import provider_keys as pk
+
+        if any(pk.is_configured(p) for p in pk.PROVIDER_KEY_NAMES):
+            return True
+        return _ollama_up()
+
+    @app.get("/provider/keys")
+    async def provider_keys_list() -> dict[str, Any]:
+        # ready folded in so the frontend can do one fetch to decide on onboarding.
+        return {"ok": True, "ready": _is_ready(), "providers": _provider_list()}
+
+    @app.get("/provider/status")
+    async def provider_status() -> dict[str, Any]:
+        return {"ok": True, "ready": _is_ready()}
+
+    @app.post("/provider/key")
+    async def provider_key_set(body: ProviderKeyRequest) -> dict[str, Any]:
+        from himmy_app import provider_keys as pk
+
+        try:
+            pk.set_key(body.provider, body.key)
+        except pk.ProviderKeyError as exc:
+            # The message is value-free + user-safe by construction; the key is never logged.
+            return {"ok": False, "provider": body.provider, "configured": False,
+                    "error": str(exc)}
+        except Exception:  # noqa: BLE001 - e.g. a misconfigured secrets backend (file mode
+            # with no base dir raises a bare RuntimeError). Never leak internals or 500 — the
+            # message is generic and value-free (the key is never in these exceptions).
+            return {"ok": False, "provider": body.provider, "configured": False,
+                    "error": "Himmy couldn't save the key — its secure store isn't set up. "
+                             "Set HIMMY_SECRETS=keychain (recommended on Mac)."}
+        return {"ok": True, "provider": body.provider, "configured": True}
+
+    @app.delete("/provider/key/{provider}")
+    async def provider_key_clear(provider: str) -> dict[str, Any]:
+        from himmy_app import provider_keys as pk
+
+        try:
+            pk.clear_key(provider)
+        except pk.ProviderKeyError as exc:
+            return {"ok": False, "provider": provider, "configured": False,
+                    "error": str(exc)}
+        except Exception:  # noqa: BLE001 - misconfigured secrets backend → friendly, no 500.
+            return {"ok": False, "provider": provider, "configured": False,
+                    "error": "Himmy couldn't update its secure store. "
+                             "Set HIMMY_SECRETS=keychain (recommended on Mac)."}
+        return {"ok": True, "provider": provider, "configured": False}
+
+    @app.post("/provider/test")
+    async def provider_test(body: ProviderTestRequest) -> dict[str, Any]:
+        """Switch to provider/model (if supplied) then run ONE tiny 'ping' through the
+        SAME inference path the app uses, returning a friendly ok/error + latency."""
+        import time as _time
+
+        from himmy_app.config import set_active_model
+
+        # 1) If the caller named a provider/model, persist it first (reuse the /models path)
+        #    so the ping — and every subsequent message — runs on exactly that choice.
+        #    The base_url is SSRF-validated inside set_active_model before any outbound call.
+        if body.provider:
+            from himmy_app.url_guard import BaseUrlError
+            try:
+                set_active_model(body.provider, body.model, body.base_url)
+            except BaseUrlError as exc:
+                return {"ok": False, "provider": body.provider, "model": body.model,
+                        "error": str(exc)}
+
+        live = load_config()
+        provider = body.provider or live.provider
+        model = body.model or live.model
+
+        # 2) Build the inference service the same way _summarize_mail / the agent do, and
+        #    send a 1-token ping. Map any failure to a short, human message (never echo keys).
+        try:
+            from himmy.cli.provider import build_inference_for
+            from himmy.services.inference.models import (
+                InferenceMessage,
+                InferenceRequest,
+            )
+
+            service = build_inference_for(provider, model)
+            request = InferenceRequest(
+                messages=[InferenceMessage(role="user", content="ping")],
+                generation_params={"temperature": 0.0, "max_tokens": 1},
+                timeout_seconds=30.0,
+            )
+            started = _time.monotonic()
+            result = await service.run(request)
+            latency_ms = int((_time.monotonic() - started) * 1000)
+        except Exception as exc:  # noqa: BLE001 - turn any RAISED failure into a safe, short message
+            return {"ok": False, "provider": provider, "model": model,
+                    "error": _friendly_test_error(exc)}
+        # himmy does NOT raise on a rejected key / quota / bad model — it returns a FAILED
+        # InferenceResponse (status=FAILED, error=InferenceError). Inspect it so a wrong key is
+        # reported as a failure, never a false "all set" in onboarding.
+        status = str(getattr(getattr(result, "status", None), "value", "") or "").upper()
+        rerr = getattr(result, "error", None)
+        if (status and status != "SUCCESS") or rerr is not None:
+            detail = getattr(rerr, "message", None) or str(rerr) if rerr is not None else status
+            return {"ok": False, "provider": provider, "model": model,
+                    "error": _friendly_test_error(Exception(str(detail)))}
+        return {"ok": True, "provider": provider, "model": model, "latency_ms": latency_ms}
+
     return app
+
+
+def _friendly_test_error(exc: Exception) -> str:
+    """Map a provider/inference failure to a short, non-coder-friendly sentence.
+
+    Never includes the key value (the underlying errors are key-redacting by design); we
+    only inspect the lowercased message text for well-known shapes.
+    """
+    msg = str(exc).lower()
+    if "needs" in msg and "key" in msg or "missing" in msg and "key" in msg:
+        return "Add your key first."
+    if any(s in msg for s in ("401", "unauthor", "invalid api key", "incorrect api key",
+                              "no auth", "authentication")):
+        return "That key was rejected — check it and try again."
+    if "403" in msg or "forbidden" in msg or "permission" in msg:
+        return "That key isn't allowed to use this model."
+    if "429" in msg or "rate limit" in msg or "quota" in msg or "insufficient" in msg:
+        return "Out of credit or rate-limited — top up or wait a moment."
+    if "base_url" in msg or "base url" in msg:
+        return "Add the endpoint address (base URL) first."
+    if any(s in msg for s in ("timeout", "timed out", "connection", "could not connect",
+                              "connect", "network", "getaddrinfo", "resolve")):
+        return "Couldn't reach the provider — check your internet (or that Ollama is running)."
+    if "model" in msg and ("not found" in msg or "does not exist" in msg or "unknown" in msg):
+        return "That model isn't available — pick another one."
+    return "That didn't work — check your key and model, then try again."
 
 
 app = create_app()

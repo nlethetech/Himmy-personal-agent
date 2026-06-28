@@ -96,13 +96,20 @@ def set_active_model(provider: str, model: str | None, base_url: str | None = No
 
     ``base_url`` is for self-hosted ``openai-compatible`` endpoints (e.g. the local
     HimalayaGPT Gemma-4 server) — load_config exports it to HIMMY_OPENAI_COMPAT_BASE_URL.
+
+    SECURITY: ``base_url`` is validated against the SSRF guard BEFORE it is persisted or
+    exported, so a hostile value (cloud metadata, internal services, port-scan target) can
+    never be written to model.json nor reach an outbound request. Raises ``BaseUrlError``.
     """
+    from himmy_app.url_guard import validate_base_url
+
+    safe_base_url = validate_base_url(base_url)
     data_dir = Path(os.environ.get("HIMMY_APP_DATA_DIR") or str(DEFAULT_DATA_DIR)).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
     choice: dict[str, str | None] = {
         "provider": (provider or "").strip(),
         "model": (model or "").strip() or None,
-        "base_url": (base_url or "").strip() or None,
+        "base_url": safe_base_url,
     }
     _model_choice_path(data_dir).write_text(json.dumps(choice), encoding="utf-8")
     return choice

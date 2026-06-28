@@ -1,6 +1,18 @@
 // Tiny client for Himmy's local backend (the himmy agent + connectors).
 const PORT = (window as any).himmy?.backendPort ?? "8131";
 const BASE = `http://127.0.0.1:${PORT}`;
+// Per-launch shared secret the Electron main process injects (absent in a plain browser).
+// Sent on every request so the backend's guard on the sensitive provider/key endpoints
+// recognises us as the real app (and a stray web page, lacking it, is rejected).
+const APP_TOKEN: string = (window as any).himmy?.appToken ?? "";
+
+// Headers every request carries: JSON content-type (callers may omit on GET/DELETE) plus
+// the app token when present.
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { ...(extra ?? {}) };
+  if (APP_TOKEN) h["X-Himmy-Token"] = APP_TOKEN;
+  return h;
+}
 
 export type Health = {
   ok: boolean;
@@ -24,7 +36,7 @@ export type ResearchResult = {
 };
 
 async function jget<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
   return res.json();
 }
@@ -32,7 +44,7 @@ async function jget<T>(path: string): Promise<T> {
 async function jpost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
@@ -40,7 +52,7 @@ async function jpost<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function jdelete<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { method: "DELETE" });
+  const res = await fetch(`${BASE}${path}`, { method: "DELETE", headers: authHeaders() });
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
   return res.json();
 }
@@ -48,7 +60,7 @@ async function jdelete<T>(path: string): Promise<T> {
 async function jput<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
@@ -58,7 +70,7 @@ async function jput<T>(path: string, body: unknown): Promise<T> {
 async function jpatch<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
@@ -471,6 +483,48 @@ export type ReadingStats = {
   total_seconds: number;
 };
 
+// In-app AI provider setup — lets a non-coder pick a provider, paste their key, and confirm it
+// works, all without touching .env. A key set here is written through himmy's writable secrets
+// layer (keychain on macOS, encrypted file elsewhere — the same path the Google sign-in uses) and
+// is read back automatically by the inference provider on the next message. SECURITY: the backend
+// NEVER returns a stored key value — only the `configured` boolean — so neither do these types.
+export type ProviderInfo = {
+  id: string;            // "openrouter" | "openai" | "anthropic" | "openai-compatible" | "ollama"
+  label: string;        // human name, e.g. "OpenRouter", "Local (Ollama)"
+  needs_key: boolean;   // false only for ollama (local, keyless)
+  configured: boolean;  // a usable key is stored (or, for ollama, the local server is reachable)
+  recommended?: boolean; // OpenRouter is badged "Recommended"
+  key_url?: string;     // where the user gets a key ("" for custom/ollama)
+  blurb?: string;       // one friendly line shown on the provider card
+  default_model?: string | null; // a sensible starter model id per provider (null for custom/ollama)
+};
+// GET /provider/keys — the 5 providers (booleans only, never a key value) plus a top-level
+// `ready` so the frontend can decide whether to show onboarding from a single fetch.
+export type ProviderKeysResult = {
+  ok: boolean;
+  ready: boolean;
+  providers: ProviderInfo[];
+};
+// POST /provider/key + DELETE /provider/key/{provider} — only booleans + a friendly error.
+export type ProviderKeyResult = {
+  ok: boolean;
+  provider: string;
+  configured: boolean;
+  error?: string;       // present on ok:false (short, human, key-free — e.g. "Paste your key first.")
+};
+// GET /provider/status — is the app able to run inference right now?
+export type ProviderStatus = { ok: boolean; ready: boolean };
+// POST /provider/test — switches to provider/model (if supplied) then runs one tiny "ping" through
+// the SAME runtime the app uses. On success: latency. On failure: a short, human `error`
+// ("That key was rejected — check it and try again." / "Add your key first.").
+export type ProviderTestResult = {
+  ok: boolean;
+  provider: string;
+  model: string | null;
+  latency_ms?: number;  // present on ok:true
+  error?: string;       // present on ok:false
+};
+
 export const api = {
   health: () => jget<Health>("/health"),
   // Token + cost usage — what Himmy has used (this session + an all-time tally).
@@ -680,6 +734,44 @@ export const api = {
     set: (provider: string, model: string | null, base_url?: string | null) =>
       jput<{ ok: boolean; current?: { provider: string; model: string | null }; message?: string }>("/models", { provider, model, base_url: base_url ?? null }),
   },
+  // In-app AI provider setup — pick a provider, paste a key, confirm it works. A key stored here
+  // is written via himmy's writable secrets layer (keychain/file) and read back automatically by
+  // the inference provider — no .env edit. NEVER sends back or echoes a stored key value.
+  provider: {
+    // The 5 providers (booleans only) + a top-level `ready` for the onboarding decision.
+    keys: () => jget<ProviderKeysResult>("/provider/keys"),
+    // Just the `ready` flag — cheap; the App fetches this on launch to decide whether to onboard.
+    status: () => jget<ProviderStatus>("/provider/status"),
+    // Store a pasted key for `provider`. Validated + persisted server-side; the value is never
+    // logged or returned. Resolves with { ok, provider, configured } (or a friendly `error`).
+    setKey: (provider: string, key: string) =>
+      jpost<ProviderKeyResult>("/provider/key", { provider, key }),
+    // Remove the stored key for `provider` (idempotent — absent is success).
+    clearKey: (provider: string) =>
+      jdelete<ProviderKeyResult>(`/provider/key/${encodeURIComponent(provider)}`),
+    // Switch to provider/model (if supplied, reusing the /models path) then run one tiny "ping"
+    // through the same runtime the app uses — the onboarding "Test & finish" confidence check.
+    // On success: { ok:true, provider, model, latency_ms }; on failure: { ok:false, error }.
+    test: (provider?: string, model?: string | null, base_url?: string | null) =>
+      jpost<ProviderTestResult>("/provider/test", {
+        provider: provider ?? null,
+        model: model ?? null,
+        base_url: base_url ?? null,
+      }),
+  },
+  // Flat aliases (the names the onboarding/Settings UI calls). Same endpoints as `api.provider.*`.
+  providerKeys: () => jget<ProviderKeysResult>("/provider/keys"),
+  providerStatus: () => jget<ProviderStatus>("/provider/status"),
+  setProviderKey: (provider: string, key: string) =>
+    jpost<ProviderKeyResult>("/provider/key", { provider, key }),
+  clearProviderKey: (provider: string) =>
+    jdelete<ProviderKeyResult>(`/provider/key/${encodeURIComponent(provider)}`),
+  testProvider: (provider?: string, model?: string | null, base_url?: string | null) =>
+    jpost<ProviderTestResult>("/provider/test", {
+      provider: provider ?? null,
+      model: model ?? null,
+      base_url: base_url ?? null,
+    }),
   news: {
     interests: () => jget<{ ok: boolean; interests: string[] }>("/news/interests"),
     setInterests: (interests: string[]) =>

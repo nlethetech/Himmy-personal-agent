@@ -4,6 +4,9 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("himmy", {
   backendPort: process.env.HIMMY_APP_PORT || "8131",
+  // Per-launch shared secret the renderer must send (X-Himmy-Token) on the sensitive
+  // provider/key endpoints. Set by the main process; absent in plain browser/dev contexts.
+  appToken: process.env.HIMMY_APP_TOKEN || "",
   platform: process.platform,
   // Open the native "Add papers" dialog → array of chosen PDF paths.
   pickPapers: () => ipcRenderer.invoke("library:pickFiles"),

@@ -5,6 +5,15 @@ const { app, BrowserWindow, shell, dialog, ipcMain, Notification } = require("el
 const { spawn } = require("node:child_process");
 const http = require("node:http");
 const path = require("node:path");
+const crypto = require("node:crypto");
+
+// Per-launch shared secret. The backend requires it (X-Himmy-Token) on the sensitive
+// provider/key endpoints so no other process or web page on this machine can read/clear the
+// user's keys or trigger an outbound provider call. Generated fresh each launch, passed to
+// the backend via env and to the renderer via preload — it never touches disk.
+const APP_TOKEN = process.env.HIMMY_APP_TOKEN || crypto.randomBytes(32).toString("hex");
+// Make the token visible to the preload (which reads process.env) so the renderer can send it.
+process.env.HIMMY_APP_TOKEN = APP_TOKEN;
 
 // Native "Add papers" file picker — returns the chosen PDF paths to the renderer.
 ipcMain.handle("library:pickFiles", async () => {
@@ -97,7 +106,12 @@ async function startBackend() {
   console.log("[Himmy] starting backend…");
   backendProc = spawn(VENV_PYTHON, ["-m", "himmy_app.server"], {
     cwd: REPO_ROOT,
-    env: { ...process.env, HIMMY_APP_PORT: BACKEND_PORT, PYTHONUNBUFFERED: "1" },
+    env: {
+      ...process.env,
+      HIMMY_APP_PORT: BACKEND_PORT,
+      HIMMY_APP_TOKEN: APP_TOKEN,
+      PYTHONUNBUFFERED: "1",
+    },
     stdio: "inherit",
   });
   backendProc.on("exit", (code) =>
