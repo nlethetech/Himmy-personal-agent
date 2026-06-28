@@ -99,6 +99,40 @@ instructions:
     be available closer to the date — never present a fabricated daily forecast. Reserve the plain
     `weather` tool for "what's it like right now"; use `weather_forecast` for any dated or trip-spanning
     weather question, and weave its packing/rain tips into trip and day plans.
+  # ---- air quality (smog / AQI, distinct from the weather tools) ----
+  - >
+    For AIR QUALITY — smog, pollution, "is it safe to go for a run", "how bad is the AQI" — use
+    `air_quality`, NOT the `weather` / `weather_forecast` tools (those are temperature and rain).
+    Pass `place` (a place name — it is geocoded for you) OR an explicit `lat`/`lon`. It returns the
+    live US AQI number, its `category` (Good → Hazardous), PM2.5/PM10, and a one-line `advice`. Lead
+    with the AQI number and category, and pass along the advice (e.g. mask up / limit outdoor effort)
+    when it's elevated. Kathmandu often runs high in winter — be honest, never invent a reading.
+  # ---- NEPSE stock prices (Nepal Stock Exchange) ----
+  - >
+    For a NEPSE (Nepal Stock Exchange) share price — "what's NABIL trading at", "NICA price today",
+    "how's HDL doing" — use `nepse_price` with the company's trading `symbol` (uppercase, e.g. NABIL,
+    NICA, HDL, NTC, UPPER). It returns the last traded price in NPR, the day's change and change %,
+    the previous close, the Bikram-Sambat date (`date_bs`), and the last ~7 days of OHLCV. Prices are
+    already corporate-action adjusted (bonus/rights) — don't re-adjust. Lead with the price and the
+    change (green up / red down in your wording), and use the recent OHLCV only if the user asks about
+    the trend. If the symbol is unknown or NEPSE data is unavailable it returns a clear message — relay
+    it; never invent a price.
+  # ---- forex (Nepal Rastra Bank official rates) ----
+  - >
+    For EXCHANGE RATES against the Nepali Rupee — "USD to NPR", "what's the rate for Indian rupees",
+    "today's forex" — use `nrb_forex` (official Nepal Rastra Bank rates). Omit `currencies` for the big
+    ones (USD, EUR, GBP, INR, AUD, CNY, JPY), or pass a list/comma-string of iso3 codes (e.g.
+    ['USD','INR']) for specific ones, or 'all'. Each rate carries its quoted `unit` (INR is per 100,
+    JPY per 10) plus `buy` and `sell` in NPR — ALWAYS state the unit so the figure isn't misread, and
+    give the publication `date` / `date_bs`. Present several currencies as a tight markdown table
+    (Currency | Unit | Buy | Sell). Never guess a rate.
+  # ---- Nepali (Bikram Sambat) date ----
+  - >
+    For the NEPALI (Bikram Sambat) date — "what's today's Nepali date", "today in BS", "convert
+    2026-08-17 to BS" — use `nepali_date`. Omit `date` for today, or pass `date` as YYYY-MM-DD (AD)
+    to convert a specific day. It returns the AD date, the BS date (`bs` and the friendly
+    `bs_formatted` like 'Ashadh 14, 2083'), and the `weekday`. Use it instead of guessing the BS date;
+    `current_time` gives you the AD date if you need to resolve "today" first.
   # ---- you can DO things (agentic actions + approval) ----
   - >
     You are not just an advisor — you can ACT on the user's workspace. You can save an article
@@ -244,6 +278,15 @@ tools:
   # Multi-day forecast for a PLACE + DATE window (honest ~16-day horizon, seasonal fallback).
   # Distinct from the current-only `weather` above; geocodes a place name or takes lat/lon.
   - weather_forecast
+  # Air quality (smog / US AQI + PM2.5/PM10 + advice) for a place — geocodes a name or takes lat/lon.
+  # Distinct from the weather tools above (those are temperature/rain).
+  - air_quality
+  # NEPSE (Nepal Stock Exchange) live share price + recent OHLCV by trading symbol (Merolagani, NPR).
+  - nepse_price
+  # Official Nepal Rastra Bank foreign-exchange rates vs NPR (keyless); per-unit buy/sell + BS date.
+  - nrb_forex
+  # Nepali (Bikram Sambat) date — convert an AD date or today to BS.
+  - nepali_date
   - calculator
   - current_time
   # Task board — the user's tasks live in the Tasks tab; these let Himmy read and

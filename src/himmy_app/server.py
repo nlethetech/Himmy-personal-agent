@@ -762,6 +762,62 @@ def _google_redirect_uri() -> str:
     return f"http://127.0.0.1:{port}/google/callback"
 
 
+# --------------------------------------------------------------------------------------------
+# NEPSE daily price refresh — a deterministic background loop (no model, no HITL).
+#
+# We keep a tiny default watchlist (the NEPSE index + a handful of liquid symbols) warm so the
+# Markets surface opens instantly. The fetch goes through the same guarded, host-pinned,
+# rate-limited connector as the chat tool (``connectors.nepse``), and EMPTY-READ = NO-WRITE is
+# enforced inside ``store_bars`` (an empty fetch writes 0 rows — we never clobber good data).
+#
+# Cadence: once per day, shortly AFTER the 15:10 NST market close, on TRADING DAYS ONLY. NEPSE
+# traded Sun–Thu before the 2026-04-12 five-day cutover and Mon–Fri from that date on; the day
+# logic below honours both eras so a historical/late catch-up still asks on the right weekday.
+# --------------------------------------------------------------------------------------------
+#: A small, liquid default watchlist (kept warm for the Markets surface). The leading index gives
+#: the market-wide line; the rest are heavily-traded large caps.
+NEPSE_WATCHLIST: tuple[str, ...] = ("NEPSE", "NABIL", "NICA", "HDL", "NTC")
+
+#: The day NEPSE moved from a Sun–Thu week to a Mon–Fri week (see MEMORY: NEPSE trading week).
+_NEPSE_FIVEDAY_CUTOVER = __import__("datetime").date(2026, 4, 12)
+
+#: Refresh fires once the local clock is at/after this NST wall-clock time on a trading day. The
+#: real close is 15:00 NST; we wait until 15:10 so the last candle has settled at the source.
+_NEPSE_CLOSE_HOUR = 15
+_NEPSE_CLOSE_MIN = 10
+
+
+def _nepal_now() -> Any:
+    """Zone-aware *now* in Nepal time (HIMMY_TZ → Asia/Kathmandu, else UTC).
+
+    Mirrors ``routines._local_zone`` so the close-time gate uses the same wall clock as the rest
+    of the app; a bad/missing tz name degrades to UTC rather than raising.
+    """
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    name = os.environ.get("HIMMY_TZ") or "Asia/Kathmandu"
+    try:
+        tz: Any = ZoneInfo(name)
+    except Exception:  # noqa: BLE001 - a bad tz name falls back to UTC, never crashes
+        tz = _dt.timezone.utc
+    return _dt.datetime.now(tz)
+
+
+def _nepse_is_trading_day(d: Any) -> bool:
+    """True if ``d`` (a date) is a NEPSE trading weekday for its era.
+
+    Sun–Thu before the 2026-04-12 five-day cutover; Mon–Fri on/after it. ``weekday()`` is
+    Mon=0..Sun=6, so post-cutover trading days are 0–4 and pre-cutover are Sun(6) + Mon–Thu(0–3).
+    Public holidays are NOT modelled here — a holiday just yields an empty fetch, which is a
+    harmless no-write.
+    """
+    wd = d.weekday()
+    if d >= _NEPSE_FIVEDAY_CUTOVER:
+        return wd <= 4  # Mon–Fri
+    return wd == 6 or wd <= 3  # Sun + Mon–Thu
+
+
 def create_app() -> FastAPI:
     _load_dotenv(_ENV)
     cfg = load_config()
@@ -850,10 +906,47 @@ def create_app() -> FastAPI:
                     pass
                 await asyncio.sleep(nudges.NUDGE_INTERVAL_S)
 
+        # NEPSE daily price refresh: keep the small default watchlist warm so the Markets surface
+        # opens instantly. Deterministic (no model / no HITL) — it lives here, not as a himmy
+        # Routine, for the same reasons as _nudge_loop. It only does real work once per day, AFTER
+        # the 15:10 NST close on a trading day; the connector's own ~0.5 req/s limiter rate-limits
+        # the per-symbol fetches, and EMPTY-READ = NO-WRITE is enforced inside store_bars so a
+        # holiday / dead upstream can never overwrite good stored bars. Wrapped so a bad pass can
+        # NEVER crash the loop or the server (mirrors _nudge_loop).
+        async def _nepse_refresh_loop() -> None:
+            from himmy_app.connectors import nepse as _nepse
+
+            await asyncio.sleep(30)  # let startup settle before the first (gated) check
+            last_refresh_date: str | None = None
+            while True:
+                try:
+                    now = _nepal_now()
+                    today = now.date()
+                    after_close = (now.hour, now.minute) >= (_NEPSE_CLOSE_HOUR, _NEPSE_CLOSE_MIN)
+                    iso = today.isoformat()
+                    # Once per day, after close, on a trading day, and not already done today.
+                    if (
+                        last_refresh_date != iso
+                        and after_close
+                        and _nepse_is_trading_day(today)
+                    ):
+                        for sym in NEPSE_WATCHLIST:
+                            try:
+                                bars = await _nepse.fetch_ohlcv(sym, days=40)
+                                _nepse.store_bars(sym, bars)  # empty bars -> 0 rows (no-write)
+                            except Exception:  # noqa: BLE001 - one bad symbol must not stop the pass
+                                pass
+                        last_refresh_date = iso  # mark done even on a partial pass; retry tomorrow
+                except Exception:  # noqa: BLE001 - a bad pass must never crash the loop/server
+                    pass
+                # Re-check every 15 min so we catch the post-close window soon after it opens.
+                await asyncio.sleep(15 * 60)
+
         warm_task = asyncio.create_task(_warm_recs())
         news_task = asyncio.create_task(_refresh_news())
         learn_task = asyncio.create_task(_auto_learn())
         nudge_task = asyncio.create_task(_nudge_loop())
+        nepse_task = asyncio.create_task(_nepse_refresh_loop())
         # Telegram bridge — only does anything if the user has set a bot token.
         try:
             from himmy_app import telegram as _tg
@@ -868,6 +961,7 @@ def create_app() -> FastAPI:
             news_task.cancel()
             learn_task.cancel()
             nudge_task.cancel()
+            nepse_task.cancel()
             try:
                 from himmy_app import telegram as _tg
 
@@ -876,7 +970,8 @@ def create_app() -> FastAPI:
                 pass
             # Await the cancelled tasks so in-flight I/O unwinds before we stop the scheduler.
             await asyncio.gather(
-                warm_task, news_task, learn_task, nudge_task, return_exceptions=True
+                warm_task, news_task, learn_task, nudge_task, nepse_task,
+                return_exceptions=True,
             )
             await routines_mod.get_scheduler().stop()
 
@@ -1460,6 +1555,61 @@ def create_app() -> FastAPI:
                     ) from exc
 
         return await _weather.forecast(lat, lon, start=s, end=e)
+
+    # ---- Markets / Nepal live data: NEPSE prices · NRB forex · Kathmandu air quality --------
+    # Thin read-only surfaces over the same guarded, host-pinned connectors the chat tools use,
+    # for any UI (Markets card, AQI chip). Each validates its inputs and degrades to a friendly
+    # {"ok": False, ...} rather than raising, so a dead upstream never 500s the UI.
+    @app.get("/nepse/price")
+    async def nepse_price_endpoint(symbol: str, days: int = 400) -> dict[str, Any]:
+        """Latest NEPSE price + recent OHLCV for a SYMBOL (Merolagani, NPR, corp-action adjusted).
+
+        ``symbol`` is sanitised to ``[A-Z0-9]`` inside the connector — raw user text never reaches
+        the upstream URL. A blank/garbage symbol or a down upstream returns a graceful
+        ``{"ok": False, "message", "symbol"}``.
+        """
+        from himmy_app.connectors import nepse as _nepse
+
+        sym = _nepse.sanitise_symbol(symbol)
+        if not sym:
+            return {"ok": False, "message": "Need a stock symbol, e.g. NABIL.", "symbol": ""}
+        try:
+            n_days = int(days)
+        except (TypeError, ValueError):
+            n_days = 400
+        n_days = max(1, min(n_days, 2000))  # bound the lookback window
+        return await _nepse.nepse_price({"symbol": sym, "days": n_days})
+
+    @app.get("/forex")
+    async def forex_endpoint(currencies: str = "") -> dict[str, Any]:
+        """Latest official NRB foreign-exchange rates against NPR.
+
+        ``currencies`` is an optional comma/space iso3 list (``"USD,INR"``) or ``"all"`` for every
+        published currency; omit it for the big liquid ones. Degrades gracefully on a down upstream.
+        """
+        from himmy_app.connectors import forex as _forex
+
+        return await _forex.nrb_forex({"currencies": currencies} if currencies.strip() else {})
+
+    @app.get("/aqi")
+    async def aqi_endpoint(lat: float = 27.7172, lon: float = 85.3240) -> dict[str, Any]:
+        """Current air quality at ``(lat, lon)`` — US AQI + PM2.5/PM10 + category + advice.
+
+        Defaults to Kathmandu. Validates that ``lat``/``lon`` are finite and in geographic range so
+        a bad caller gets a 400; the connector itself degrades to ``{"ok": False, ...}`` on a dead
+        upstream rather than raising.
+        """
+        import math as _math
+
+        from himmy_app import weather as _weather
+
+        if not (_math.isfinite(lat) and _math.isfinite(lon)):
+            raise HTTPException(status_code=400, detail="lat/lon must be finite numbers.")
+        if not (-90.0 <= lat <= 90.0):
+            raise HTTPException(status_code=400, detail="lat must be between -90 and 90.")
+        if not (-180.0 <= lon <= 180.0):
+            raise HTTPException(status_code=400, detail="lon must be between -180 and 180.")
+        return await _weather.air_quality(lat, lon)
 
     # the tray — a Himmy-side cart the user checks out themselves (opening the place's page)
     @app.get("/do/cart")

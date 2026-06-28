@@ -286,6 +286,51 @@ export type DoWeather = {
   summary: string;            // one honest line (real forecast if in-window, else seasonal)
   in_forecast_window: boolean;
 };
+// --- Markets: NEPSE price / NRB forex / Kathmandu air quality -------------------------------
+// Live, host-pinned, keyless reads (Merolagani / Nepal Rastra Bank / Open-Meteo). Each degrades
+// to `{ ok: false, ... }` rather than 500ing, so the UI cards must tolerate the failure shape.
+
+// One daily OHLCV bar (already corp-action adjusted; NEVER re-adjusted). `v` is share volume.
+export type DoNepseBar = { date: string; o: number; h: number; l: number; c: number; v: number };
+// Latest NEPSE price + a recent OHLCV tail for a symbol (Merolagani, NPR). On failure the fields
+// below `ok`/`symbol`/`message` are absent — the card narrows on `ok` before reading them.
+export type DoNepse = {
+  ok: boolean;
+  symbol: string;
+  price?: number;
+  prev_close?: number | null;
+  change?: number | null;
+  change_pct?: number | null;
+  currency?: string;                 // "NPR"
+  ohlcv?: DoNepseBar[];              // last ~7 daily bars, oldest-first
+  as_of?: string;                    // YYYY-MM-DD (AD) of the latest bar
+  date_bs?: string;                  // Bikram Sambat YYYY-MM-DD of `as_of`
+  source?: string;                   // "Merolagani"
+  message?: string;                  // present on `ok: false` (bad symbol / upstream down)
+};
+// One NRB foreign-exchange rate against NPR, quoted per `unit` units of the foreign currency.
+export type DoForexRate = { iso3: string; name: string; unit: number; buy: number; sell: number };
+// Official Nepal Rastra Bank forex sheet (mid-market) for the latest published date.
+export type DoForex = {
+  ok: boolean;
+  date?: string | null;              // YYYY-MM-DD (AD) of the published sheet
+  date_bs?: string | null;           // Bikram Sambat YYYY-MM-DD of `date`
+  base?: string;                     // "NPR"
+  rates?: DoForexRate[];
+  caption?: string;                  // "NRB official mid-market; per <unit> units" (not `note` — that's a PII-redacted key)
+  message?: string;                  // present on `ok: false`
+};
+// Current air quality at a point (Open-Meteo, US AQI). Always well-formed; on failure `ok` is
+// false, `us_aqi` is null and `category` is "Unknown" — the chip stays renderable either way.
+export type DoAqi = {
+  ok: boolean;
+  us_aqi: number | null;
+  category: string;                  // Good / Moderate / … / Hazardous / Unknown
+  pm2_5: number | null;
+  pm10: number | null;
+  advice: string;
+};
+
 export type DoTrip = {
   ok: boolean; destination: string; days: number; style?: string; summary?: string;
   date?: string | null; return_date?: string | null;   // depart / return, ISO YYYY-MM-DD
@@ -729,6 +774,29 @@ export const api = {
   permissions: {
     get: () => jget<PermsCatalog>("/permissions"),
     set: (levels: Record<string, string>) => jput<PermsCatalog>("/permissions", { levels }),
+  },
+
+  // Markets — live NEPSE price / NRB forex / Kathmandu air quality. Thin reads over the same
+  // host-pinned, keyless connectors the chat tools use; each degrades to `{ ok: false, ... }`
+  // server-side (never 500s), so callers narrow on `ok` before reading the rest.
+  markets: {
+    // Latest price + recent OHLCV for a NEPSE symbol (Merolagani, NPR). `symbol` is sanitised to
+    // [A-Z0-9] server-side; `days` bounds the lookback (default 400, clamped 1..2000).
+    nepse: (symbol: string, days?: number) =>
+      jget<DoNepse>(
+        `/nepse/price?symbol=${encodeURIComponent(symbol)}${days != null ? `&days=${days}` : ""}`),
+    // Official NRB forex rates against NPR. `currencies` is an optional comma/space iso3 list
+    // ("USD,INR") or "all"; omit it for the big liquid ones (USD/EUR/GBP/INR/AUD/CNY/JPY).
+    forex: (currencies?: string) =>
+      jget<DoForex>(`/forex${currencies ? `?currencies=${encodeURIComponent(currencies)}` : ""}`),
+    // Current air quality at a point (Open-Meteo, US AQI). Defaults to Kathmandu server-side.
+    aqi: (lat?: number, lon?: number) => {
+      const p = new URLSearchParams();
+      if (lat != null) p.set("lat", String(lat));
+      if (lon != null) p.set("lon", String(lon));
+      const qs = p.toString();
+      return jget<DoAqi>(`/aqi${qs ? `?${qs}` : ""}`);
+    },
   },
 
   activity: {

@@ -96,6 +96,27 @@ SURFACES: list[dict[str, Any]] = [
         "tools": {"on": ["bussewa_buses"]},
     },
     {
+        "key": "nepse", "label": "NEPSE", "service": "Nepal stock prices",
+        "desc": "Look up live NEPSE share prices and recent OHLCV.",
+        "default": "on",
+        "levels": [{"value": "off", "label": "Off"}, {"value": "on", "label": "On"}],
+        "tools": {"on": ["nepse_price"]},
+    },
+    {
+        "key": "forex", "label": "Forex", "service": "NRB exchange rates",
+        "desc": "Check official Nepal Rastra Bank foreign-exchange rates.",
+        "default": "on",
+        "levels": [{"value": "off", "label": "Off"}, {"value": "on", "label": "On"}],
+        "tools": {"on": ["nrb_forex"]},
+    },
+    {
+        "key": "air_quality", "label": "Air quality", "service": "AQI (Nepal & worldwide)",
+        "desc": "Check the air quality index (AQI) for a place.",
+        "default": "on",
+        "levels": [{"value": "off", "label": "Off"}, {"value": "on", "label": "On"}],
+        "tools": {"on": ["air_quality"]},
+    },
+    {
         "key": "web", "label": "Web search", "service": "The open web",
         "desc": "Search and read pages from the wider web.",
         "default": "on",

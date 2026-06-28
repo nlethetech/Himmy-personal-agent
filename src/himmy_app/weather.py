@@ -16,7 +16,10 @@ Two design choices keep this *honest* — the product promise is that we never i
   well-formed ``{"ok": False, ...}`` dict (still carrying the seasonal pattern, which needs no
   network) rather than raising — so a missing forecast can never break a trip plan.
 
-The public surface is a single coroutine, :func:`forecast`.
+The public surface is the :func:`forecast` coroutine plus :func:`air_quality`, a keyless
+Kathmandu-grade air-quality reading from Open-Meteo's sibling ``air-quality-api.open-meteo.com``
+host (US AQI + PM2.5/PM10, mapped to a category and a plain-English advice line). It shares the
+same guarded-HTTP and graceful-degradation discipline as the forecast.
 """
 
 from __future__ import annotations
@@ -28,13 +31,17 @@ from typing import Any
 
 from himmy_app.connectors._net import safe_get_json
 
-__all__ = ["forecast", "wmo_to_label_emoji", "nepal_season"]
+__all__ = ["forecast", "wmo_to_label_emoji", "nepal_season", "air_quality", "aqi_category"]
 
 # Pin to Open-Meteo's forecast host. Keyless; the allow-list is the real enforcing control.
 _HOST = "api.open-meteo.com"
 _URL = "https://api.open-meteo.com/v1/forecast"
 # Open-Meteo's daily model reaches ~16 days; we request the full horizon so window checks are honest.
 _FORECAST_DAYS = 16
+
+# Pin to Open-Meteo's sibling air-quality host (keyless, same allow-list discipline as the forecast).
+_AQI_HOST = "air-quality-api.open-meteo.com"
+_AQI_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 
 
 # ---------------------------------------------------------------------------
@@ -358,3 +365,127 @@ def _build_summary(
 
     span = "the day" if n == 1 else f"the next {n} days"
     return f"Forecast for {span}: highs {hi:.0f}°C / lows {lo:.0f}°C, {rain_phrase}."
+
+
+# ---------------------------------------------------------------------------
+# US AQI -> (category, advice)
+# ---------------------------------------------------------------------------
+#
+# The standard EPA breakpoints. Ordered ascending by the *inclusive upper bound* of each band;
+# anything above the last band (>300) is Hazardous. Advice is plain-English and actionable — the
+# product surfaces it directly (e.g. the Kathmandu morning nudge).
+_AQI_BANDS: tuple[tuple[int, str, str], ...] = (
+    (50, "Good", "Air quality is good — enjoy the outdoors."),
+    (100, "Moderate", "Air is acceptable; unusually sensitive people may want to ease up outdoors."),
+    (
+        150,
+        "Unhealthy for Sensitive Groups",
+        "Sensitive groups (kids, elderly, lung/heart conditions) should limit prolonged outdoor exertion.",
+    ),
+    (200, "Unhealthy", "Reduce time outdoors and mask up — everyone may start to feel effects."),
+    (300, "Very Unhealthy", "Avoid outdoor activity; keep windows shut and run a purifier indoors."),
+)
+_AQI_HAZARDOUS = ("Hazardous", "Health emergency — stay indoors, seal up, and use an air purifier if you can.")
+
+
+def aqi_category(us_aqi: Any) -> tuple[str, str]:
+    """Map a US AQI value to a ``(category, advice)`` pair using the EPA breakpoints.
+
+    Returns ``("Unknown", ...)`` for a missing / non-finite value so callers never crash.
+    """
+    try:
+        v = float(us_aqi)
+    except (TypeError, ValueError):
+        return ("Unknown", "Air-quality reading unavailable right now.")
+    if not math.isfinite(v) or v < 0:
+        return ("Unknown", "Air-quality reading unavailable right now.")
+    for upper, category, advice in _AQI_BANDS:
+        if v <= upper:
+            return (category, advice)
+    return _AQI_HAZARDOUS
+
+
+async def air_quality(lat: float, lon: float) -> dict[str, Any]:
+    """Return the current air quality at ``(lat, lon)`` via keyless Open-Meteo (US AQI + PM2.5/PM10).
+
+    Talks to Open-Meteo's sibling ``air-quality-api.open-meteo.com`` host through the same guarded
+    HTTP helper (:func:`himmy_app.connectors._net.safe_get_json`), pinned via ``allow_hosts`` to that
+    one host. Never raises — any bad coordinate or upstream failure degrades to a well-formed
+    ``{"ok": False, ...}`` dict so an air-quality reading can never break a nudge or a chat answer.
+
+    Args:
+        lat: Latitude, finite, ``-90..90``.
+        lon: Longitude, finite, ``-180..180``.
+
+    Returns:
+        A dict matching the shared contract::
+
+            {
+              "ok": bool,
+              "us_aqi": int | None,
+              "category": str,       # Good / Moderate / ... / Hazardous (or Unknown)
+              "pm2_5": float | None,
+              "pm10": float | None,
+              "advice": str,
+            }
+    """
+    # --- validate coordinates ------------------------------------------------------------------
+    vlat = _finite_in_range(lat, -90.0, 90.0)
+    vlon = _finite_in_range(lon, -180.0, 180.0)
+    if vlat is None or vlon is None:
+        return {
+            "ok": False,
+            "us_aqi": None,
+            "category": "Unknown",
+            "pm2_5": None,
+            "pm10": None,
+            "advice": "Coordinates unavailable; air-quality reading unavailable.",
+        }
+
+    # --- fetch ---------------------------------------------------------------------------------
+    params: dict[str, Any] = {
+        "latitude": vlat,
+        "longitude": vlon,
+        "current": "us_aqi,pm2_5,pm10",
+        "timezone": "auto",
+    }
+    try:
+        data = await safe_get_json(
+            _AQI_URL,
+            params=params,
+            allow_hosts=(_AQI_HOST,),
+            timeout=8.0,
+            max_bytes=1_000_000,
+            retries=1,
+        )
+    except Exception:  # noqa: BLE001 — NetError + any transport error: AQI must never break a nudge/chat
+        return {
+            "ok": False,
+            "us_aqi": None,
+            "category": "Unknown",
+            "pm2_5": None,
+            "pm10": None,
+            "advice": "Air-quality reading unavailable right now.",
+        }
+
+    cur = data.get("current") if isinstance(data, dict) else None
+    if not isinstance(cur, dict) or cur.get("us_aqi") is None:
+        return {
+            "ok": False,
+            "us_aqi": None,
+            "category": "Unknown",
+            "pm2_5": None,
+            "pm10": None,
+            "advice": "Air-quality reading unavailable right now.",
+        }
+
+    us_aqi = _int(cur.get("us_aqi"))
+    category, advice = aqi_category(us_aqi)
+    return {
+        "ok": True,
+        "us_aqi": us_aqi,
+        "category": category,
+        "pm2_5": round(_num(cur.get("pm2_5")), 1),
+        "pm10": round(_num(cur.get("pm10")), 1),
+        "advice": advice,
+    }

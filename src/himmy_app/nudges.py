@@ -16,7 +16,9 @@ REUSE, never re-implement, the existing data access:
   - Calendar via :mod:`himmy.api.studio_google` (``status`` + ``calendar_range``), the same
     calls /calendar/range makes;
   - Mail via the same ``gmail_list`` the Mail tab + digest use, with the SAME muted/automated
-    filters so we only nudge on real, human, attention-worthy mail.
+    filters so we only nudge on real, human, attention-worthy mail;
+  - Air quality via :func:`himmy_app.weather.air_quality` (keyless, host-pinned Open-Meteo) for a
+    deterministic Kathmandu MORNING heads-up when the valley's air turns unhealthy.
 
 PERMISSIONS: every run checks ``perms.level_of(<surface>)`` and skips a category whose surface
 is ``off`` (mirroring how gate_tools would deny the read tool) — so a nudge for a denied
@@ -48,6 +50,19 @@ FESTIVAL_HORIZON_DAYS = 10
 #: Caps so a noisy inbox/calendar can't flood the bell in one pass.
 MAX_MAIL_NUDGES = 5
 MAX_CAL_NUDGES = 10
+#: Kathmandu coordinates for the deterministic morning air-quality heads-up. The valley sits in a
+#: bowl that traps winter smog, so a single fixed reading is a faithful "is the city's air bad
+#: today" signal — we don't geocode here (that's the on-demand air_quality tool's job).
+_KTM_LAT = 27.7172
+_KTM_LON = 85.3240
+#: Only nudge when the US AQI is at least "Unhealthy for Sensitive Groups" — below that the air is
+#: fine-to-acceptable and a daily ping would be noise. (EPA: 101-150 USG, 151+ Unhealthy and worse.)
+AQI_NUDGE_MIN = 101
+#: The "morning" window (local Nepal wall-clock hours, inclusive) the AQI heads-up may fire in. The
+#: ~3h nudge loop runs all day; this keeps the air-quality ping to the start of the day when it's
+#: actionable (mask up before you head out), and the per-day key then dedups the rest of the day.
+AQI_MORNING_START_H = 5
+AQI_MORNING_END_H = 11
 #: A nudge per *every* almanac row would be noisy (Dashain alone has ~6 sub-day rows). We only
 #: nudge on the headline festivals people actually plan around, and we collapse each festival's
 #: sub-days + aliases into one FAMILY. Each entry maps a tuple of case-insensitive substrings of
@@ -118,6 +133,10 @@ async def generate(cfg: HimmyConfig | None = None) -> dict[str, Any]:
         created += await _mail_nudges(cfg, inbox, now, checked)
     except Exception as exc:  # noqa: BLE001
         checked["mail_error"] = f"{type(exc).__name__}: {exc}"
+    try:
+        created += await _aqi_nudge(cfg, inbox, checked)
+    except Exception as exc:  # noqa: BLE001 - a bad AQI fetch never blocks the other nudges
+        checked["aqi_error"] = f"{type(exc).__name__}: {exc}"
 
     return {"ok": True, "created": created, "checked": checked}
 
@@ -384,6 +403,77 @@ def _sender_name(sender: str) -> str:
     """The display name from a From header, falling back to the bare address."""
     name, addr = email.utils.parseaddr(sender or "")
     return (name or addr or sender or "someone").strip()
+
+
+# ---------------------------------------------------------------------------------------
+# Air quality — a deterministic Kathmandu MORNING heads-up when the valley's air is bad.
+# Reuses weather.air_quality (keyless Open-Meteo, host-pinned) — no model, no geocode. The
+# valley traps winter smog, so a single fixed Kathmandu reading faithfully answers "is the
+# city's air bad today?". Gated by the "air_quality" surface; fires only in the morning
+# window and only when the US AQI is elevated (>=101); the per-day key dedups the rest of
+# the day so the ~3h loop adds at most one AQI nudge per Nepal day.
+# ---------------------------------------------------------------------------------------
+def _nepal_now() -> datetime.datetime:
+    """Wall-clock 'now' in the configured timezone (HIMMY_TZ → Asia/Kathmandu, else UTC).
+
+    Reuses :func:`himmy_app.routines._local_zone` (the same zone the daily-schedule path anchors
+    to) so the morning window + the per-day dedup key both read Nepal local time, not UTC.
+    """
+    from himmy_app.routines import _local_zone
+
+    return datetime.datetime.now(_local_zone())
+
+
+async def _aqi_nudge(cfg: HimmyConfig, inbox: Any, checked: dict[str, Any]) -> int:
+    if perms.level_of("air_quality", cfg) == "off":
+        checked["aqi"] = "off"
+        return 0
+
+    # MORNING only — outside the local-Nepal morning window we don't even fetch (free + quiet).
+    now_np = _nepal_now()
+    if not (AQI_MORNING_START_H <= now_np.hour <= AQI_MORNING_END_H):
+        checked["aqi"] = "outside_morning"
+        return 0
+
+    from himmy_app import weather
+
+    aq = await weather.air_quality(_KTM_LAT, _KTM_LON)
+    if not aq.get("ok"):
+        checked["aqi"] = "unavailable"
+        return 0
+
+    us_aqi = aq.get("us_aqi")
+    try:
+        aqi_val = int(us_aqi)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        checked["aqi"] = "unavailable"
+        return 0
+
+    # Only nudge when the air is actually unhealthy (>=101). Good/Moderate air = no ping.
+    if aqi_val < AQI_NUDGE_MIN:
+        checked["aqi"] = aqi_val
+        return 0
+
+    category = str(aq.get("category") or "").strip() or "Unhealthy"
+    # One nudge per Nepal DAY: the AD date in the key + SELECT-before-INSERT dedup guarantee the
+    # ~3h loop can't re-fire it (and tomorrow's elevated reading gets its own fresh nudge).
+    day = now_np.date().isoformat()
+    key = f"aqi-ktm-{day}"
+    title = f"Kathmandu AQI {aqi_val} ({category})"
+    body = _aqi_copy(aqi_val, category)
+    created = 1 if inbox.add_nudge(key=key, title=title, body=body) is not None else 0
+    checked["aqi"] = aqi_val
+    return created
+
+
+def _aqi_copy(aqi_val: int, category: str) -> str:
+    """Short, actionable copy for the morning AQI nudge — mask-up phrasing once it's Unhealthy."""
+    # 101-150 USG: heads-up for sensitive groups; 151+ Unhealthy or worse: mask up outdoors.
+    tail = (
+        "mask up outdoors." if aqi_val >= 151
+        else "sensitive groups should limit prolonged time outdoors."
+    )
+    return f"Kathmandu AQI {aqi_val} ({category}) — {tail}"
 
 
 # ---------------------------------------------------------------------------------------

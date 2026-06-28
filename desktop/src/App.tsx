@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   Sun, Sunrise, Moon, Newspaper, BookOpen, CheckSquare, Calendar, Mail,
   Search, Sparkles, Settings, ChevronDown, ArrowUp, Clock, ArrowUpRight,
@@ -8,7 +8,7 @@ import {
   MessageSquare, SquarePen, PanelLeft, PanelRight, Telescope, ListChecks, BookText, Link2,
   Inbox, MapPin, KeyRound, ShieldCheck, Minus, ChevronLeft, ChevronRight, Repeat,
   Gauge, Coins, Zap, CalendarClock, Bell, Play, Flag,
-  Star, BellOff, Users, TrendingUp, Cpu, Sparkle,
+  Star, BellOff, Users, TrendingUp, TrendingDown, Wind, Cpu, Sparkle,
   Info, StickyNote, Highlighter,
   ShoppingBag, Plane, Bus, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart, ArrowRight, ConciergeBell,
   Route, Lightbulb, BedDouble, Wallet, Send, Armchair, ArrowRightLeft, Share2, Printer,
@@ -31,6 +31,7 @@ import {
   type DoTrip, type DoTripDay, type DoTripItem, type DoTripHotel, type DoTripEat,
   type DoTripTransportCompare,
   type DoWeather, type DoWeatherDay,
+  type DoNepse, type DoNepseBar, type DoForex, type DoAqi,
   type ToolResult,
 } from "./lib/api";
 import { apa, mla, bibtex } from "./lib/cite";
@@ -6987,6 +6988,11 @@ function Bubble({ m, index, busy, onDecide, trace, onSend }: {
             {m.tools.join(" · ")}
           </div>
         )}
+        {/* Grounding badge — only on a settled assistant answer with text. Pure function of the
+            tool_results: green when a real data/retrieval tool fired, muted "best guess" otherwise. */}
+        {!mine && !m.streaming && !m.approval && !!m.text && (
+          <div className="mt-1.5"><GroundingBadge results={m.tool_results} /></div>
+        )}
       </div>
       {/* Follow-up chips — same pill language as the empty-state suggestions. */}
       {chips.length > 0 && onSend && (
@@ -7021,6 +7027,41 @@ function TraceLine({ label }: { label: string }) {
    Draw the typed, SERVER-REDACTED tool_results as premium inline cards in the chat. Known
    connectors render a tailored card (reusing FlightRow / BusRow / the weather strip pieces);
    anything unknown is skipped here and left to the markdown reply, so the chat never breaks. */
+// The set of tools that pull REAL data/retrieval — when one of these actually fired, the answer is
+// grounded in fetched facts rather than the model's own recall. A pure allow-list (no LLM); the
+// grounding badge below is a function of nothing but which of these ran.
+const GROUNDING_TOOLS = new Set<string>([
+  "ask_papers", "web_search", "nepse_price", "nrb_forex", "air_quality",
+  "weather_forecast", "buddha_air_flights", "bussewa_buses",
+]);
+
+// True when at least one retrieval/data tool in GROUNDING_TOOLS ran on this turn. We ignore the
+// tool's own ok/result shape — that it *fired* is enough to say the answer was built over fetched
+// data (a failed fetch still means the model wasn't free-styling; weather* matches its variants).
+function isGrounded(results: ToolResult[] | undefined): boolean {
+  if (!results || results.length === 0) return false;
+  return results.some((tr) => GROUNDING_TOOLS.has(tr.tool_name) || tr.tool_name.startsWith("weather"));
+}
+
+// A small pill under a settled assistant answer: GREEN "grounded" when a real data/retrieval tool
+// fired, else a muted "best guess". Premium SF Pro / dark — mirrors the chip/pill language.
+function GroundingBadge({ results }: { results: ToolResult[] | undefined }) {
+  const grounded = isGrounded(results);
+  return (
+    <span
+      title={grounded
+        ? "Grounded in data Himmy looked up for this answer."
+        : "No data tool ran — this is the model's best guess from what it already knows."}
+      className={`inline-flex items-center gap-1 text-[10.5px] font-medium rounded-full px-2 py-0.5 ${
+        grounded
+          ? "text-mac-green bg-[rgba(48,209,88,0.12)]"
+          : "text-mac-ink3 bg-mac-fill border border-mac-stroke"}`}>
+      {grounded ? <ShieldCheck size={10} strokeWidth={2.5} /> : <Sparkle size={10} strokeWidth={2.5} />}
+      {grounded ? "grounded" : "best guess"}
+    </span>
+  );
+}
+
 function renderToolCards(results: ToolResult[] | undefined): React.ReactNode[] {
   if (!results || results.length === 0) return [];
   const out: React.ReactNode[] = [];
@@ -7043,6 +7084,15 @@ function renderToolCards(results: ToolResult[] | undefined): React.ReactNode[] {
         break;
       case "weather_forecast":
         if (r.summary || (Array.isArray(r.daily) && r.daily.length)) out.push(<WeatherCard key={`wx-${i}`} w={r as DoWeather} />);
+        break;
+      case "nepse_price":
+        if (typeof r.price === "number") out.push(<NepseCard key={`np-${i}`} d={r as DoNepse} />);
+        break;
+      case "nrb_forex":
+        if (Array.isArray(r.rates) && r.rates.length) out.push(<ForexCard key={`fx-${i}`} d={r as DoForex} />);
+        break;
+      case "air_quality":
+        if (typeof r.us_aqi === "number") out.push(<AqiCard key={`aq-${i}`} d={r as DoAqi} />);
         break;
       default:
         break; // unknown tool → markdown fallback (no card)
@@ -7181,6 +7231,131 @@ function WeatherCard({ w }: { w: DoWeather }) {
             <div className="text-[12px] font-semibold text-mac-ink">Weather</div>
           )}
           <div className="text-[11px] text-mac-ink3 leading-snug mt-1 line-clamp-2">{w.summary}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// NEPSE stock card: symbol + the big last price in NPR, a green/red change% pill, prev close + the
+// Bikram-Sambat date, and a tiny last-7 close strip (sparkline-style bars) under it. Merolagani,
+// already corp-action adjusted — we just display what the connector hands back. Degrades cleanly:
+// the change pill / OHLCV strip only render when their data is present.
+function NepseCard({ d }: { d: DoNepse }) {
+  const up = (d.change ?? 0) >= 0;
+  const hasChange = typeof d.change === "number" && typeof d.change_pct === "number";
+  const closes = (d.ohlcv || []).map((b) => b.c).filter((c) => Number.isFinite(c));
+  const lo = closes.length ? Math.min(...closes) : 0;
+  const hi = closes.length ? Math.max(...closes) : 1;
+  const span = hi - lo || 1;
+  const ChangeIcon = up ? TrendingUp : TrendingDown;
+  return (
+    <div className="rounded-xl border border-mac-stroke bg-mac-fillHi overflow-hidden">
+      <div className="px-3 pt-2.5 pb-2 flex items-center gap-2">
+        <div className="h-7 w-7 shrink-0 grid place-items-center rounded-lg bg-mac-accentDim"><TrendingUp size={13} className="text-mac-accentHi" /></div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[12.5px] font-semibold text-mac-ink truncate">{d.symbol}<span className="text-mac-ink3 font-normal"> · NEPSE</span></div>
+          <div className="text-[10.5px] text-mac-ink3">{d.source || "Merolagani"}{d.date_bs ? ` · ${d.date_bs} BS` : ""}</div>
+        </div>
+        {hasChange && (
+          <span className={`shrink-0 inline-flex items-center gap-1 text-[11px] font-semibold rounded-full px-2 py-0.5 ${up ? "text-mac-green bg-[rgba(48,209,88,0.12)]" : "text-mac-red bg-[rgba(255,69,58,0.12)]"}`}>
+            <ChangeIcon size={11} strokeWidth={2.5} />{up ? "+" : ""}{d.change_pct!.toFixed(2)}%
+          </span>
+        )}
+      </div>
+      <div className="px-3 pb-2.5">
+        <div className="flex items-baseline gap-2">
+          <span className="text-[24px] font-semibold text-mac-ink tnum leading-none font-display">{d.price!.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+          <span className="text-[11px] text-mac-ink3 font-medium">{d.currency || "NPR"}</span>
+          {hasChange && (
+            <span className={`text-[11px] tnum font-medium ${up ? "text-mac-green" : "text-mac-red"}`}>{up ? "+" : ""}{d.change!.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+          )}
+        </div>
+        {typeof d.prev_close === "number" && (
+          <div className="text-[10.5px] text-mac-ink3 mt-1">Prev close <span className="text-mac-ink2 tnum">{d.prev_close.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+        )}
+        {closes.length > 1 && (
+          <div className="mt-2 flex items-end gap-[3px] h-7" title="Last 7 closes">
+            {closes.map((c, i) => {
+              const h = 18 * ((c - lo) / span) + 6; // 6–24px, always visible
+              const last = i === closes.length - 1;
+              return <div key={i} className={`flex-1 rounded-sm ${last ? (up ? "bg-mac-green" : "bg-mac-red") : "bg-mac-strokeHi"}`} style={{ height: `${h}px` }} />;
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// NRB forex card: a tight buy/sell table of the top rates against NPR, with the publish date (AD +
+// BS). Rates are NRB's official figures, quoted per the currency's own `unit` (INR per 100, JPY per
+// 10) — we show the unit verbatim and never rescale. Caps the table so the card stays compact.
+function ForexCard({ d }: { d: DoForex }) {
+  const rates = (d.rates || []).slice(0, 7);
+  if (!rates.length) return null;
+  return (
+    <div className="rounded-xl border border-mac-stroke bg-mac-fillHi overflow-hidden">
+      <div className="px-3 pt-2.5 pb-2 flex items-center gap-2">
+        <div className="h-7 w-7 shrink-0 grid place-items-center rounded-lg bg-mac-accentDim"><Coins size={13} className="text-mac-accentHi" /></div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[12.5px] font-semibold text-mac-ink truncate">NRB Forex<span className="text-mac-ink3 font-normal"> · vs NPR</span></div>
+          <div className="text-[10.5px] text-mac-ink3">{d.date || "latest"}{d.date_bs ? ` · ${d.date_bs} BS` : ""}</div>
+        </div>
+      </div>
+      <div className="px-3 pb-2.5">
+        <div className="grid grid-cols-[1fr_auto_auto] gap-x-3 gap-y-1 text-[11.5px]">
+          <div className="text-[10px] uppercase tracking-wide text-mac-ink3 font-medium">Currency</div>
+          <div className="text-[10px] uppercase tracking-wide text-mac-ink3 font-medium text-right">Buy</div>
+          <div className="text-[10px] uppercase tracking-wide text-mac-ink3 font-medium text-right">Sell</div>
+          {rates.map((rt) => (
+            <Fragment key={rt.iso3}>
+              <div className="text-mac-ink truncate font-medium">{rt.iso3}{rt.unit > 1 ? <span className="text-mac-ink3 font-normal"> ×{rt.unit}</span> : null}</div>
+              <div className="text-mac-ink2 tnum text-right">{rt.buy.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+              <div className="text-mac-ink2 tnum text-right">{rt.sell.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+            </Fragment>
+          ))}
+        </div>
+        {d.caption && <div className="text-[10px] text-mac-ink3 leading-snug mt-2">{d.caption}</div>}
+      </div>
+    </div>
+  );
+}
+
+// Map a US AQI band to a chip color (matches the EPA category bands the connector reports).
+function aqiTone(aqi: number): { text: string; bg: string } {
+  if (aqi <= 50) return { text: "text-mac-green", bg: "bg-[rgba(48,209,88,0.14)]" };
+  if (aqi <= 100) return { text: "text-mac-orange", bg: "bg-[rgba(255,159,10,0.14)]" };
+  if (aqi <= 150) return { text: "text-mac-orange", bg: "bg-[rgba(255,159,10,0.18)]" };
+  return { text: "text-mac-red", bg: "bg-[rgba(255,69,58,0.14)]" }; // Unhealthy & worse
+}
+
+// Air-quality card: the US AQI number on a category-colored chip + the plain-English advice line,
+// with PM2.5/PM10 as a quiet footnote. Always renderable — the chip degrades gracefully on a low
+// reading. (Failures never reach here: the branch only renders when us_aqi is a number.)
+function AqiCard({ d }: { d: DoAqi }) {
+  const aqi = d.us_aqi ?? 0;
+  const tone = aqiTone(aqi);
+  return (
+    <div className="rounded-xl border border-mac-stroke bg-mac-fillHi p-3">
+      <div className="flex items-center gap-2.5">
+        <div className={`shrink-0 grid place-items-center rounded-xl px-2.5 py-1.5 ${tone.bg}`}>
+          <div className={`text-[20px] font-semibold tnum leading-none font-display ${tone.text}`}>{aqi}</div>
+          <div className="text-[8.5px] uppercase tracking-wide text-mac-ink3 mt-0.5">AQI</div>
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-mac-ink">
+            <Wind size={12} className="text-mac-ink3" />{d.category}
+          </div>
+          <div className="text-[11px] text-mac-ink3 leading-snug mt-1 line-clamp-2">{d.advice}</div>
+          {(typeof d.pm2_5 === "number" || typeof d.pm10 === "number") && (
+            <div className="text-[10px] text-mac-ink3 mt-1 tnum">
+              {typeof d.pm2_5 === "number" ? `PM2.5 ${d.pm2_5}` : ""}
+              {typeof d.pm2_5 === "number" && typeof d.pm10 === "number" ? " · " : ""}
+              {typeof d.pm10 === "number" ? `PM10 ${d.pm10}` : ""}
+              <span className="text-mac-ink4"> µg/m³</span>
+            </div>
+          )}
         </div>
       </div>
     </div>
