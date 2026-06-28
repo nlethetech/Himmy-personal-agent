@@ -41,15 +41,51 @@
     "appId": "com.himmy.app",
     "productName": "Himmy",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "buildResources"
     },
+    "afterPack": "buildResources/afterPack.cjs",
     "files": [
       "dist/**/*",
       "electron/**/*"
     ],
+    "extraResources": [
+      {
+        "from": "../packaging/dist/himmy-backend",
+        "to": "himmy-backend"
+      }
+    ],
     "mac": {
-      "category": "public.app-category.education",
-      "target": "dir"
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg"
+      ],
+      "icon": "buildResources/icon.icns",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "darkModeSupport": true
+    },
+    "dmg": {
+      "title": "Himmy ${version}",
+      "icon": "buildResources/icon.icns",
+      "contents": [
+        {
+          "x": 150,
+          "y": 200,
+          "type": "file"
+        },
+        {
+          "x": 420,
+          "y": 200,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ],
+      "window": {
+        "width": 570,
+        "height": 400
+      }
     }
   }
 }

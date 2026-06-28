@@ -103,17 +103,40 @@ async function startBackend() {
     console.log("[Himmy] backend already running on :" + BACKEND_PORT);
     return;
   }
-  console.log("[Himmy] starting backend…");
-  backendProc = spawn(VENV_PYTHON, ["-m", "himmy_app.server"], {
-    cwd: REPO_ROOT,
-    env: {
-      ...process.env,
-      HIMMY_APP_PORT: BACKEND_PORT,
-      HIMMY_APP_TOKEN: APP_TOKEN,
-      PYTHONUNBUFFERED: "1",
-    },
-    stdio: "inherit",
-  });
+
+  const env = {
+    ...process.env,
+    HIMMY_APP_PORT: BACKEND_PORT,
+    HIMMY_APP_TOKEN: APP_TOKEN,
+    PYTHONUNBUFFERED: "1",
+  };
+
+  let cmd;
+  let args;
+  let cwd;
+
+  if (app.isPackaged) {
+    // Packaged Himmy.app: run the self-contained, PyInstaller-frozen backend that ships inside
+    // the bundle (Resources/himmy-backend/) — no system Python, no venv, no terminal required.
+    cmd = path.join(process.resourcesPath, "himmy-backend", "himmy-backend");
+    args = [];
+    cwd = path.dirname(cmd);
+    // The .app bundle is read-only, so the user's library/memory/keys must live in a real
+    // per-user location. (config.py also defaults here when frozen — belt-and-suspenders.)
+    env.HIMMY_APP_DATA_DIR =
+      env.HIMMY_APP_DATA_DIR || path.join(app.getPath("appData"), "Himmy");
+  } else {
+    // Dev: run from source via the project venv.
+    cmd = VENV_PYTHON;
+    args = ["-m", "himmy_app.server"];
+    cwd = REPO_ROOT;
+  }
+
+  console.log(`[Himmy] starting backend… (${app.isPackaged ? "frozen" : "dev"}) ${cmd}`);
+  backendProc = spawn(cmd, args, { cwd, env, stdio: "inherit" });
+  backendProc.on("error", (err) =>
+    console.error("[Himmy] backend failed to start:", err)
+  );
   backendProc.on("exit", (code) =>
     console.log(`[Himmy] backend exited (${code})`)
   );

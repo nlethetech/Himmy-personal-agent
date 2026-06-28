@@ -18,7 +18,13 @@ from pathlib import Path
 from typing import Any
 
 #: Repo root (…/Himmy) and the agent spec that ships under agent/.
-_ROOT = Path(__file__).resolve().parents[2]
+#: In a PyInstaller-frozen build (the packaged Himmy.app) ``__file__`` lives INSIDE the
+#: read-only bundle, so parents[2] is meaningless — the agent/ dir is bundled as data and
+#: surfaces under ``sys._MEIPASS`` instead. Resolve from there when frozen.
+if getattr(sys, "frozen", False):
+    _ROOT = Path(getattr(sys, "_MEIPASS", "") or Path(sys.executable).resolve().parent)
+else:
+    _ROOT = Path(__file__).resolve().parents[2]
 _SPEC = _ROOT / "agent" / "agent.yaml"
 _ENV = _ROOT / ".env"
 

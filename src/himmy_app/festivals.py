@@ -70,7 +70,12 @@ _NOTES: tuple[tuple[tuple[str, ...], str], ...] = (
 def _snapshot_path() -> Path:
     """On-disk cache for the parsed holiday feed, under the app data dir (HIMMY_APP_DATA_DIR)."""
     data_dir = os.environ.get("HIMMY_APP_DATA_DIR")
-    base = Path(data_dir).expanduser() if data_dir else Path(__file__).resolve().parents[2] / ".scholar-desk"
+    if data_dir:
+        base = Path(data_dir).expanduser()
+    else:
+        from himmy_app.config import DEFAULT_DATA_DIR  # frozen-safe per-user fallback
+
+        base = DEFAULT_DATA_DIR
     return base / "connector_cache" / "nepal_holidays.json"
 
 

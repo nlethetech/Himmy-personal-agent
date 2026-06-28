@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,7 +23,19 @@ DEFAULT_MODEL = "google/gemini-2.5-flash"
 #: "Himmy" — it holds the user's REAL library, sign-ins, and memory. Renaming it would orphan
 #: that data, and the folder name is never shown in the UI. The same goes for HIMMY_MEMORY_SUBJECT
 #: and the RAG KB ids below: kept stable for data continuity, not branding.
-DEFAULT_DATA_DIR = Path(__file__).resolve().parents[2] / ".scholar-desk"
+def _default_data_dir() -> Path:
+    """Where the user's library/memory/keys live when HIMMY_APP_DATA_DIR isn't set.
+
+    In a frozen build (the packaged Himmy.app) ``__file__`` is inside the read-only bundle, so
+    we must NOT write there — fall back to a real per-user location. (Electron also sets
+    HIMMY_APP_DATA_DIR explicitly to this same place, so this is belt-and-suspenders.)
+    """
+    if getattr(sys, "frozen", False):
+        return Path.home() / "Library" / "Application Support" / "Himmy"
+    return Path(__file__).resolve().parents[2] / ".scholar-desk"
+
+
+DEFAULT_DATA_DIR = _default_data_dir()
 
 #: Zotero's built-in local API (Zotero must be running). "users/0" = your local "My Library".
 DEFAULT_ZOTERO_API_BASE = "http://localhost:23119/api"
