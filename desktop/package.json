@@ -41,6 +41,7 @@
   "build": {
     "appId": "com.himmy.app",
     "productName": "Himmy",
+    "npmRebuild": false,
     "directories": {
       "output": "release",
       "buildResources": "buildResources"
