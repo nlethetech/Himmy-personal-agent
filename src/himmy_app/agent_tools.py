@@ -208,6 +208,16 @@ def register(registry: ToolRegistry) -> list[str]:
     except Exception:  # noqa: BLE001 - a connector wiring hiccup must not break the agent
         pass
 
+    # --- media: read images (OCR) + transcribe audio over the user's uploaded attachments ---
+    # Fills the one gap in a text-only framework via isolated direct multimodal calls; the core
+    # functions are generic enough to be promoted into the framework as a `multimodal` pack later.
+    try:
+        from himmy_app.connectors.media import MediaConnector
+
+        registered += MediaConnector().register_tools(registry)
+    except Exception:  # noqa: BLE001 - best-effort; image/audio reading just won't be offered
+        pass
+
     # --- Google Calendar write tools: find / add / edit / remove --------------------------
     try:
         from himmy_app.connectors.google_calendar import GoogleCalendarConnector

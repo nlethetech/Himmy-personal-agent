@@ -27,7 +27,7 @@ import os
 
 import re
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
@@ -123,30 +123,27 @@ class ProfileUpdate(BaseModel):
     details: dict[str, str] = {}
 
 
+class AssistantUpdate(BaseModel):
+    # How Himmy should TALK — a tone preset (chief_of_staff | friendly | professional | custom)
+    # plus an optional free-text note used by the "custom" style (and appended to any style).
+    style: str = "chief_of_staff"
+    note: str = ""
+
+
 def _compose_prompt(message: str, context: str | None) -> str:
-    """Front every Cmd-K turn with what Himmy knows about the user, then the open-paper context.
+    """Front a turn with the open-item context, if any (a paper/article the user is viewing, or a
+    file they just dropped into the chat).
 
-    This is the always-on personalization lever: the agent sees a compact "about you" block on
-    every turn, so its answers and actions fit the person. Best-effort — a profile hiccup just
-    falls back to the bare message.
+    The "about you" profile + Himmy's personality are injected ONCE at the runtime level
+    (``cli._build_runtime``), so they reach EVERY surface — app chat, Telegram, the daily brief,
+    routines — consistently, and no longer belong here. This function now only carries per-turn
+    context.
     """
-    from himmy_app import user_profile
-
-    parts: list[str] = []
-    try:
-        about = user_profile.render_for_prompt()
-    except Exception:  # noqa: BLE001 - personalization must never break a turn
-        about = ""
-    if about:
-        parts.append(about)
     if context and context.strip():
-        parts.append(
-            "Context — the paper/article the user is currently viewing in Himmy:\n"
-            + context.strip()
+        return (
+            "Context — what the user is currently working with (a file they sent, or the "
+            "paper/article they're viewing):\n" + context.strip() + "\n\nUser question: " + message
         )
-    if parts:
-        parts.append("User question: " + message)
-        return "\n\n".join(parts)
     return message
 
 
@@ -1280,6 +1277,91 @@ def create_app() -> FastAPI:
         from himmy_app import user_profile
         keys = [str(k).strip() for k in (body.keys or []) if str(k).strip()]
         return user_profile.apply_suggestions(keys, cfg)
+
+    # ---- Himmy's personality (Settings → You "How Himmy talks") --------------------------
+    @app.get("/assistant")
+    async def assistant_get() -> dict[str, Any]:
+        """The tone preset + note, the available presets, and whether the current model can read
+        images (so the UI is honest about image attachments)."""
+        from himmy_app import user_profile
+        from himmy_app.connectors.media import vision_available
+
+        return {
+            "ok": True, "assistant": user_profile.load_assistant(cfg),
+            "styles": [
+                {"id": "chief_of_staff", "label": "Warm, sharp chief-of-staff",
+                 "blurb": "Knows you, gets to the point, a little dry wit."},
+                {"id": "friendly", "label": "Friendly & casual",
+                 "blurb": "Relaxed and chatty, like a helpful friend."},
+                {"id": "professional", "label": "Professional & minimal",
+                 "blurb": "Crisp, formal, no fluff."},
+                {"id": "custom", "label": "In my own words",
+                 "blurb": "Describe the vibe yourself below."},
+            ],
+            "vision_available": vision_available(cfg),
+        }
+
+    @app.put("/assistant")
+    async def assistant_put(body: AssistantUpdate) -> dict[str, Any]:
+        """Persist how Himmy talks. Takes effect on the next message (no restart)."""
+        from himmy_app import user_profile
+        a = user_profile.save_assistant(body.style, body.note, cfg)
+        return {"ok": True, "assistant": a}
+
+    # ---- attachments: hand Himmy a file, it reads it + remembers it ----------------------
+    #: Hard cap on an uploaded file (25 MB) — generous for docs/images/voice, bounds memory.
+    _ATTACH_MAX_BYTES = 25 * 1024 * 1024
+
+    @app.post("/attach")
+    async def attach(file: UploadFile = File(...), session_id: str = Form("")) -> dict[str, Any]:
+        """Ingest an uploaded file: extract its text (framework readers for docs; the media
+        connector for images/audio), store it, and index it into the SAME RAG as the library so
+        Himmy can answer about it now and later. Returns a summary incl. capped `text` for the
+        immediate next turn's context."""
+        from himmy_app import permissions
+        from himmy_app.attachments import AttachmentStore
+        from himmy_app.connectors.papers_rag import _get_index
+
+        data = await file.read()
+        if not data:
+            return {"ok": False, "message": "That file was empty."}
+        if len(data) > _ATTACH_MAX_BYTES:
+            return {"ok": False, "message": "That file is too large (max 25 MB)."}
+        # Honor the "Files & media" permission for reading images/voice notes (docs always ingest).
+        read_media = permissions.level_of("files", cfg) != "off"
+        try:
+            att = await AttachmentStore(cfg).ingest(
+                file.filename or "file", data, file.content_type or "",
+                source="chat", session_id=session_id or None, read_media=read_media,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "message": f"Couldn't read that file: {type(exc).__name__}"}
+        # Warm the index now so a follow-up question retrieves it immediately (best-effort).
+        try:
+            await _get_index(cfg).sync()
+        except Exception:  # noqa: BLE001 - lazy sync on next ask is the fallback
+            pass
+        return {"ok": True, "attachment": att}
+
+    @app.get("/attachments")
+    async def attachments_list() -> dict[str, Any]:
+        """The files Himmy has read (newest first) — backs the 'Files' area."""
+        from himmy_app.attachments import AttachmentStore
+
+        return {"ok": True, "attachments": AttachmentStore(cfg).list()}
+
+    @app.delete("/attachments/{att_id}")
+    async def attachments_delete(att_id: str) -> dict[str, Any]:
+        """Forget a file: remove it from the store AND prune it from the RAG index."""
+        from himmy_app.attachments import AttachmentStore
+        from himmy_app.connectors.papers_rag import _get_index
+
+        r = AttachmentStore(cfg).delete(att_id)
+        try:
+            await _get_index(cfg).sync()  # prunes the now-absent doc from the index
+        except Exception:  # noqa: BLE001
+            pass
+        return r
 
     @app.post("/library/dedupe")
     async def library_dedupe() -> dict[str, Any]:

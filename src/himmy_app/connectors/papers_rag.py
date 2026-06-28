@@ -30,6 +30,7 @@ from himmy.services.knowledge.sqlite_backend import SqliteKnowledgeBackend
 from himmy.services.tools.registry import ToolRegistry, register_local_tool
 from himmy.toolkit import ToolkitConfig
 
+from himmy_app.attachments import AttachmentStore
 from himmy_app.config import HimmyConfig, load_config
 from himmy_app.library import Library
 from himmy_app.news import SavedNews
@@ -122,6 +123,7 @@ class PapersIndex:
         self._cfg = cfg
         self._lib = Library(cfg)
         self._news = SavedNews(cfg)
+        self._att = AttachmentStore(cfg)
         self._cache_path = cfg.papers_cache_path
         # Disk-backed vector store so the index SURVIVES restarts: on the next launch we
         # resolve the existing KB and only NEW/changed papers re-embed (content-hash dedup),
@@ -178,9 +180,9 @@ class PapersIndex:
         text = (header + "\n\n" + body).strip() if body else header
         return text[:_MAX_CHARS]
 
-    # ---- merged record set: library papers + saved news ---------------------------------
+    # ---- merged record set: library papers + saved news + uploaded attachments ----------
     def _records(self) -> list[dict[str, Any]]:
-        return self._lib.rag_records() + self._news.rag_records()
+        return self._lib.rag_records() + self._news.rag_records() + self._att.rag_records()
 
     # ---- KB lifecycle (disk-backed; warm across restarts) -------------------------------
     async def _kb_handle(self) -> tuple[KnowledgeBase, str]:
@@ -309,7 +311,18 @@ class PapersIndex:
         return {
             "ok": True, "indexed": len(self._indexed_ids),
             "library_items": self._lib.count(), "saved_news": len(self._news.rag_records()),
+            "attachments": self._att.count(),
         }
+
+    async def sync(self) -> dict[str, Any]:
+        """Bring the index in line with the current sources NOW (incremental — only new/changed
+        docs embed, removed ones prune). Used after an attachment is uploaded or deleted so the
+        file is searchable immediately rather than on the next ask. Best-effort, never raises."""
+        try:
+            await self._ensure()
+            return {"ok": True, "indexed": len(self._indexed_ids)}
+        except Exception as exc:  # noqa: BLE001 - a warm-sync hiccup must not fail the upload
+            return {"ok": False, "message": f"{type(exc).__name__}"}
 
     async def search(self, query: str, *, top_k: int = 8) -> list[dict[str, Any]]:
         kb, kb_id = await self._ensure()
@@ -380,12 +393,14 @@ class PapersRagConnector:
             registry, name="ask_papers", read_only=True, handler=ask_papers,
             description=(
                 "Answer a question FROM the full text of the user's own collection — their saved "
-                "papers + PDFs AND the news articles they saved to read later — returning ranked "
-                "passages each with a citation. Use for 'summarise this paper', 'what does my "
-                "library say about X', 'what was that article I saved about Y'. Pass `query`; "
-                "optional `top_k` (default 8). For a SUMMARY or deep explanation of one source, "
-                "raise `top_k` to 12-16 so you get broad coverage of that paper to summarise from. "
-                "Always cite the sources."
+                "papers + PDFs, the news articles they saved to read later, AND any FILES they "
+                "uploaded to Himmy (PDFs, Word docs, spreadsheets, screenshots/photos Himmy read, "
+                "voice notes Himmy transcribed) — returning ranked passages each with a citation. "
+                "Use for 'summarise this paper', 'what does my library say about X', 'what was that "
+                "article I saved about Y', and 'what did that file/contract/screenshot I sent say'. "
+                "Pass `query`; optional `top_k` (default 8). For a SUMMARY or deep explanation of one "
+                "source, raise `top_k` to 12-16 so you get broad coverage to summarise from. Always "
+                "cite the sources."
             ),
             args_json_schema={
                 "type": "object",

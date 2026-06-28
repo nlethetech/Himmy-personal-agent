@@ -45,6 +45,8 @@ _ACTIONS: dict[str, tuple[str, str, list[str]]] = {
     "wikipedia": ("live_data", "Looked up a fact", ["query", "title"]),
     "ask_papers": ("library", "Searched your library", ["query"]),
     "index_papers": ("library", "Indexed your library", []),
+    "read_image": ("files", "Read an image you sent", []),
+    "transcribe_audio": ("files", "Transcribed a voice note", []),
     "add_paper": ("library", "Added a paper", ["doi", "arxiv", "id"]),
     "save_article": ("library", "Saved an article", ["title", "url"]),
     "remember": ("memory", "Remembered something", ["text", "content", "value"]),

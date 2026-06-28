@@ -371,6 +371,22 @@ export type ProfileSuggestion = {
   confidence: "low" | "med" | "high";
 };
 
+// Attachments — a file the user handed Himmy (in chat or via Telegram). Himmy extracts the text
+// (framework readers for docs; the media connector for images/voice notes), keeps it, and indexes
+// it into the same RAG as the library so ask_papers can find it later.
+// `text` (capped) is returned only by the upload call, for grounding the immediately-next turn.
+export type AttachmentResult = {
+  id: string; name: string; kind: string; mime: string;
+  size: number; chars: number; preview: string; text: string; empty: boolean;
+};
+export type AttachmentItem = {
+  id: string; name: string; kind: string; mime: string; ext: string;
+  size: number; chars: number; preview: string; source: string; session_id: string; added_at: number;
+};
+// Himmy's personality — how it talks to you (a tone preset + an optional free-text note).
+export type AssistantStyleOpt = { id: string; label: string; blurb: string };
+export type AssistantConfig = { style: string; note: string };
+
 // Routines — saved automations that run on a schedule (himmy's Schedule model + cron/tz math,
 // fired through the same agent as /ask; results land in notifications below).
 export type RoutineSchedule = {
@@ -715,6 +731,25 @@ export const api = {
     applySuggestions: (keys: string[]) =>
       jpost<{ ok: boolean; profile?: UserProfile; applied?: string[]; message?: string }>(
         "/profile/suggestions/apply", { keys }),
+  },
+  // Attachments — upload a file Himmy should read (multipart), list what it's read, forget one.
+  attach: async (file: File, sessionId?: string): Promise<{ ok: boolean; attachment?: AttachmentResult; message?: string }> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (sessionId) fd.append("session_id", sessionId);
+    // NB: no Content-Type header — the browser sets the multipart boundary itself.
+    const res = await fetch(`${BASE}/attach`, { method: "POST", headers: authHeaders(), body: fd });
+    if (!res.ok) throw new Error(`/attach → ${res.status}`);
+    return res.json();
+  },
+  attachments: {
+    list: () => jget<{ ok: boolean; attachments: AttachmentItem[] }>("/attachments"),
+    remove: (id: string) => jdelete<{ ok: boolean }>(`/attachments/${id}`),
+  },
+  // Himmy's personality — how it talks to you (Settings → You → "How Himmy talks").
+  assistant: {
+    get: () => jget<{ ok: boolean; assistant: AssistantConfig; styles: AssistantStyleOpt[]; vision_available: boolean }>("/assistant"),
+    set: (style: string, note: string) => jput<{ ok: boolean; assistant: AssistantConfig }>("/assistant", { style, note }),
   },
   collections: {
     list: () => jget<{ ok: boolean; collections: Collection[] }>("/collections"),

@@ -137,15 +137,15 @@ class TelegramBridge:
                     save_tg({"offset": self._offset}, self.cfg)
                     msg = upd.get("message") or upd.get("edited_message") or {}
                     chat = (msg.get("chat") or {}).get("id")
-                    text = (msg.get("text") or "").strip()
-                    if chat is not None and text:
+                    if chat is not None:
                         with contextlib.suppress(Exception):
-                            await self._handle(token, int(chat), text)
+                            await self._dispatch(token, int(chat), msg)
         finally:
             self.running = False
 
     # ---- message handling ------------------------------------------------------------------
-    async def _handle(self, token: str, chat_id: int, text: str) -> None:
+    async def _dispatch(self, token: str, chat_id: int, msg: dict[str, Any]) -> None:
+        """Owner-gate the chat, then route to the media (file/photo/voice) or the text handler."""
         d = load_tg(self.cfg)
         owner = d.get("owner_chat_id")
         # Pair on first contact (the token is secret → trust-on-first-use is safe).
@@ -153,16 +153,29 @@ class TelegramBridge:
             save_tg({"owner_chat_id": chat_id}, self.cfg)
             await self._send(token, chat_id,
                              "✅ Linked! I'm your Himmy now — ask me anything: your day, your mail, "
-                             "tasks, the news, a flight, a trip… I share the same permissions you set "
-                             "in the app.")
+                             "tasks, the news, a flight, a trip… You can also send me files, photos "
+                             "and voice notes and I'll read them. I share the permissions you set in "
+                             "the app.")
             return
         if int(owner) != chat_id:
             await self._send(token, chat_id, "Sorry — this is a private assistant. 🔒")
             return
+
+        # A file / photo / voice note? Read it (and answer its caption if there is one).
+        if self._media_ref(msg)[0]:
+            await self._handle_media(token, chat_id, msg)
+            return
+
+        text = (msg.get("text") or "").strip()
+        if text:
+            await self._handle_text(token, chat_id, text)
+
+    async def _handle_text(self, token: str, chat_id: int, text: str) -> None:
         if text.lower() in {"/start", "/help"}:
             await self._send(token, chat_id, "Hi 👋 I'm Himmy. Ask me about your day, mail, tasks, "
-                             "news, food, flights or a trip. Actions that send or change things ask "
-                             "you to reply 'yes' to confirm.")
+                             "news, food, flights or a trip — or send me a file, a photo, or a voice "
+                             "note and I'll read it. Actions that send or change things ask you to "
+                             "reply 'yes' to confirm.")
             return
 
         # Resolve a pending approval with a yes/no reply.
@@ -182,6 +195,95 @@ class TelegramBridge:
 
         res = await ask_turn(text, session_id=f"tg-{chat_id}")
         await self._reply(token, chat_id, res)
+
+    # ---- attachments (documents / photos / voice notes) ------------------------------------
+    @staticmethod
+    def _media_ref(msg: dict[str, Any]) -> tuple[str, str, str]:
+        """(file_id, filename, mime) for a media message, or ("", "", "") if it isn't one.
+
+        Telegram sends a photo as several sizes (we take the largest), a voice note as ``voice``
+        (OGG/Opus), and any other file as ``document`` (with its real name + mime).
+        """
+        if msg.get("document"):
+            doc = msg["document"]
+            return (str(doc.get("file_id") or ""), str(doc.get("file_name") or "file"),
+                    str(doc.get("mime_type") or ""))
+        if msg.get("photo"):
+            sizes = msg["photo"] or []
+            if sizes:
+                return (str(sizes[-1].get("file_id") or ""), "photo.jpg", "image/jpeg")
+        if msg.get("voice"):
+            v = msg["voice"]
+            return (str(v.get("file_id") or ""), "voice-note.ogg", str(v.get("mime_type") or "audio/ogg"))
+        if msg.get("audio"):
+            a = msg["audio"]
+            return (str(a.get("file_id") or ""), str(a.get("file_name") or "audio"),
+                    str(a.get("mime_type") or "audio/mpeg"))
+        return ("", "", "")
+
+    async def _download_file(self, token: str, file_id: str) -> bytes | None:
+        """Resolve a Telegram file_id to its bytes (getFile → download)."""
+        try:
+            gf = await self._api(token, "getFile", {"file_id": file_id})
+            if not gf.get("ok"):
+                return None
+            file_path = (gf.get("result") or {}).get("file_path")
+            if not file_path:
+                return None
+            async with httpx.AsyncClient(timeout=90) as c:
+                r = await c.get(f"{_API}/file/bot{token}/{file_path}")
+            return r.content if r.status_code == 200 else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def _handle_media(self, token: str, chat_id: int, msg: dict[str, Any]) -> None:
+        """Download an attachment, read it into Himmy's knowledge, and either answer its caption or
+        confirm receipt. Reuses the SAME pipeline as the app (AttachmentStore + the papers RAG)."""
+        file_id, name, mime = self._media_ref(msg)
+        await self._api(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"})
+        data = await self._download_file(token, file_id)
+        if not data:
+            await self._send(token, chat_id, "I couldn't download that file, sorry — try again?")
+            return
+
+        from himmy_app import permissions
+        from himmy_app.attachments import AttachmentStore
+
+        read_media = permissions.level_of("files", self.cfg) != "off"
+        att = await AttachmentStore(self.cfg).ingest(
+            name, data, mime, source="telegram", session_id=f"tg-{chat_id}", read_media=read_media)
+        # Warm the index so a follow-up question finds it immediately (best-effort).
+        try:
+            from himmy_app.connectors.papers_rag import _get_index
+
+            await _get_index(self.cfg).sync()
+        except Exception:  # noqa: BLE001
+            pass
+
+        if att.get("empty"):
+            await self._send(
+                token, chat_id,
+                f"📎 Got “{att['name']}”, but I couldn't read it. Reading images/voice notes may be "
+                "off (Settings → Permissions), or the current model can't see/hear — OpenRouter "
+                "(gemini-2.5-flash) can. PDFs and text always work.")
+            return
+
+        caption = (msg.get("caption") or "").strip()
+        if caption:
+            # Answer the caption, grounded on the file's contents (inlined as context for this turn).
+            from himmy_app.cli import ask_turn
+
+            prompt = (f"{caption}\n\n[The user attached a file “{att['name']}”. Its contents:]\n"
+                      f"{att['text']}")
+            res = await ask_turn(prompt, session_id=f"tg-{chat_id}")
+            await self._reply(token, chat_id, res)
+            return
+
+        did = {"image": "read your image", "audio": "transcribed your voice note"}.get(
+            att.get("kind", ""), f"read “{att['name']}”")
+        await self._send(token, chat_id,
+                         f"📎 Got it — I've {did} ({att['chars']:,} chars in). Ask me anything "
+                         "about it.")
 
     async def _reply(self, token: str, chat_id: int, res: dict[str, Any]) -> None:
         if res.get("awaiting_approval") and res.get("checkpoint_id"):

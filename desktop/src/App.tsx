@@ -13,6 +13,7 @@ import {
   ShoppingBag, Plane, Bus, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart, ArrowRight, ConciergeBell,
   Route, Lightbulb, BedDouble, Wallet, Send, Armchair, ArrowRightLeft, Share2, Printer,
   CloudRain, Umbrella, Square,
+  Paperclip, FileText, Mic, Image as ImageIcon, MessageCircle,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -34,6 +35,7 @@ import {
   type DoWeather, type DoWeatherDay,
   type DoNepse, type DoNepseBar, type DoForex, type DoAqi,
   type ToolResult,
+  type AttachmentResult, type AttachmentItem, type AssistantConfig, type AssistantStyleOpt,
 } from "./lib/api";
 import { apa, mla, bibtex } from "./lib/cite";
 import Reader from "./Reader";
@@ -3196,6 +3198,123 @@ const VAULT_FIELDS = [
   "Home address", "Dietary needs", "Loyalty numbers", "Spend limit per action",
 ];
 
+// How Himmy talks to you — the personality tuner (a tone preset + an optional free-text note).
+function HimmyPersonality() {
+  const [cfg, setCfg] = useState<AssistantConfig | null>(null);
+  const [styles, setStyles] = useState<AssistantStyleOpt[]>([]);
+  const [vision, setVision] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    api.assistant.get().then((r) => {
+      setCfg(r.assistant); setStyles(r.styles || []); setVision(!!r.vision_available);
+    }).catch(() => {});
+  }, []);
+
+  if (!cfg) return <div className="text-[12px] text-mac-ink3">Loading Himmy's personality…</div>;
+
+  const save = async (next: AssistantConfig) => {
+    setCfg(next); setSaving(true); setSaved(false);
+    try { await api.assistant.set(next.style, next.note); setSaved(true); setTimeout(() => setSaved(false), 1500); }
+    catch { /* ignore */ } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <MessageCircle size={14} className="text-mac-accentHi" />
+        <span className="text-[13px] font-medium text-mac-ink">How Himmy talks to you</span>
+        {saving && <Loader2 size={12} className="animate-spin text-mac-ink3" />}
+        {saved && <span className="text-[11px] text-mac-accentHi flex items-center gap-1"><Check size={11} /> saved</span>}
+      </div>
+      <p className="text-[12px] text-mac-ink3 leading-snug -mt-1">
+        Pick a vibe — it shapes Himmy's tone everywhere (here and on Telegram). Himmy stays honest
+        and careful with real actions no matter what you choose.
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        {styles.map((s) => {
+          const active = cfg.style === s.id;
+          return (
+            <button key={s.id} onClick={() => save({ ...cfg, style: s.id })}
+              className={`text-left rounded-xl border p-2.5 transition-colors ${active
+                ? "border-mac-accent bg-mac-accent/10" : "border-mac-stroke bg-mac-fill hover:border-mac-strokeHi"}`}>
+              <div className="flex items-center gap-1.5">
+                <span className={`text-[12.5px] font-medium ${active ? "text-mac-ink" : "text-mac-ink2"}`}>{s.label}</span>
+                {active && <Check size={13} className="text-mac-accentHi" />}
+              </div>
+              <p className="text-[11px] text-mac-ink3 leading-snug mt-0.5">{s.blurb}</p>
+            </button>
+          );
+        })}
+      </div>
+      {cfg.style === "custom" && (
+        <textarea value={cfg.note} onChange={(e) => setCfg({ ...cfg, note: e.target.value })}
+          onBlur={() => save(cfg)} rows={2}
+          placeholder="e.g. Be like a calm, witty Nepali friend who keeps me on track and roasts me a little when I procrastinate."
+          className="w-full resize-none rounded-lg bg-mac-fill border border-mac-stroke px-2.5 py-1.5 text-[13px] text-mac-ink outline-none focus:border-mac-accent placeholder:text-mac-ink3" />
+      )}
+      {!vision && (
+        <p className="text-[11px] text-mac-orange leading-snug">
+          Heads up: your current model can't read images. Switch to OpenRouter (gemini-2.5-flash) in
+          Preferences so Himmy can read screenshots & photos you send.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// "Files Himmy has read" — the uploads (chat + Telegram) it keeps in its knowledge; remove to forget.
+function FilesSection() {
+  const [items, setItems] = useState<AttachmentItem[] | null>(null);
+  const load = () => api.attachments.list().then((r) => setItems(r.attachments)).catch(() => setItems([]));
+  useEffect(() => { load(); }, []);
+
+  const remove = async (id: string) => {
+    setItems((xs) => (xs || []).filter((x) => x.id !== id));
+    try { await api.attachments.remove(id); } catch { load(); }
+  };
+
+  return (
+    <div className="space-y-3">
+      <SectionHeader title="Files Himmy has read"
+        sub="Files, screenshots and voice notes you've sent Himmy (in chat or on Telegram). Himmy keeps their text in its knowledge so it can answer about them later. Remove one to make Himmy forget it." />
+      {items === null ? (
+        <div className="text-[12px] text-mac-ink3">Loading…</div>
+      ) : items.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-mac-stroke p-6 text-center">
+          <Paperclip size={20} className="mx-auto text-mac-ink3" />
+          <p className="text-[12.5px] text-mac-ink2 mt-2">No files yet.</p>
+          <p className="text-[11.5px] text-mac-ink3 mt-0.5">Drop a file into the ⌘K chat, or send one on Telegram.</p>
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {items.map((f) => (
+            <div key={f.id} className="group flex items-center gap-2.5 rounded-lg bg-mac-fill border border-mac-stroke px-3 py-2">
+              <span className="shrink-0 h-7 w-7 grid place-items-center rounded-md bg-mac-fillHi text-mac-accentHi">{fileKindIcon(f.kind, 14)}</span>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="truncate text-[12.5px] text-mac-ink">{f.name}</span>
+                  {f.source === "telegram" && <Send size={10} className="text-mac-ink3 shrink-0" />}
+                </div>
+                <div className="text-[11px] text-mac-ink3 truncate">
+                  {f.chars > 0 ? `${(f.chars / 1000).toFixed(f.chars < 1000 ? 0 : 1)}k chars` : "not read"}
+                  {f.size ? ` · ${prettyBytes(f.size)}` : ""}
+                  {f.preview ? ` · ${f.preview}` : ""}
+                </div>
+              </div>
+              <button onClick={() => remove(f.id)} title="Forget this file"
+                className="shrink-0 opacity-0 group-hover:opacity-100 h-7 w-7 grid place-items-center rounded-md text-mac-ink3 hover:text-mac-red hover:bg-mac-fillHi transition-all">
+                <Trash2 size={14} strokeWidth={2} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProfileSettings() {
   const [prof, setProf] = useState<UserProfile | null>(null);
   const [saving, setSaving] = useState(false);
@@ -3891,9 +4010,10 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   ollama: CpuIcon,
 };
 
-type AccountTab = "you" | "connections" | "permissions" | "activity" | "backup" | "preferences";
+type AccountTab = "you" | "files" | "connections" | "permissions" | "activity" | "backup" | "preferences";
 const ACCOUNT_SECTIONS: { id: AccountTab; label: string; icon: LucideIcon }[] = [
   { id: "you", label: "You", icon: Sparkles },
+  { id: "files", label: "Files", icon: Paperclip },
   { id: "connections", label: "Connections", icon: Link2 },
   { id: "permissions", label: "Permissions", icon: ShieldCheck },
   { id: "activity", label: "Activity", icon: ListChecks },
@@ -4306,7 +4426,14 @@ function AccountPanel({ onClose }: { onClose: () => void }) {
             ))}
           </nav>
           <div className="flex-1 min-h-0 overflow-auto p-5">
-            {tab === "you" && <ProfileSettings />}
+            {tab === "you" && (
+              <div className="space-y-6">
+                <HimmyPersonality />
+                <div className="border-t border-mac-stroke" />
+                <ProfileSettings />
+              </div>
+            )}
+            {tab === "files" && <FilesSection />}
             {tab === "connections" && <ConnectionsSection g={g} />}
             {tab === "permissions" && <PermissionsSection onGoConnections={() => setTab("connections")} />}
             {tab === "activity" && <ActivitySection />}
@@ -7133,6 +7260,19 @@ function currentSessionId() {
   return localStorage.getItem(SESSION_KEY) || newSessionId();
 }
 
+// A small icon for an attachment by its kind (image / audio / doc-or-other).
+function fileKindIcon(kind: string, size = 13) {
+  if (kind === "image") return <ImageIcon size={size} strokeWidth={2} />;
+  if (kind === "audio") return <Mic size={size} strokeWidth={2} />;
+  return <FileText size={size} strokeWidth={2} />;
+}
+function prettyBytes(bytes: number) {
+  if (!bytes) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function CommandBar() {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
@@ -7152,6 +7292,27 @@ function CommandBar() {
   // Abort handle for the in-flight stream — wired to the Stop button. Cancels the SSE fetch, which
   // server-side cancels the background agent task (partial-thread save in the himmy runtime).
   const abortRef = useRef<(() => void) | null>(null);
+  // Files the user attached to the NEXT message: Himmy reads them on upload (the returned `text`
+  // grounds this turn) and keeps them in its knowledge for later. Cleared once the message is sent.
+  const [pendingFiles, setPendingFiles] = useState<AttachmentResult[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const uploadFiles = async (files: FileList | File[]) => {
+    const list = Array.from(files);
+    if (list.length === 0) return;
+    setUploading(true);
+    for (const f of list) {
+      try {
+        const r = await api.attach(f, sessionId);
+        if (r.ok && r.attachment) setPendingFiles((p) => [...p, r.attachment!]);
+      } catch { /* a single failed upload shouldn't block the rest */ }
+    }
+    setUploading(false);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
+  const removePending = (id: string) => setPendingFiles((p) => p.filter((f) => f.id !== id));
 
   useEffect(() => { minimizedRef.current = minimized; }, [minimized]);
   const setDockMode = (d: Dock) => { setDock(d); localStorage.setItem(DOCK_KEY, d); };
@@ -7229,17 +7390,30 @@ function CommandBar() {
 
   const send = async (text: string) => {
     const q = text.trim();
-    if (!q || busy) return;
+    const pend = pendingFiles;
+    if ((!q && pend.length === 0) || busy) return;
     setInput("");
-    setMsgs((m) => [...m, { who: "you", text: q }, { who: "desk", text: "", streaming: true }]);
+    setPendingFiles([]);  // consumed by this turn (the files persist in Himmy's knowledge for later)
+    // The prompt the agent sees (clean); the bubble shows the typed text + a chip list of files.
+    const promptText = q || "Please read the file(s) I attached and give me a short summary.";
+    const fileNote = pend.length
+      ? "\n\n" + pend.map((f) => `📎 ${f.name}`).join("\n")
+      : "";
+    setMsgs((m) => [...m, { who: "you", text: (q || "Sent a file") + fileNote }, { who: "desk", text: "", streaming: true }]);
     setBusy(true);
     setTrace(null);
     const setLast = (patch: Partial<Msg>) =>
       setMsgs((m) => m.map((x, i) => (i === m.length - 1 ? { ...x, ...patch } : x)));
     try {
-      // What is the user looking at right now? (paper / article, if any.)
-      const context = await buildAskContext();
-      const { done, abort } = api.askStream(q, {
+      // What is the user looking at right now? (paper / article, if any.) Plus the just-attached
+      // files' extracted text, so this turn is grounded on them immediately (RAG covers later turns).
+      const baseCtx = await buildAskContext();
+      const fileCtx = pend
+        .filter((f) => f.text && !f.empty)
+        .map((f) => `The user attached a file "${f.name}". Its contents:\n${f.text}`)
+        .join("\n\n---\n\n");
+      const context = [fileCtx, baseCtx].filter(Boolean).join("\n\n") || undefined;
+      const { done, abort } = api.askStream(promptText, {
         sessionId,
         context,
         onToken: (t) => setMsgs((m) =>
@@ -7397,9 +7571,46 @@ function CommandBar() {
           ))}
         </div>
 
-        {/* Composer — pinned at the bottom, iMessage-style */}
-        <div className="shrink-0 border-t border-mac-stroke p-2.5">
-          <div className="flex items-end gap-1.5 rounded-2xl bg-mac-fill border border-mac-stroke pl-1.5 pr-1.5 py-1.5 focus-within:border-mac-accent transition-colors">
+        {/* Composer — pinned at the bottom, iMessage-style. Drop a file anywhere on it to attach. */}
+        <div className="shrink-0 border-t border-mac-stroke p-2.5"
+          onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragOver(true); }}
+          onDragLeave={(e) => { e.preventDefault(); setDragOver(false); }}
+          onDrop={(e) => {
+            e.preventDefault(); e.stopPropagation(); setDragOver(false);
+            if (e.dataTransfer?.files?.length) uploadFiles(e.dataTransfer.files);
+          }}>
+          {/* Attached-file chips (+ an uploading shimmer) — what this next message will carry. */}
+          {(pendingFiles.length > 0 || uploading) && (
+            <div className="flex flex-wrap gap-1.5 mb-2 px-0.5">
+              {pendingFiles.map((f) => (
+                <div key={f.id}
+                  className="group flex items-center gap-1.5 max-w-[200px] h-7 pl-2 pr-1 rounded-lg bg-mac-fillHi border border-mac-stroke text-[11.5px] text-mac-ink2">
+                  <span className="text-mac-accentHi shrink-0">{fileKindIcon(f.kind, 12)}</span>
+                  <span className="truncate">{f.name}</span>
+                  <span className="shrink-0 text-mac-ink3 tabular-nums">
+                    {f.empty ? "unread" : `${(f.chars / 1000).toFixed(f.chars < 1000 ? 0 : 1)}k`}
+                  </span>
+                  <button onClick={() => removePending(f.id)} title="Remove"
+                    className="shrink-0 h-5 w-5 grid place-items-center rounded text-mac-ink3 hover:text-mac-red hover:bg-mac-fill transition-colors">
+                    <X size={12} strokeWidth={2.5} />
+                  </button>
+                </div>
+              ))}
+              {uploading && (
+                <div className="flex items-center gap-1.5 h-7 px-2 rounded-lg bg-mac-fill border border-mac-stroke text-[11.5px] text-mac-ink3">
+                  <Loader2 size={12} className="animate-spin" /> Reading…
+                </div>
+              )}
+            </div>
+          )}
+          <div className={`flex items-end gap-1.5 rounded-2xl bg-mac-fill border pl-1.5 pr-1.5 py-1.5 transition-colors ${dragOver ? "border-mac-accent border-dashed" : "border-mac-stroke focus-within:border-mac-accent"}`}>
+            <input ref={fileInputRef} type="file" multiple className="hidden"
+              onChange={(e) => { if (e.target.files) uploadFiles(e.target.files); e.target.value = ""; }} />
+            <button onClick={() => fileInputRef.current?.click()} disabled={busy}
+              title="Attach a file, image or voice note — Himmy will read it"
+              className="shrink-0 h-8 w-8 grid place-items-center rounded-full text-mac-ink3 disabled:opacity-30 enabled:hover:text-mac-accentHi enabled:hover:bg-mac-fillHi transition-colors">
+              <Paperclip size={16} strokeWidth={2} />
+            </button>
             <button onClick={() => deepResearch(input)} disabled={busy || !input.trim()}
               title="Deep research — plan, search your library + the web, write a cited brief (slower)"
               className="shrink-0 h-8 w-8 grid place-items-center rounded-full text-mac-ink3 disabled:opacity-30 enabled:hover:text-mac-accentHi enabled:hover:bg-mac-fillHi transition-colors">
@@ -7412,7 +7623,7 @@ function CommandBar() {
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(input); } }}
               rows={1}
               autoFocus
-              placeholder="Ask Himmy anything…"
+              placeholder={dragOver ? "Drop your file here…" : "Ask Himmy anything…"}
               className="flex-1 resize-none bg-transparent text-[14.5px] outline-none placeholder:text-mac-ink3 leading-6 max-h-28 py-1"
             />
             {busy ? (
@@ -7421,13 +7632,13 @@ function CommandBar() {
                 <Square size={13} strokeWidth={2.5} className="fill-current" />
               </button>
             ) : (
-              <button onClick={() => send(input)} disabled={!input.trim()}
+              <button onClick={() => send(input)} disabled={!input.trim() && pendingFiles.length === 0}
                 className="shrink-0 h-8 w-8 grid place-items-center rounded-full bg-mac-accent text-white disabled:opacity-25 enabled:hover:bg-mac-accentHi transition-colors">
                 <ArrowUp size={16} strokeWidth={2.5} />
               </button>
             )}
           </div>
-          <div className="mt-1 px-1 text-[10.5px] text-mac-ink3">Enter to send · Shift+Enter for a new line</div>
+          <div className="mt-1 px-1 text-[10.5px] text-mac-ink3">Enter to send · Shift+Enter for a new line · 📎 or drop a file to attach</div>
         </div>
 
         {/* History overlay — same in floating + docked modes */}

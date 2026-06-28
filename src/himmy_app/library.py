@@ -618,12 +618,14 @@ class Library:
                 if name.endswith(("-wal", "-shm", "-journal")):
                     continue
                 if f.is_dir():
-                    if name == "library_files":
-                        for pdf in sorted(f.glob("*")):
-                            if pdf.is_file():
-                                z.write(pdf, f"library_files/{pdf.name}")
-                                included.append(f"library_files/{pdf.name}")
-                    # any other directory (e.g. a prior .pre-restore snapshot) is skipped
+                    # The user's binary stores: saved PDFs + uploaded attachment files. Both are
+                    # real user data, so both ride the backup (other dirs — e.g. a prior
+                    # .pre-restore snapshot — are skipped).
+                    if name in ("library_files", "attachment_files"):
+                        for blob in sorted(f.glob("*")):
+                            if blob.is_file():
+                                z.write(blob, f"{name}/{blob.name}")
+                                included.append(f"{name}/{blob.name}")
                     continue
                 if name.endswith(".db"):
                     snap = tmpp / name
@@ -676,13 +678,17 @@ class Library:
                 snap_dir = data_dir.parent / f"{data_dir.name}.pre-restore-{time.strftime('%Y%m%d-%H%M%S')}"
                 shutil.copytree(data_dir, snap_dir, dirs_exist_ok=True)
 
-                # (3) restore top-level files (dbs + json), then the PDF store.
-                has_files = False
+                # (3) restore top-level files (dbs + json), then the binary stores.
+                #: zip-prefix -> the on-disk directory it restores into (PDFs + uploaded files).
+                blob_dirs = {"library_files/": self._files,
+                             "attachment_files/": data_dir / "attachment_files"}
+                seen_blob_prefixes: set[str] = set()
                 for n in names:
                     if n == "manifest.json" or n.endswith("/"):
                         continue
-                    if n.startswith("library_files/"):
-                        has_files = True
+                    prefix = next((p for p in blob_dirs if n.startswith(p)), None)
+                    if prefix is not None:
+                        seen_blob_prefixes.add(prefix)
                         continue
                     target = data_dir / Path(n).name
                     target.write_bytes(z.read(n))
@@ -694,15 +700,18 @@ class Library:
                                     sidecar.unlink()
                                 except Exception:  # noqa: BLE001
                                     pass
-                if has_files:
-                    for f in self._files.glob("*"):
+                # Each backed-up binary store fully REPLACES its live counterpart.
+                for prefix in seen_blob_prefixes:
+                    dest_dir = blob_dirs[prefix]
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    for f in dest_dir.glob("*"):
                         try:
                             f.unlink()
                         except Exception:  # noqa: BLE001
                             pass
                     for n in names:
-                        if n.startswith("library_files/") and not n.endswith("/"):
-                            (self._files / Path(n).name).write_bytes(z.read(n))
+                        if n.startswith(prefix) and not n.endswith("/"):
+                            (dest_dir / Path(n).name).write_bytes(z.read(n))
             return {
                 "ok": True,
                 "restored": self.count(),

@@ -138,6 +138,14 @@ SURFACES: list[dict[str, Any]] = [
         "tools": {"on": ["ask_papers", "index_papers", "add_paper", "save_article"]},
     },
     {
+        "key": "files", "label": "Files & media", "service": "Things you upload",
+        "desc": "Read files you send Himmy — including reading images/screenshots and "
+                "transcribing voice notes.",
+        "default": "on",
+        "levels": [{"value": "off", "label": "Off"}, {"value": "on", "label": "On"}],
+        "tools": {"on": ["read_image", "transcribe_audio"]},
+    },
+    {
         "key": "memory", "label": "Memory", "service": "What Himmy remembers",
         "desc": "Remember durable facts about you and recall them later.",
         "default": "on",

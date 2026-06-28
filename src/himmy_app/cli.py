@@ -266,6 +266,25 @@ def _build_runtime(cfg: Any, on_event: Any, *, checkpoint_store: Any = None) -> 
     except Exception:  # noqa: BLE001 - permissions must never break building the agent
         pass
 
+    # Personalize EVERY surface consistently. Injecting Himmy's TONE (Settings → You) and a compact
+    # "about you" block here — at the runtime level — means the app chat, Telegram, the daily brief,
+    # and routines all share the SAME voice + knowledge of the user. (This used to live only on the
+    # /ask compose path, so Telegram/brief/routines were impersonal — fixed by moving it here.)
+    try:
+        from himmy_app import user_profile
+
+        extra: list[str] = []
+        directive = user_profile.persona_directive(cfg)
+        if directive:
+            extra.append(directive)
+        about = user_profile.render_for_prompt(cfg=cfg)
+        if about:
+            extra.append(about)
+        if extra:
+            spec.instructions = list(spec.instructions) + extra
+    except Exception:  # noqa: BLE001 - personalization must never break building the agent
+        pass
+
     # Record what Himmy does (one capture point for every path): wrap on_event so each tool the
     # agent completes is logged to the activity log, then forward to the original callback.
     import inspect

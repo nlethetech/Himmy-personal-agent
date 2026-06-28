@@ -41,6 +41,41 @@ _CONFIDENCE = ("low", "med", "high")
 #: Cap on stored pending suggestions (keeps the file + the confirm UI small).
 _MAX_SUGGESTIONS = 12
 
+# ---- Himmy's personality (how Himmy TALKS to the user) -----------------------------------
+#: The tone presets the user can pick in Settings → You ("How Himmy talks to you"). The base
+#: character lives in agent.yaml; this only shifts the VOICE. `custom` uses the free-text note.
+DEFAULT_ASSISTANT_STYLE = "chief_of_staff"
+_ASSISTANT_STYLES = ("chief_of_staff", "friendly", "professional", "custom")
+_MAX_STYLE_NOTE = 400
+#: preset -> the tone directive injected every turn. Honesty/grounding/care-around-actions are
+#: NEVER up for negotiation here — only the conversational voice.
+_STYLE_DIRECTIVE = {
+    "chief_of_staff": (
+        "Keep your warm, sharp chief-of-staff voice: friendly and personable with a light, dry wit, "
+        "yet concise and precise — and noticeably more careful and matter-of-fact around real "
+        "actions (sending mail, spending, booking, changing the calendar)."
+    ),
+    "friendly": (
+        "Talk in a relaxed, friendly, casual voice — like a helpful friend. Be warm and "
+        "encouraging, a little informal, and emoji are fine in moderation. Stay clear, and still be "
+        "careful and matter-of-fact around real actions (sending, spending, booking)."
+    ),
+    "professional": (
+        "Talk in a crisp, professional, minimal voice — formal, precise, and to the point, with no "
+        "filler and no emoji. Lead with the answer."
+    ),
+}
+
+
+def _clean_assistant(src: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalise the personality config: a known style + an optional free-text note."""
+    src = src or {}
+    style = str(src.get("style") or DEFAULT_ASSISTANT_STYLE).strip().lower()
+    if style not in _ASSISTANT_STYLES:
+        style = DEFAULT_ASSISTANT_STYLE
+    note = (str(src.get("note") or "")).strip()[:_MAX_STYLE_NOTE]
+    return {"style": style, "note": note}
+
 
 def _empty_layer() -> dict[str, Any]:
     return {"about": "", "voice": "", "projects": [], "people": [], "topics": [],
@@ -132,6 +167,8 @@ def load(cfg: HimmyConfig | None = None) -> dict[str, Any]:
         # Pending vault facts Himmy INFERRED but must not auto-write — they wait for the user to
         # confirm them (POST /profile/suggestions/apply) before they ever enter the real vault.
         "suggestions": _clean_suggestions(data.get("suggestions")),
+        # How Himmy should TALK to the user (tone preset + optional free-text note). Default voice.
+        "assistant": _clean_assistant(data.get("assistant")),
     }
 
 
@@ -149,6 +186,43 @@ def save_user_layer(sections: dict[str, Any], cfg: HimmyConfig | None = None) ->
     prof = load(cfg)
     prof["user"] = _clean_layer(sections)
     return save(prof, cfg)
+
+
+# ---- Himmy's personality (how it talks) -------------------------------------------------
+def load_assistant(cfg: HimmyConfig | None = None) -> dict[str, Any]:
+    """The personality config: ``{style, note}`` (always well-formed)."""
+    return load(cfg).get("assistant", _clean_assistant(None))
+
+
+def save_assistant(style: str, note: str = "", cfg: HimmyConfig | None = None) -> dict[str, Any]:
+    """Persist the chosen tone preset (+ optional free-text note). Returns the cleaned config."""
+    cfg = cfg or load_config()
+    prof = load(cfg)
+    prof["assistant"] = _clean_assistant({"style": style, "note": note})
+    save(prof, cfg)
+    return prof["assistant"]
+
+
+def persona_directive(cfg: HimmyConfig | None = None) -> str:
+    """The tone instruction to inject every turn — or ``""`` for the plain default with no note.
+
+    Shapes Himmy's VOICE only; the framing makes explicit that it never overrides honesty,
+    grounding, or care around real actions, so a playful custom note can't make Himmy reckless.
+    """
+    a = load_assistant(cfg)
+    style, note = a.get("style") or DEFAULT_ASSISTANT_STYLE, (a.get("note") or "").strip()
+    parts: list[str] = []
+    base = _STYLE_DIRECTIVE.get(style, "")
+    if base:
+        parts.append(base)
+    if note:
+        parts.append(f"The user also described how they want you to talk: {note}")
+    if not parts:
+        return ""
+    return (
+        "HOW TO TALK (the user set this — it shapes your TONE and personality only, never your "
+        "honesty, your grounding in real data, or your care around real actions): " + " ".join(parts)
+    )
 
 
 # ---- render (the always-on personalization block) ---------------------------------------
@@ -709,4 +783,6 @@ async def maybe_auto_learn(cfg: HimmyConfig | None = None) -> dict[str, Any]:
 
 __all__ = ["load", "save_user_layer", "render_for_prompt", "gather_signals",
            "gather_signals_async", "learn", "maybe_auto_learn",
-           "infer_suggestions", "get_suggestions", "apply_suggestions"]
+           "infer_suggestions", "get_suggestions", "apply_suggestions",
+           "load_assistant", "save_assistant", "persona_directive",
+           "DEFAULT_ASSISTANT_STYLE"]
