@@ -916,8 +916,8 @@ function DoPickCard({ p, rail, action, onDismiss, onOpen, onAdd }: {
           <span className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-black/45 backdrop-blur-md ring-1 ring-white/10 text-mac-green text-[10.5px] font-semibold tracking-wide">{p.discount}</span>
         )}
         {rail === "food" && (
-          <span className="absolute top-2 left-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/45 backdrop-blur-md ring-1 ring-white/10 text-[10.5px] font-medium text-white/90">
-            <span className={`h-1.5 w-1.5 rounded-full ${p.open_now ? "bg-mac-green" : "bg-white/40"}`} />
+          <span className={`absolute top-2 left-2 px-2 py-0.5 rounded-full bg-black/45 backdrop-blur-md ring-1 ring-white/10 text-[10.5px] font-semibold tracking-wide ${
+            p.open_now ? "text-mac-green" : "text-white/55"}`}>
             {p.open_now ? "Open now" : "Closed"}
           </span>
         )}
