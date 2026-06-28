@@ -26,6 +26,11 @@ dependencies = [
   "pypdf>=4",        # fallback PDF text extraction when Zotero's own text index is unavailable
   "trafilatura>=2",  # clean in-app article extraction for the News reader (Safari-Reader-style)
   "tzlocal>=5",      # the machine's IANA timezone, so calendar events land at the right local hour
+  # Windows only: encrypted key storage via Credential Manager (DPAPI). keyring provides the
+  # WinVault backend; pywin32-ctypes is its runtime shim. macOS uses its Keychain (through himmy)
+  # and needs neither, so these are scoped to win32 to leave Mac/Linux installs unchanged.
+  "keyring>=24; sys_platform == 'win32'",
+  "pywin32-ctypes>=0.2.0; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

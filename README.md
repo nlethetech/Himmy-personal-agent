@@ -115,6 +115,24 @@ The whole app is self-contained: the AI backend, your library, tasks, and memory
 > web UI, and produces `desktop/release/Himmy-<version>-arm64.dmg` (ad-hoc signed, no certificate
 > needed).
 
+## Install (Windows)
+
+A Windows installer (`Himmy Setup.exe`) is built — same self-contained idea, no Python or terminal:
+
+1. Run **`Himmy Setup.exe`** and follow the installer (it adds a Desktop + Start-Menu shortcut).
+2. **First launch only:** Windows SmartScreen may show *"Windows protected your PC"* because Himmy
+   isn't code-signed yet. Click **More info → Run anyway** (one-time; it only means we haven't paid
+   for a Microsoft signing certificate).
+3. Connect an AI key the same way as on Mac. On Windows your key is stored encrypted in **Windows
+   Credential Manager** (DPAPI), never in a plaintext file.
+
+The Windows `.exe` can't be built on a Mac (the Python backend has to be frozen *on Windows*), so it's
+built for free on a **GitHub Actions `windows-latest`** runner — see
+[`.github/workflows/build-windows.yml`](.github/workflows/build-windows.yml). To get an installer:
+push a `v*` tag (it's built + attached to a GitHub Release automatically) or run the **Build Windows
+installer** workflow from the Actions tab and download the artifact. On a Windows machine you can also
+build locally with `powershell -ExecutionPolicy Bypass -File scripts\build-win.ps1`.
+
 ## How it's built
 
 - **App** — Electron + React + Vite + Tailwind; SF Pro, Lucide icons, native macOS vibrancy. Lives in

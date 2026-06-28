@@ -1,0 +1,175 @@
+name: Build Windows installer
+
+# Builds the Windows Himmy installer (.exe) on a REAL Windows runner.
+#
+# Why this exists: PyInstaller does NOT cross-compile — a macOS machine cannot produce the
+# Windows backend binary, and electron-builder needs Windows to make the NSIS .exe installer.
+# GitHub's free `windows-latest` runners give us a real Windows box at no cost.
+#
+# Trigger it two ways:
+#   1. Manually  — Actions tab → "Build Windows installer" → Run workflow.
+#   2. On a tag  — push a tag like `v0.1.0`; the build runs AND attaches the .exe to a Release.
+#
+# REQUIRED SECRET (only if the framework repo is private):
+#   FRAMEWORK_TOKEN — a GitHub Personal Access Token (classic: `repo` scope, or a fine-grained
+#                     token with read access to nlethetech/himmy-framework). Add it under
+#                     Settings → Secrets and variables → Actions → New repository secret.
+#                     If himmy-framework is PUBLIC you can leave this secret unset — the checkout
+#                     falls back to an anonymous clone.
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "v*"
+
+# Allow the job to create/attach a GitHub Release when triggered by a tag push.
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    # Use PowerShell for every `run:` step so paths/quoting are Windows-native.
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      # 1) This app repo → checked out at the default workspace path.
+      - name: Checkout app (Himmy-personal-agent)
+        uses: actions/checkout@v4
+        with:
+          path: app
+
+      # 2) The himmy FRAMEWORK is a separate repo, consumed as an editable dependency.
+      #    Check it out into a SIBLING folder so `pip install -e ..\himmy-framework[...]` works,
+      #    matching the local layout (../himmy-agent-test on the dev's machine).
+      #    If the repo is private, FRAMEWORK_TOKEN authenticates the clone; if it's public the
+      #    token is simply ignored.
+      - name: Checkout framework (himmy-framework)
+        uses: actions/checkout@v4
+        with:
+          repository: nlethetech/himmy-framework
+          path: himmy-framework
+          token: ${{ secrets.FRAMEWORK_TOKEN || github.token }}
+
+      # 3) Real CPython 3.12 (the dev venv targets 3.12).
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 4) Node 20 for vite + electron-builder.
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # 5) uv — fast, reproducible Python env (mirrors the dev workflow's `uv venv`).
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # 6) Create the project .venv and install: framework (editable, with extras) → app
+      #    (editable) → PyInstaller. This is the Windows analogue of the documented dev setup.
+      - name: Create venv and install backend + framework + PyInstaller
+        working-directory: app
+        run: |
+          $ErrorActionPreference = "Stop"
+          # .venv lives at the APP repo root, exactly like on macOS.
+          uv venv --python 3.12 .venv
+          # Editable framework install with the same extras this app declares.
+          # ..\himmy-framework is the sibling checkout from step 2 (relative to app\).
+          uv pip install --python .venv\Scripts\python.exe -e "..\himmy-framework[toolkit,api,openai,embeddings,nepal,cron]"
+          # This app on top (editable).
+          uv pip install --python .venv\Scripts\python.exe -e .
+          # The freezer itself (same floor the mac script uses).
+          uv pip install --python .venv\Scripts\python.exe "pyinstaller>=6.6"
+
+      # 7) Freeze the Python backend with the SAME spec + paths the mac build uses.
+      #    Produces packaging\dist\himmy-backend\himmy-backend.exe (one-dir).
+      - name: Freeze backend (PyInstaller)
+        working-directory: app
+        run: |
+          $ErrorActionPreference = "Stop"
+          .venv\Scripts\python.exe -m PyInstaller packaging\himmy-backend.spec `
+            --distpath packaging\dist --workpath packaging\build --noconfirm
+
+      # 8) Smoke-test the frozen backend's /health on a spare port before wrapping it.
+      - name: Smoke-test frozen backend
+        working-directory: app
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "packaging\dist\himmy-backend\himmy-backend.exe"
+          if (-not (Test-Path $exe)) { throw "Frozen backend not found at $exe" }
+          $smokeDir = Join-Path $env:RUNNER_TEMP "himmy-smoke"
+          New-Item -ItemType Directory -Force -Path $smokeDir | Out-Null
+          $env:HIMMY_APP_PORT = "8159"
+          $env:HIMMY_APP_DATA_DIR = $smokeDir
+          $env:HIMMY_SECRETS = "env"
+          $proc = Start-Process -FilePath $exe -PassThru `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\himmy-smoke.out.log" `
+            -RedirectStandardError  "$env:RUNNER_TEMP\himmy-smoke.err.log"
+          $ok = $false
+          foreach ($i in 1..30) {
+            if ($proc.HasExited) { break }
+            try {
+              Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 `
+                -Uri "http://127.0.0.1:8159/health" | Out-Null
+              $ok = $true; break
+            } catch { Start-Sleep -Seconds 1 }
+          }
+          if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+          if (-not $ok) {
+            Write-Host "----- backend stdout -----"
+            if (Test-Path "$env:RUNNER_TEMP\himmy-smoke.out.log") { Get-Content "$env:RUNNER_TEMP\himmy-smoke.out.log" }
+            Write-Host "----- backend stderr -----"
+            if (Test-Path "$env:RUNNER_TEMP\himmy-smoke.err.log") { Get-Content "$env:RUNNER_TEMP\himmy-smoke.err.log" }
+            throw "Frozen backend failed to answer /health"
+          }
+          Write-Host "frozen backend OK"
+
+      # 9) Install the desktop deps (clean, lockfile-faithful).
+      - name: npm ci (desktop)
+        working-directory: app/desktop
+        run: |
+          $ErrorActionPreference = "Stop"
+          npm ci
+
+      # 10) Build the web UI (vite).
+      - name: Build web UI (vite)
+        working-directory: app/desktop
+        run: |
+          $ErrorActionPreference = "Stop"
+          npm run build
+
+      # 11) Package the Windows installer. The package.json `build` block already points
+      #     extraResources at ..\packaging\dist\himmy-backend (so the frozen .exe ships inside).
+      #     `--publish never` keeps electron-builder from trying to upload here; we handle the
+      #     Release attachment ourselves in step 13.
+      - name: Build Windows installer (electron-builder)
+        working-directory: app/desktop
+        run: |
+          $ErrorActionPreference = "Stop"
+          npx --no-install electron-builder --win --publish never
+
+      # 12) Always upload the installer(s) as a downloadable build artifact.
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Himmy-windows-installer
+          path: |
+            app/desktop/release/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      # 13) On a tag push, also attach the .exe to a GitHub Release for that tag.
+      - name: Attach installer to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/desktop/release/*.exe
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

@@ -13,8 +13,16 @@ are collected whole so their dylibs and data files come along.
 """
 
 import os
+import sys
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
+
+# On Windows, console=True builds a console-subsystem exe, so a black cmd window pops up (and
+# lingers) every time Electron spawns the backend. Build a WINDOWED exe there (no console). On
+# macOS the flag is a no-op for a spawned child, so keep console=True to preserve log flow to
+# Electron's inherited stdio. (The frozen entry point also mirrors logs to a file, so a windowed
+# Windows exe is still diagnosable.)
+_CONSOLE = sys.platform != "win32"
 
 datas = []
 binaries = []
@@ -62,6 +70,7 @@ hiddenimports += [
 # --- Data-/native-heavy deps: collect whole (dylibs + data files) --------------------------
 for pkg in (
     "openai",  # OpenRouter / OpenAI / custom-compatible providers — imported lazily by himmy
+    "keyring",  # OS credential store: macOS Keychain / Windows Credential Manager (DPAPI) / Linux
     "fastembed",
     "onnxruntime",
     "tokenizers",
@@ -101,7 +110,21 @@ hiddenimports += [
     "distro",
     "tqdm",
     "typing_extensions",
+    # keyring's OS credential backends are discovered dynamically — name the one for THIS
+    # platform so the frozen backend can store the user's API key encrypted (not in plaintext).
+    "keyring.backends.fail",
 ]
+if sys.platform == "win32":
+    # Windows Credential Manager (DPAPI) via keyring + its pywin32-ctypes runtime shim.
+    hiddenimports += [
+        "keyring.backends.Windows",
+        "win32ctypes.core",
+        "win32ctypes.pywin32.win32cred",
+    ]
+elif sys.platform == "darwin":
+    hiddenimports += ["keyring.backends.macOS"]
+else:
+    hiddenimports += ["keyring.backends.SecretService"]
 
 
 a = Analysis(
@@ -141,7 +164,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
+    console=_CONSOLE,  # mac/linux: True (logs to inherited stdio); Windows: False (no cmd window)
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

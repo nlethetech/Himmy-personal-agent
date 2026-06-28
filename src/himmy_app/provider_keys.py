@@ -2,18 +2,18 @@
 
 A user picks an AI provider, pastes their key, and Himmy stores it through himmy's
 **writable secrets** layer — the *same* mechanism the Google sign-in uses
-(:func:`himmy.config.secrets.get_writable_provider`). On macOS (the app's target platform)
-that is the login **keychain**, where the value is protected by the OS and never written to
-disk in plaintext.
+(:func:`himmy.config.secrets.get_writable_provider`). The app forces ``HIMMY_SECRETS=keychain``,
+which routes to the OS credential store on every supported desktop, where the value is encrypted
+by the OS and never written to disk in plaintext.
 
 SECURITY — storage at rest:
-  * macOS keychain (the default; the app forces ``HIMMY_SECRETS=keychain``): encrypted by
-    the OS, the only supported production path.
-  * Off-macOS / keychain unavailable: himmy's ``FileSecrets`` backend writes the key to a
-    ``0600`` file under the secrets dir. This file is **NOT encrypted** — it is plaintext
-    with restrictive permissions only. We therefore refuse to silently store a key this way:
-    :func:`set_key` raises a clear error unless ``HIMMY_ALLOW_PLAINTEXT_SECRETS=1`` is set,
-    so a non-macOS user must explicitly opt in to plaintext-at-rest.
+  * OS credential store (the default; ``HIMMY_SECRETS=keychain``): macOS **Keychain**, Windows
+    **Credential Manager** (DPAPI), or Linux **SecretService** — all encrypted at rest by the OS
+    via the ``keyring`` library. This is the only supported production path.
+  * Only when NO OS credential store is available does himmy fall back to ``FileSecrets``, which
+    writes the key to a ``0600`` file — **NOT encrypted**, just restrictive permissions. We refuse
+    to store a key this way silently: :func:`set_key` raises a clear error unless
+    ``HIMMY_ALLOW_PLAINTEXT_SECRETS=1`` is set, so plaintext-at-rest is always an explicit opt-in.
 
 This module *writes* and *checks presence of* keys. It NEVER returns a stored key value to a
 caller and NEVER logs one. ``is_configured`` returns only a boolean.

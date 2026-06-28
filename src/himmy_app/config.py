@@ -137,6 +137,47 @@ def clear_active_model() -> None:
         pass
 
 
+_OS_CRED_CONFIGURED = False
+
+
+def _maybe_configure_os_credential_store() -> None:
+    """Route ``HIMMY_SECRETS=keychain`` to the OS credential store on NON-macOS desktops.
+
+    himmy's ``build_secret_provider()`` gates its ``KeychainSecrets`` backend to macOS, so on
+    Windows / Linux it would fall back to a plaintext ``FileSecrets`` store — which
+    ``provider_keys.set_key`` REFUSES by default, leaving a Windows user unable to save their API
+    key at all. But ``KeychainSecrets`` itself uses the cross-platform ``keyring`` library
+    (Windows **Credential Manager / DPAPI**, Linux **SecretService**), so we install it directly
+    here via himmy's public ``configure_secrets()`` — bypassing only the macOS *factory* gate, not
+    the security model. We do this ONLY when keyring actually resolves a real (encrypted) backend;
+    otherwise himmy's default (which safely refuses plaintext) is left untouched. macOS is
+    unchanged — it already routes to the Keychain via himmy's default path.
+    """
+    global _OS_CRED_CONFIGURED
+    if _OS_CRED_CONFIGURED or sys.platform == "darwin":
+        return
+    if (os.environ.get("HIMMY_SECRETS") or "").strip().lower() != "keychain":
+        return
+    _OS_CRED_CONFIGURED = True
+    try:
+        import keyring
+        from keyring.backends.fail import Keyring as _FailKeyring
+
+        backend = keyring.get_keyring()
+        if backend is None or isinstance(backend, _FailKeyring):
+            return  # no real OS credential store → keep himmy's safe refuse-plaintext default
+        from himmy.config.secrets import (
+            ChainSecretProvider,
+            EnvSecrets,
+            KeychainSecrets,
+            configure_secrets,
+        )
+
+        configure_secrets(ChainSecretProvider([KeychainSecrets(), EnvSecrets()]))
+    except Exception:  # noqa: BLE001 - never let secret-store setup crash startup
+        return
+
+
 def load_config() -> HimmyConfig:
     """Build :class:`HimmyConfig` from the environment and export himmy's durable paths."""
     data_dir = Path(os.environ.get("HIMMY_APP_DATA_DIR") or str(DEFAULT_DATA_DIR)).expanduser()
@@ -188,6 +229,9 @@ def load_config() -> HimmyConfig:
     # disk in plaintext); on other platforms himmy falls back to an encrypted file store
     # under the secrets dir. Default env-only secrets are read-only → Connect would no-op.
     os.environ.setdefault("HIMMY_SECRETS", "keychain")
+    # On Windows/Linux, route that keychain mode to the OS credential store (encrypted) instead
+    # of falling back to a refused plaintext file. No-op on macOS. Runs once.
+    _maybe_configure_os_credential_store()
     # Carry the FULL tool result on the TOOL_COMPLETED event (himmy defaults to 2000 chars, which
     # mangles a larger connector JSON into an un-parseable string). The chat reconstructs the typed
     # result from this to draw rich cards, then re-redacts + caps it to 16 KB before the wire.

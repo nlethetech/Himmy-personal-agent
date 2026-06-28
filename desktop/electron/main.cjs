@@ -74,7 +74,11 @@ ipcMain.handle("app:pickZip", async () => {
 });
 
 const REPO_ROOT = path.join(__dirname, "..", ".."); // …/Himmy
-const VENV_PYTHON = path.join(REPO_ROOT, ".venv", "bin", "python");
+const IS_WIN = process.platform === "win32";
+// A venv puts the interpreter at .venv\Scripts\python.exe on Windows, .venv/bin/python on Unix.
+const VENV_PYTHON = IS_WIN
+  ? path.join(REPO_ROOT, ".venv", "Scripts", "python.exe")
+  : path.join(REPO_ROOT, ".venv", "bin", "python");
 const BACKEND_PORT = process.env.HIMMY_APP_PORT || "8131";
 const DEV_URL = "http://localhost:5173";
 
@@ -118,7 +122,12 @@ async function startBackend() {
   if (app.isPackaged) {
     // Packaged Himmy.app: run the self-contained, PyInstaller-frozen backend that ships inside
     // the bundle (Resources/himmy-backend/) — no system Python, no venv, no terminal required.
-    cmd = path.join(process.resourcesPath, "himmy-backend", "himmy-backend");
+    // PyInstaller names the frozen binary himmy-backend on macOS, himmy-backend.exe on Windows.
+    cmd = path.join(
+      process.resourcesPath,
+      "himmy-backend",
+      IS_WIN ? "himmy-backend.exe" : "himmy-backend"
+    );
     args = [];
     cwd = path.dirname(cmd);
     // The .app bundle is read-only, so the user's library/memory/keys must live in a real
@@ -143,16 +152,29 @@ async function startBackend() {
 }
 
 function createWindow() {
+  // Per-OS window chrome. macOS keeps the native frosted-glass (vibrancy) look; Windows 11 gets
+  // the Mica material with an opaque dark fallback and a standard frame (real min/max/close).
+  const isDarwin = process.platform === "darwin";
+  const chrome = isDarwin
+    ? {
+        backgroundColor: "#00000000",      // transparent so the vibrancy material shows
+        vibrancy: "under-window",          // native macOS frosted-glass material
+        visualEffectState: "active",       // keep the blur lively even when unfocused
+        titleBarStyle: "hiddenInset",
+        trafficLightPosition: { x: 19, y: 24 },
+      }
+    : {
+        backgroundMaterial: "mica",        // Windows 11 translucent material
+        backgroundColor: "#0E1116",        // opaque dark fallback (Win10 / Mica unavailable)
+        titleBarStyle: "default",          // standard window frame + controls
+      };
+
   mainWindow = new BrowserWindow({
     width: 1340,
     height: 880,
     minWidth: 1080,
     minHeight: 720,
-    backgroundColor: "#00000000",        // transparent so the vibrancy material shows
-    vibrancy: "under-window",            // native macOS frosted-glass material
-    visualEffectState: "active",         // keep the blur lively even when unfocused
-    titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 19, y: 24 },
+    ...chrome,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
