@@ -379,17 +379,33 @@ export type ChatMessage = { role: "user" | "assistant"; content: string };
 
 // A tool call Himmy proposed that's waiting on the user's approval before it runs.
 export type Pending = { tool_call_id?: string; tool_name: string; args: Record<string, any> };
-// A finished turn. When `awaiting_approval`, the run is PAUSED on a gated tool — approve/cancel
-// via api.resume(checkpoint_id, …) to continue it.
-export type TurnResult = AskResult & {
-  awaiting_approval?: boolean; checkpoint_id?: string; pending?: Pending[]; session_id?: string;
+
+// A completed tool call carried through to the renderer so the palette can draw rich connector
+// cards. Both `args` and `result` are SERVER-REDACTED + size-capped: mail/calendar bodies, email
+// addresses, tokens/secrets never reach the renderer. `result` stays loosely typed because each
+// connector returns a different shape (a flight list, a weather snapshot, …); the App narrows it
+// per `tool_name`.
+export type ToolResult = {
+  tool_name: string;
+  args: Record<string, any>;
+  result: unknown;
 };
 
-// A streamed turn: token deltas, then a terminal `done`. `onToken` fires per delta.
+// A finished turn. When `awaiting_approval`, the run is PAUSED on a gated tool — approve/cancel
+// via api.resume(checkpoint_id, …) to continue it. `tool_results` carries the typed, redacted
+// outputs of the tools that ran (in call order); `tools` keeps the bare names for back-compat.
+export type TurnResult = AskResult & {
+  awaiting_approval?: boolean; checkpoint_id?: string; pending?: Pending[]; session_id?: string;
+  tool_results?: ToolResult[];
+};
+
+// A streamed turn: token deltas + live tool-trace labels, then a terminal `done`. `onToken` fires
+// per delta; `tool` carries a doxing-safe human label ("Looked up flights") with NO arg values.
 export type StreamEvent =
   | { type: "token"; text: string }
+  | { type: "tool"; label: string }
   | { type: "approval"; checkpoint_id: string; pending: Pending[] }
-  | { type: "done"; reply: string; tools: string[]; session_id: string; awaiting_approval?: boolean; checkpoint_id?: string }
+  | { type: "done"; reply: string; tools: string[]; session_id: string; tool_results?: ToolResult[]; awaiting_approval?: boolean; checkpoint_id?: string }
   | { type: "error"; message: string };
 
 // Usage — token + cost accounting from himmy's metrics registry (priced via the LiteLLM table).
@@ -419,50 +435,85 @@ export const api = {
   // Approve (execute) or cancel (reject) the gated tool that paused a run, and continue it.
   resume: (checkpoint_id: string, approved: boolean, session_id?: string) =>
     jpost<TurnResult>("/ask/resume", { checkpoint_id, approved, session_id }),
-  // SSE streaming of one turn. Calls onToken per delta; resolves with the final answer (or an
-  // awaiting-approval result). Falls back to /ask automatically when the stream can't be opened.
-  askStream: async (
+  // SSE streaming of one turn. Calls onToken per delta and onTrace per live tool-label; resolves
+  // with the final answer (or an awaiting-approval result). Falls back to /ask automatically when
+  // the stream can't be opened. The returned object exposes a `done` promise plus an `abort()`
+  // handle that cancels the stream (and, server-side, the background agent task) — used by the
+  // Stop button. An external `signal` may also be passed to drive the abort from a parent.
+  askStream: (
     message: string,
-    opts: { sessionId?: string; context?: string; onToken: (t: string) => void },
-  ): Promise<TurnResult> => {
-    const res = await fetch(`${BASE}/ask/stream`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, session_id: opts.sessionId, context: opts.context }),
-    });
-    if (!res.ok || !res.body) {
-      // Stream unavailable — fall back to the buffered endpoint (which also carries approvals).
-      const r = await api.ask(message, undefined, opts.context, opts.sessionId);
-      if (!r.awaiting_approval) opts.onToken(r.reply);
-      return r;
+    opts: {
+      sessionId?: string;
+      context?: string;
+      onToken: (t: string) => void;
+      onTrace?: (label: string) => void;
+      signal?: AbortSignal;
+    },
+  ): { done: Promise<TurnResult>; abort: () => void } => {
+    // Own an AbortController so callers always get a working abort(), even when they didn't pass a
+    // signal. If they did pass one, chain it so either source aborts the underlying fetch.
+    const controller = new AbortController();
+    if (opts.signal) {
+      if (opts.signal.aborted) controller.abort();
+      else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
     }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    let final: TurnResult = { ok: true, reply: "", tools: [] };
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const frames = buf.split("\n\n");
-      buf = frames.pop() ?? ""; // keep the trailing partial frame
-      for (const frame of frames) {
-        const line = frame.split("\n").find((l) => l.startsWith("data:"));
-        if (!line) continue;
-        let ev: StreamEvent;
-        try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
-        if (ev.type === "token") opts.onToken(ev.text);
-        else if (ev.type === "approval")
-          final = { ...final, awaiting_approval: true, checkpoint_id: ev.checkpoint_id, pending: ev.pending };
-        else if (ev.type === "done")
-          final = { ...final, ok: true, reply: ev.reply, tools: ev.tools, session_id: ev.session_id,
-                    awaiting_approval: ev.awaiting_approval ?? final.awaiting_approval,
-                    checkpoint_id: ev.checkpoint_id ?? final.checkpoint_id };
-        else if (ev.type === "error")
-          final = { ...final, ok: false, reply: `Error: ${ev.message}`, tools: [] };
+    const done = (async (): Promise<TurnResult> => {
+      let res: Response;
+      try {
+        res = await fetch(`${BASE}/ask/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message, session_id: opts.sessionId, context: opts.context }),
+          signal: controller.signal,
+        });
+      } catch (e) {
+        // An abort before the response opened: surface a partial (empty) turn, don't fall back.
+        if (controller.signal.aborted) return { ok: true, reply: "", tools: [] };
+        throw e;
       }
-    }
-    return final;
+      if (!res.ok || !res.body) {
+        // Stream unavailable — fall back to the buffered endpoint (which also carries approvals).
+        const r = await api.ask(message, undefined, opts.context, opts.sessionId);
+        if (!r.awaiting_approval) opts.onToken(r.reply);
+        return r;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let final: TurnResult = { ok: true, reply: "", tools: [] };
+      try {
+        while (true) {
+          const { value, done: streamDone } = await reader.read();
+          if (streamDone) break;
+          buf += decoder.decode(value, { stream: true });
+          const frames = buf.split("\n\n");
+          buf = frames.pop() ?? ""; // keep the trailing partial frame
+          for (const frame of frames) {
+            const line = frame.split("\n").find((l) => l.startsWith("data:"));
+            if (!line) continue;
+            let ev: StreamEvent;
+            try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
+            if (ev.type === "token") opts.onToken(ev.text);
+            else if (ev.type === "tool") opts.onTrace?.(ev.label);
+            else if (ev.type === "approval")
+              final = { ...final, awaiting_approval: true, checkpoint_id: ev.checkpoint_id, pending: ev.pending };
+            else if (ev.type === "done")
+              final = { ...final, ok: true, reply: ev.reply, tools: ev.tools, session_id: ev.session_id,
+                        tool_results: ev.tool_results ?? final.tool_results,
+                        awaiting_approval: ev.awaiting_approval ?? final.awaiting_approval,
+                        checkpoint_id: ev.checkpoint_id ?? final.checkpoint_id };
+            else if (ev.type === "error")
+              final = { ...final, ok: false, reply: `Error: ${ev.message}`, tools: [] };
+          }
+        }
+      } catch (e) {
+        // Aborted mid-stream (Stop) — return whatever partial reply we accumulated.
+        if (controller.signal.aborted) return final;
+        throw e;
+      }
+      return final;
+    })();
+    return { done, abort: () => controller.abort() };
   },
   sessions: {
     list: () => jget<{ ok: boolean; sessions: ChatSession[] }>("/sessions"),

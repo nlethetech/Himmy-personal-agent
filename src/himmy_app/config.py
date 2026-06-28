@@ -168,6 +168,10 @@ def load_config() -> HimmyConfig:
     # disk in plaintext); on other platforms himmy falls back to an encrypted file store
     # under the secrets dir. Default env-only secrets are read-only → Connect would no-op.
     os.environ.setdefault("HIMMY_SECRETS", "keychain")
+    # Carry the FULL tool result on the TOOL_COMPLETED event (himmy defaults to 2000 chars, which
+    # mangles a larger connector JSON into an un-parseable string). The chat reconstructs the typed
+    # result from this to draw rich cards, then re-redacts + caps it to 16 KB before the wire.
+    os.environ.setdefault("HIMMY_TOOL_RESULT_EVENT_MAX", "32000")
 
     return HimmyConfig(
         provider=provider,

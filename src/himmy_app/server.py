@@ -25,7 +25,7 @@ import os
 
 import re
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
@@ -928,45 +928,66 @@ def create_app() -> FastAPI:
         return {"ok": True, **r}
 
     @app.post("/ask/stream")
-    async def ask_stream(body: AskRequest) -> Any:
+    async def ask_stream(body: AskRequest, request: Request) -> Any:
         """Server-Sent-Events streaming of one turn for the Cmd-K palette.
 
-        Emits ``data: {"type":"token","text":...}`` lines as tokens arrive, then a
-        final ``data: {"type":"done","reply":...,"tools":[...],"session_id":...}``.
-        The turn is persisted to ``session_id`` so the next call continues context.
-        Clients that can't stream should fall back to POST /ask (unchanged).
+        Frames (each a ``data: {…}\\n\\n`` line):
+          - ``{"type":"tool","label":<human label>}`` — a LIVE tool-trace frame, emitted as Himmy
+            calls/finishes each tool ("Looked up flights"). Doxing-safe: label only, no arg values.
+          - ``{"type":"token","text":…}`` — the answer revealed progressively.
+          - ``{"type":"done","reply":…,"tools":[names],"tool_results":[…],"session_id":…}`` — the
+            terminal frame. ``tool_results`` is the typed, REDACTED, size-capped list of what each
+            tool returned (rich-card payload); ``tools`` (names) stays for back-compat.
+          - ``{"type":"approval",…}`` when a gated tool pauses the run (then a ``done`` with
+            ``awaiting_approval``); ``{"type":"error",…}`` on failure.
+
+        ABORTABLE (Stop): the stream is cancellable. If the client disconnects (or the model
+        stalls past the idle cap), we close the underlying async generator — which cancels the
+        background agent task in :func:`answer_stream`, and himmy's runtime unwinds with a
+        partial-thread save. Clients that can't stream should fall back to POST /ask (unchanged).
         """
         message = body.message.strip()
 
         async def _gen() -> Any:
             if not message:
                 yield "data: " + json.dumps(
-                    {"type": "done", "reply": "Ask me something.", "tools": []}
+                    {"type": "done", "reply": "Ask me something.", "tools": [], "tool_results": []}
                 ) + "\n\n"
                 return
             prompt = _compose_prompt(message, body.context)
             ait = answer_stream(prompt, session_id=body.session_id).__aiter__()
             try:
                 while True:
+                    # Race the next frame against the idle cap. A client disconnect (Stop) lands as
+                    # an aclose()/cancel on this generator (handled in `finally`); we also poll
+                    # is_disconnected() so a mid-tool-loop Stop (no token flowing yet) aborts fast.
                     try:
                         ev = await asyncio.wait_for(ait.__anext__(), timeout=_stream_idle)
                     except StopAsyncIteration:
                         break
                     except (asyncio.TimeoutError, TimeoutError):
-                        # No token for _stream_idle seconds → the model has stalled. Fail gracefully.
+                        if await request.is_disconnected():
+                            # Client already gone: just unwind (the `finally` cancels the agent).
+                            return
+                        # No frame for _stream_idle seconds → the model stalled. Fail gracefully.
                         yield "data: " + json.dumps(
-                            {"type": "done", "reply": _slow_model_msg, "tools": []}
+                            {"type": "done", "reply": _slow_model_msg, "tools": [],
+                             "tool_results": []}
                         ) + "\n\n"
                         return
+                    if await request.is_disconnected():
+                        return  # Stop pressed / tab closed → abort (the `finally` cancels the agent).
                     yield "data: " + json.dumps(ev) + "\n\n"
             except Exception as exc:  # noqa: BLE001
                 yield "data: " + json.dumps(
                     {"type": "error", "message": f"{type(exc).__name__}: {exc}"}
                 ) + "\n\n"
             finally:
+                # Closing the generator throws GeneratorExit into answer_stream, which cancels the
+                # background agent task so a cancelled run can't outlive the request.
                 try:
                     await ait.aclose()
-                except Exception:  # noqa: BLE001 - best-effort cleanup of a stalled stream
+                except Exception:  # noqa: BLE001 - best-effort cleanup of a stalled/aborted stream
                     pass
 
         return StreamingResponse(

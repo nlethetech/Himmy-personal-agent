@@ -9,7 +9,9 @@ via ``himmy serve`` (see serve.sh) — both share one ``agent/agent.yaml``.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -35,19 +37,202 @@ def _load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
+def _event_type(event: Any) -> str:
+    """The event's type as a plain string (``TOOL_COMPLETED``, …), enum or not."""
+    return getattr(getattr(event, "event_type", None), "value", None) or str(
+        getattr(event, "event_type", "")
+    )
+
+
 def _tools_from_events(events: list[Any]) -> list[str]:
     """Pull the distinct tool names Himmy used this turn out of the event stream."""
     tools: list[str] = []
     for event in events:
-        etype = getattr(getattr(event, "event_type", None), "value", None) or str(
-            getattr(event, "event_type", "")
-        )
-        if etype in ("TOOL_CALLED", "TOOL_COMPLETED"):
+        if _event_type(event) in ("TOOL_CALLED", "TOOL_COMPLETED"):
             payload = getattr(event, "payload", None) or {}
             name = payload.get("tool_name") or payload.get("tool") or payload.get("name")
             if name and name not in tools:
                 tools.append(str(name))
     return tools
+
+
+#: Hard cap on the JSON size of any single tool result carried to the renderer. himmy already
+#: truncates a tool's result text to ~2 000 chars on the event; this is a second ceiling applied
+#: AFTER redaction, so an unusually large structured result can never bloat the wire/SSE frame.
+_RESULT_CAP_BYTES = 16384
+#: When a result IS over the cap, we shrink it STRUCTURE-PRESERVINGLY (long strings truncated, long
+#: lists kept to the first N) so the chat's rich cards still see a valid dict — never a half-cut
+#: JSON string. Most connector results (e.g. ~7.5 KB for 50+ flights) fit whole under the cap.
+_RESULT_LIST_KEEP = 12
+_RESULT_STR_CAP = 800
+
+#: PII-bearing free-text keys whose VALUE we drop entirely before a tool result/args reaches the
+#: palette renderer. These carry mail/calendar bodies, recipient lists, descriptions, and notes —
+#: content that must never leave the backend even though the *key* isn't a "secret" (so the kernel
+#: key-based redactor leaves it untouched). Matched case-insensitively as a whole key.
+_PII_TEXT_KEYS = frozenset({
+    "body", "snippet", "description", "desc", "note", "notes", "attendees", "attendee",
+    "bcc", "cc", "html_link", "htmllink", "raw", "thread", "content", "location", "address",
+    # Mail/calendar identity & subject lines are doxing-grade PII. Subjects/summaries/titles
+    # aren't email-shaped so _EMAIL_RE never touches them; sender/recipient/reply_to carry a
+    # human display name alongside the @-address that masking alone leaves intact. None of these
+    # keys appear in the rich flight/bus/food/weather cards, so dropping them everywhere is safe.
+    "subject", "summary", "title", "sender", "recipient", "reply_to", "replyto",
+})
+
+#: PII-text keys that ALSO name legitimate, non-PII fields on the transport cards: a flight/bus
+#: result carries ``from``/``to`` as city names ("Kathmandu" → "Pokhara") that the route line
+#: renders. We therefore drop ``from``/``to``/``cc``/``bcc`` only for mail/calendar tools (where
+#: they're recipients/senders), and leave them intact for everything else so the cards still draw.
+_MAILCAL_PII_KEYS = frozenset({"from", "to", "cc", "bcc"})
+
+#: Tools whose results are mail- or calendar-shaped — the only context in which ``from``/``to``
+#: are recipient identities rather than transport endpoints. Matched as a name prefix so
+#: ``mail_read``/``mail_list``/``mail_send``/``calendar_find``/``calendar_add``/… all qualify.
+_MAILCAL_TOOL_PREFIXES = ("mail", "calendar", "gmail", "gcal", "email")
+
+#: Email-address shape. Any string VALUE that contains an address (a mail `to`/`from`/`cc`, an
+#: address echoed inside prose) is masked — so "Kathmandu" (a flight/bus `from`) survives but
+#: "ram@example.com" (a mail `from`) never reaches the renderer.
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_REDACTED = "[redacted]"
+
+
+def _scrub_value(value: Any, *, mailcal: bool = False) -> Any:
+    """Recursively mask PII in a (already key-redacted) value: drop PII-text keys, mask any
+    email address found in a string. Lists/dicts recurse; scalars pass through.
+
+    ``mailcal`` extends the dropped-key set with ``from``/``to``/``cc``/``bcc`` — recipient and
+    sender identities on mail/calendar results. Those same keys are legitimate city endpoints on
+    transport cards, so they're only dropped when the originating tool is mail/calendar-shaped.
+    """
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            kl = str(k).lower()
+            if kl in _PII_TEXT_KEYS or (mailcal and kl in _MAILCAL_PII_KEYS):
+                out[k] = _REDACTED
+            else:
+                out[k] = _scrub_value(v, mailcal=mailcal)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_scrub_value(item, mailcal=mailcal) for item in value]
+    if isinstance(value, str):
+        return _EMAIL_RE.sub(_REDACTED, value)
+    return value
+
+
+def _is_mailcal_tool(tool_name: Any) -> bool:
+    """True when a tool's results are mail/calendar-shaped (so ``from``/``to`` are identities,
+    not transport endpoints). Prefix match, case-insensitive."""
+    name = str(tool_name or "").lower()
+    return name.startswith(_MAILCAL_TOOL_PREFIXES)
+
+
+def _redact_for_render(value: Any, *, tool_name: Any = None) -> Any:
+    """Two-layer redaction for anything (tool args OR result) bound for the renderer.
+
+    Layer 1 — the canonical himmy key-based redactor (``redact_mapping``): masks values under
+    secret-looking keys (token/api_key/authorization/cookie/…) at ANY nesting depth, identically
+    to the audit spine and the approvals UI. Layer 2 — our value-aware scrub: drops PII free-text
+    keys (mail/calendar bodies, subjects, summaries, recipient lists, descriptions, notes) and
+    masks email addresses found in any string. For mail/calendar tools it additionally drops
+    ``from``/``to``/``cc``/``bcc`` (recipient/sender identities). Together they guarantee
+    mail/calendar SUBJECTS + BODIES + identities, email addresses, and tokens/secrets NEVER reach
+    the palette. Best-effort: a redaction hiccup yields ``[redacted]`` rather than the raw value.
+    """
+    try:
+        from himmy.services.tools.security import redact_mapping
+    except Exception:  # noqa: BLE001 - redaction is load-bearing; never ship the raw value
+        redact_mapping = None
+    mailcal = _is_mailcal_tool(tool_name)
+    try:
+        if isinstance(value, dict):
+            keyed = redact_mapping(value) if redact_mapping is not None else dict(value)
+            return _scrub_value(keyed, mailcal=mailcal)
+        # Non-dict result (a bare string/list/number): no keys to key-redact, just value-scrub.
+        return _scrub_value(value, mailcal=mailcal)
+    except Exception:  # noqa: BLE001
+        return _REDACTED
+
+
+def _coerce_result(raw: Any) -> Any:
+    """The TOOL_COMPLETED payload carries ``result`` as a JSON string (himmy serialises +
+    truncates it). Parse it back to structured data when possible so known connector results can
+    render as rich cards; otherwise keep the (string) text."""
+    if isinstance(raw, (dict, list)):
+        return raw
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s and s[0] in "{[":
+            try:
+                return json.loads(s)
+            except Exception:  # noqa: BLE001 - not JSON (or himmy-truncated) → keep the text
+                return raw
+    return raw
+
+
+def _json_bytes(value: Any) -> int:
+    try:
+        return len(json.dumps(value, default=str).encode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return len(str(value).encode("utf-8"))
+
+
+def _shrink(value: Any) -> Any:
+    """Shrink a value to fit the cap WITHOUT breaking its shape: long strings are truncated, long
+    lists keep their first ``_RESULT_LIST_KEEP`` items, dicts recurse. A rich card therefore still
+    receives a valid dict (with its key arrays + cheapest/booking_link intact), never a cut JSON."""
+    if isinstance(value, str):
+        return value if len(value) <= _RESULT_STR_CAP else value[:_RESULT_STR_CAP] + "…"
+    if isinstance(value, list):
+        return [_shrink(v) for v in value[:_RESULT_LIST_KEEP]]
+    if isinstance(value, dict):
+        return {k: _shrink(v) for k, v in value.items()}
+    return value
+
+
+def _cap_result(value: Any) -> Any:
+    """Bound one (already-redacted) result for the SSE/HTTP frame. Returns the value untouched when
+    it already fits; otherwise STRUCTURE-PRESERVINGLY shrinks it (so rich cards still parse it);
+    only a pathological value that is still over-budget falls back to a short marker string."""
+    if _json_bytes(value) <= _RESULT_CAP_BYTES:
+        return value
+    shrunk = _shrink(value)
+    if _json_bytes(shrunk) <= _RESULT_CAP_BYTES:
+        return shrunk
+    return "[result too large to display]"
+
+
+def _tool_results_from_events(events: list[Any]) -> list[dict[str, Any]]:
+    """Typed, REDACTED, size-capped tool results in call order — the keystone the palette uses to
+    render rich connector cards (flights, buses, food, weather).
+
+    For every ``TOOL_COMPLETED`` event (in order) emit
+    ``{"tool_name", "args": <redacted dict>, "result": <redacted, ≤4KB>}``. SECURITY: both args
+    AND result pass through :func:`_redact_for_render`, so mail/calendar bodies, email addresses,
+    and tokens/secrets are masked before anything reaches the renderer (this is the acceptance
+    test). Best-effort: a bad event is skipped, never raised.
+    """
+    out: list[dict[str, Any]] = []
+    for event in events:
+        if _event_type(event) != "TOOL_COMPLETED":
+            continue
+        payload = getattr(event, "payload", None) or {}
+        name = payload.get("tool_name") or payload.get("tool") or payload.get("name")
+        if not name:
+            continue
+        try:
+            args = dict(payload.get("tool_args") or {})
+        except Exception:  # noqa: BLE001
+            args = {}
+        result = _coerce_result(payload.get("result"))
+        out.append({
+            "tool_name": str(name),
+            "args": _redact_for_render(args, tool_name=name),
+            "result": _cap_result(_redact_for_render(result, tool_name=name)),
+        })
+    return out
 
 
 def _build_runtime(cfg: Any, on_event: Any, *, checkpoint_store: Any = None) -> tuple[Any, Any, Any]:
@@ -114,12 +299,25 @@ def approvals_store(cfg: Any | None = None) -> Any:
 
 
 def _pending_payload(store: Any, checkpoint_id: str) -> list[dict[str, Any]]:
-    """The pending (approval-gated) tool calls of a checkpoint, secrets redacted."""
+    """The pending (approval-gated) tool calls of a checkpoint, secrets redacted.
+
+    SECURITY — INTENTIONAL HITL EXCEPTION (conscious, not an oversight): unlike the audited
+    ``tool_results`` path (which runs the full :func:`_redact_for_render` two-layer PII scrub),
+    a *pending* call's args deliberately reach the approval card in cleartext for the recipient,
+    subject, and body. This is load-bearing for human-in-the-loop: the user MUST see exactly what
+    they're approving before a ``mail_send``/``calendar_add`` runs — a ``[redacted]`` recipient or
+    body would make the consent meaningless. The leak surface is therefore scoped to the user's
+    OWN approval card for an action they themselves are about to authorize, not arbitrary tool
+    output. We still run :func:`redact_tool_args` (himmy's ``redact_mapping``, Layer-1 secret-key
+    masking) so tokens/api_keys/authorization/cookies can NEVER ride along in a pending arg, even
+    though the human-facing fields pass through. A pending call is not a "tool result", so this is
+    outside the acceptance test's scrubbed path by design.
+    """
     cp = store.load(checkpoint_id)
     if cp is None:
         return []
     try:
-        from himmy.runtime.checkpoint import redact_sensitive_args as _redact
+        from himmy.runtime.checkpoint import redact_tool_args as _redact
     except Exception:  # noqa: BLE001 - redaction is best-effort
         _redact = None
     out: list[dict[str, Any]] = []
@@ -223,10 +421,14 @@ async def answer(
 async def ask_turn(message: str, *, session_id: str | None = None) -> dict[str, Any]:
     """Run one turn with HITL ON. Returns a dict:
 
-    - normal answer → ``{awaiting_approval: False, reply, tools}``
+    - normal answer → ``{awaiting_approval: False, reply, tools, tool_results}``
     - an approval-gated tool was called → ``{awaiting_approval: True, checkpoint_id,
-      pending: [{tool_name, args}], tools, reply: ""}`` — the run is PAUSED in a durable
-      checkpoint; call :func:`resume_turn` after the human approves or rejects.
+      pending: [{tool_name, args}], tools, tool_results, reply: ""}`` — the run is PAUSED in a
+      durable checkpoint; call :func:`resume_turn` after the human approves or rejects.
+
+    ``tool_results`` is the typed, REDACTED, size-capped list of what each tool returned (see
+    :func:`_tool_results_from_events`) — the keystone the palette renders as rich cards.
+    ``tools`` (names only) stays for back-compat.
     """
     from himmy_app.config import load_config
 
@@ -248,19 +450,21 @@ async def ask_turn(message: str, *, session_id: str | None = None) -> dict[str, 
         llm_config=spec.to_llm_config(), hitl=True,
     )
     tools = _tools_from_events(events)
+    tool_results = _tool_results_from_events(events)
 
     if result.stopped_reason == "awaiting_approval" and result.checkpoint_id:
         return {
             "awaiting_approval": True, "checkpoint_id": result.checkpoint_id,
             "pending": _pending_payload(cp_store, result.checkpoint_id),
-            "reply": "", "tools": tools,
+            "reply": "", "tools": tools, "tool_results": tool_results,
         }
 
     reply = (result.final.output_text or "").strip()
     if store is not None and session_id:
         try: store.save(session_id, result.thread)
         except Exception: pass  # noqa: BLE001, E722
-    return {"awaiting_approval": False, "reply": reply, "tools": tools}
+    return {"awaiting_approval": False, "reply": reply, "tools": tools,
+            "tool_results": tool_results}
 
 
 async def resume_turn(checkpoint_id: str, *, approved: bool, session_id: str | None = None) -> dict[str, Any]:
@@ -285,22 +489,39 @@ async def resume_turn(checkpoint_id: str, *, approved: bool, session_id: str | N
             checkpoint_id, approved=approved, llm_config=spec.to_llm_config(),
         )
     except Exception as exc:  # noqa: BLE001 - a bad/already-resolved checkpoint must not 500
-        return {"awaiting_approval": False, "reply": "", "tools": [],
+        return {"awaiting_approval": False, "reply": "", "tools": [], "tool_results": [],
                 "error": f"{type(exc).__name__}: {exc}"}
 
     tools = _tools_from_events(events)
+    tool_results = _tool_results_from_events(events)
     if result.stopped_reason == "awaiting_approval" and result.checkpoint_id:
         return {
             "awaiting_approval": True, "checkpoint_id": result.checkpoint_id,
             "pending": _pending_payload(cp_store, result.checkpoint_id),
-            "reply": "", "tools": tools,
+            "reply": "", "tools": tools, "tool_results": tool_results,
         }
 
     reply = (result.final.output_text or "").strip()
     if session_id:
         try: session_store().save(session_id, result.thread)
         except Exception: pass  # noqa: BLE001, E722
-    return {"awaiting_approval": False, "reply": reply, "tools": tools}
+    return {"awaiting_approval": False, "reply": reply, "tools": tools,
+            "tool_results": tool_results}
+
+
+def _trace_label(tool_name: str) -> str:
+    """Human, DOXING-SAFE label for a tool's live trace frame — reuses the same map the activity
+    log uses (``activity._ACTIONS``: tool_name → (surface, label, …)). Unknown/utility tools get a
+    generic "Working…". NEVER includes arg values, so a trace can't leak a recipient or a query."""
+    try:
+        from himmy_app import activity
+
+        spec = activity._ACTIONS.get(tool_name)
+        if spec:
+            return spec[1]
+    except Exception:  # noqa: BLE001 - labelling must never disturb a stream
+        pass
+    return "Working…"
 
 
 async def answer_stream(
@@ -308,34 +529,46 @@ async def answer_stream(
     *,
     session_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """Stream one turn token-by-token, then persist it to ``session_id``.
+    """Stream one turn LIVE: tool-trace frames as the agent acts, then token deltas, then a final
+    ``done`` frame carrying the full reply + typed tool_results. Persists to ``session_id``.
 
-    Yields event dicts: ``{"type": "token", "text": ...}`` for each text delta and a
-    final ``{"type": "done", "reply": ..., "tools": [...]}``. Mirrors the REPL's
-    pattern (himmy/cli/repl.py): a tool-using agent buffers its act→observe loop,
-    then we re-issue ONE no-tool synthesis turn through ``stream_task`` so the user
-    sees the final answer arrive live. On openrouter (OpenAI-compatible) the synthesis
-    goes through ``openai_manager.generate_stream`` — a real provider token stream.
+    Yields event dicts:
+      - ``{"type": "tool", "label": <human label>}`` — emitted as each tool is CALLED/COMPLETED,
+        interleaved with the act→observe loop so the palette shows "Looking up flights…" live.
+        DOXING-SAFE: only the human label, never an arg value.
+      - ``{"type": "token", "text": ...}`` — the final answer revealed progressively.
+      - ``{"type": "done", "reply": ..., "tools": [names], "tool_results": [...], "session_id": ...}``.
+
+    PLUMBING: the bounded tool loop is run as a BACKGROUND asyncio.Task; the runtime's on_event hook
+    pushes trace frames onto an asyncio.Queue that this generator drains and yields, so traces flow
+    WHILE the loop is still running. ABORTABLE: if the consumer (the SSE endpoint) is cancelled —
+    client disconnect / Stop — the ``finally`` cancels that background task, and himmy's runtime
+    unwinds the CancelledError with a partial-thread save. No new endpoint needed.
 
     HONEST NOTE on streaming granularity: this agent runs a BLOCKING output guardrail
-    (grounding/PII/injection). himmy's ``stream_task`` cannot stream past a guard that
-    can WITHHOLD content (an already-streamed secret can't be recalled), so for this
-    agent it delivers the guarded answer as ONE chunk after the guard runs. To keep the
-    premium token-by-token feel WITHOUT defeating the guard, we re-emit that
-    guard-cleared text as small word-group deltas here. When a future/looser guard
-    allows true streaming, stream_task's real per-token deltas flow straight through.
+    (grounding/PII/injection). himmy's ``stream_task`` cannot stream past a guard that can WITHHOLD
+    content, so for this agent it delivers the guarded answer as ONE chunk after the guard runs. To
+    keep the premium token-by-token feel WITHOUT defeating the guard, we re-emit that guard-cleared
+    text as small word-group deltas here. When a future/looser guard allows true streaming,
+    stream_task's real per-token deltas flow straight through.
     """
-    import asyncio
-
     from himmy.agents.base_agent.task import Task
 
     from himmy_app.config import load_config
 
     cfg = load_config()
     events: list[Any] = []
+    # Live tool-trace channel: the on_event hook (running inside the agent task) pushes a frame on
+    # every TOOL_CALLED/TOOL_COMPLETED; this generator drains it and yields it interleaved.
+    trace_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     async def _on_event(event: Any) -> None:
         events.append(event)
+        if _event_type(event) in ("TOOL_CALLED", "TOOL_COMPLETED"):
+            payload = getattr(event, "payload", None) or {}
+            name = payload.get("tool_name") or payload.get("tool") or payload.get("name")
+            if name:
+                trace_q.put_nowait({"type": "tool", "label": _trace_label(str(name))})
 
     cp_store = approvals_store(cfg)
     runtime, persona, spec = _build_runtime(cfg, _on_event, checkpoint_store=cp_store)
@@ -344,20 +577,51 @@ async def answer_stream(
     sid = session_id or "last"
     thread = _load_thread(store, persona, sid)
 
-    # 1) Run the bounded tool loop with HITL ON (buffered — can't stream mid-loop).
+    # 1) Run the bounded tool loop with HITL ON as a BACKGROUND task, and drain the trace queue
+    #    while it runs — so "Looking up flights…" reaches the UI before the answer is ready.
     task = spec.make_task(_build_prompt(message, None), title="turn")
-    result = await runtime.run_agent_loop(
-        persona, task, thread=thread, max_turns=cfg.max_turns,
-        llm_config=spec.to_llm_config(), hitl=True,
+    loop_task: asyncio.Task[Any] = asyncio.create_task(
+        runtime.run_agent_loop(
+            persona, task, thread=thread, max_turns=cfg.max_turns,
+            llm_config=spec.to_llm_config(), hitl=True,
+        )
     )
+    try:
+        # Interleave trace frames with progress: yield each queued tool label until the loop ends.
+        while not loop_task.done():
+            try:
+                frame = await asyncio.wait_for(trace_q.get(), timeout=0.1)
+            except (asyncio.TimeoutError, TimeoutError):
+                continue
+            yield frame
+        # Flush any trace frames queued in the final tick after the loop finished.
+        while not trace_q.empty():
+            yield trace_q.get_nowait()
+        result = await loop_task
+    except (asyncio.CancelledError, GeneratorExit):
+        # The consumer went away (client disconnect / Stop). Cancel the agent so himmy's runtime
+        # saves the partial thread and unwinds, then propagate the cancellation.
+        loop_task.cancel()
+        try:
+            await loop_task
+        except BaseException:  # noqa: BLE001 - swallow the cancelled task's unwinding
+            pass
+        raise
+    finally:
+        # Defensive: if we leave this generator for ANY reason with the loop still running
+        # (e.g. an exception below), make sure the background task can't outlive the request.
+        if not loop_task.done():
+            loop_task.cancel()
+
     tools = _tools_from_events(events)
+    tool_results = _tool_results_from_events(events)
 
     # 1a) An approval-gated tool paused the run — surface it and stop. The UI shows an
     #     approval card; on Approve/Cancel it calls /ask/resume to continue this run.
     if result.stopped_reason == "awaiting_approval" and result.checkpoint_id:
         yield {"type": "approval", "checkpoint_id": result.checkpoint_id,
                "pending": _pending_payload(cp_store, result.checkpoint_id)}
-        yield {"type": "done", "reply": "", "tools": tools,
+        yield {"type": "done", "reply": "", "tools": tools, "tool_results": tool_results,
                "session_id": sid, "awaiting_approval": True,
                "checkpoint_id": result.checkpoint_id}
         return
@@ -410,7 +674,8 @@ async def answer_stream(
     except Exception:  # noqa: BLE001
         pass
 
-    yield {"type": "done", "reply": reply, "tools": tools, "session_id": sid}
+    yield {"type": "done", "reply": reply, "tools": tools,
+           "tool_results": tool_results, "session_id": sid}
 
 
 #: himmy's make_task wraps every prompt in this template line; strip it so the user sees

@@ -12,7 +12,7 @@ import {
   Info, StickyNote, Highlighter,
   ShoppingBag, Plane, Bus, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart, ArrowRight, ConciergeBell,
   Route, Lightbulb, BedDouble, Wallet, Send, Armchair, ArrowRightLeft, Share2, Printer,
-  CloudRain, Umbrella,
+  CloudRain, Umbrella, Square,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -31,6 +31,7 @@ import {
   type DoTrip, type DoTripDay, type DoTripItem, type DoTripHotel, type DoTripEat,
   type DoTripTransportCompare,
   type DoWeather, type DoWeatherDay,
+  type ToolResult,
 } from "./lib/api";
 import { apa, mla, bibtex } from "./lib/cite";
 import Reader from "./Reader";
@@ -6502,6 +6503,7 @@ type Msg = {
   who: "you" | "desk";
   text: string;
   tools?: string[];
+  tool_results?: ToolResult[]; // typed, server-redacted connector outputs → rich inline cards + follow-up chips
   streaming?: boolean;
   research?: ResearchResult; // present on a deep-research result bubble
   researching?: boolean;     // a deep-research run in flight (distinct from token streaming)
@@ -6532,9 +6534,15 @@ function CommandBar() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [dock, setDock] = useState<Dock>(() => ((localStorage.getItem(DOCK_KEY) as Dock) || "center"));
   const [minimized, setMinimized] = useState(false);
+  // The live tool-trace label ("Looking up flights…") shown in place of the typing dots while a
+  // turn streams; cleared the moment the reply lands. Doxing-safe — labels only, never arg values.
+  const [trace, setTrace] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const minimizedRef = useRef(false);
+  // Abort handle for the in-flight stream — wired to the Stop button. Cancels the SSE fetch, which
+  // server-side cancels the background agent task (partial-thread save in the himmy runtime).
+  const abortRef = useRef<(() => void) | null>(null);
 
   useEffect(() => { minimizedRef.current = minimized; }, [minimized]);
   const setDockMode = (d: Dock) => { setDock(d); localStorage.setItem(DOCK_KEY, d); };
@@ -6601,34 +6609,48 @@ function CommandBar() {
     if (id === sessionId) newChat();
   };
 
+  // Stop the in-flight turn — aborts the SSE stream (and, server-side, the background agent run).
+  // Any tokens already streamed stay on screen; the bubble settles out of its streaming state.
+  const stop = () => {
+    abortRef.current?.();
+    setTrace(null);
+    setMsgs((m) => m.map((x, i) => (i === m.length - 1 && x.streaming ? { ...x, streaming: false } : x)));
+    setBusy(false);
+  };
+
   const send = async (text: string) => {
     const q = text.trim();
     if (!q || busy) return;
     setInput("");
     setMsgs((m) => [...m, { who: "you", text: q }, { who: "desk", text: "", streaming: true }]);
     setBusy(true);
+    setTrace(null);
     const setLast = (patch: Partial<Msg>) =>
       setMsgs((m) => m.map((x, i) => (i === m.length - 1 ? { ...x, ...patch } : x)));
     try {
       // What is the user looking at right now? (paper / article, if any.)
       const context = await buildAskContext();
-      const r = await api.askStream(q, {
+      const { done, abort } = api.askStream(q, {
         sessionId,
         context,
         onToken: (t) => setMsgs((m) =>
           m.map((x, i) => (i === m.length - 1 ? { ...x, text: x.text + t } : x))),
+        // Live tool-trace: a doxing-safe human label per tool, shown in place of the typing dots.
+        onTrace: (label) => setTrace(label),
       });
+      abortRef.current = abort;
+      const r = await done;
       if (r.awaiting_approval && r.checkpoint_id) {
-        setLast({ text: r.reply || "", tools: r.tools, streaming: false,
+        setLast({ text: r.reply || "", tools: r.tools, tool_results: r.tool_results, streaming: false,
           approval: { checkpointId: r.checkpoint_id, pending: r.pending || [], status: "pending" } });
       } else {
-        setLast({ text: r.reply, tools: r.tools, streaming: false });
+        setLast({ text: r.reply, tools: r.tools, tool_results: r.tool_results, streaming: false });
       }
       // Any direct (non-gated) action that ran → refresh the matching tab live.
       emitRefreshForTools(r.tools);
     } catch (e: any) {
       setLast({ text: `Couldn't reach Himmy — ${e.message ?? "is the engine running?"}`, streaming: false });
-    } finally { setBusy(false); }
+    } finally { setBusy(false); setTrace(null); abortRef.current = null; }
   };
 
   // Approve (execute) or cancel a gated action Himmy proposed, then continue the run.
@@ -6648,10 +6670,10 @@ function CommandBar() {
     try {
       const r = await api.resume(checkpointId, approved, sessionId);
       if (r.awaiting_approval && r.checkpoint_id) {
-        setLast({ text: r.reply || "", tools: r.tools, streaming: false,
+        setLast({ text: r.reply || "", tools: r.tools, tool_results: r.tool_results, streaming: false,
           approval: { checkpointId: r.checkpoint_id, pending: r.pending || [], status: "pending" } });
       } else {
-        setLast({ text: r.reply || (approved ? "Done." : "Okay — cancelled."), tools: r.tools, streaming: false });
+        setLast({ text: r.reply || (approved ? "Done." : "Okay — cancelled."), tools: r.tools, tool_results: r.tool_results, streaming: false });
       }
       // Approved action (+ any follow-on tools) executed server-side → refresh the tab live.
       emitRefreshForTools([...approvedTools, ...(r.tools || [])]);
@@ -6760,7 +6782,10 @@ function CommandBar() {
                 ))}
               </div>
             </div>
-          ) : msgs.map((m, i) => <Bubble key={i} m={m} index={i} busy={busy} onDecide={decide} />)}
+          ) : msgs.map((m, i) => (
+            <Bubble key={i} m={m} index={i} busy={busy} onDecide={decide}
+              trace={i === msgs.length - 1 ? trace : null} onSend={send} />
+          ))}
         </div>
 
         {/* Composer — pinned at the bottom, iMessage-style */}
@@ -6782,7 +6807,10 @@ function CommandBar() {
               className="flex-1 resize-none bg-transparent text-[14.5px] outline-none placeholder:text-mac-ink3 leading-6 max-h-28 py-1"
             />
             {busy ? (
-              <div className="shrink-0 h-8 w-8 grid place-items-center"><Loader2 size={16} className="text-mac-ink3 animate-spin" /></div>
+              <button onClick={stop} title="Stop Himmy"
+                className="shrink-0 h-8 w-8 grid place-items-center rounded-full bg-mac-fillHi text-mac-ink2 hover:text-mac-ink hover:bg-mac-fillHi ring-1 ring-inset ring-mac-strokeHi transition-colors">
+                <Square size={13} strokeWidth={2.5} className="fill-current" />
+              </button>
             ) : (
               <button onClick={() => send(input)} disabled={!input.trim()}
                 className="shrink-0 h-8 w-8 grid place-items-center rounded-full bg-mac-accent text-white disabled:opacity-25 enabled:hover:bg-mac-accentHi transition-colors">
@@ -6924,21 +6952,31 @@ function TypingDots() {
   );
 }
 
-function Bubble({ m, index, busy, onDecide }: {
+function Bubble({ m, index, busy, onDecide, trace, onSend }: {
   m: Msg; index?: number; busy?: boolean;
   onDecide?: (msgIndex: number, checkpointId: string, approved: boolean) => void;
+  trace?: string | null;          // live tool-trace label for the streaming bubble (last message)
+  onSend?: (text: string) => void; // tapping a follow-up chip sends it as a new turn
 }) {
   const mine = m.who === "you";
   const empty = !m.text && m.streaming && !m.approval;
   if (m.researching) return <ResearchLoading />;
   if (m.research) return <ResearchCard r={m.research} />;
+  // Rich connector cards drawn from the typed, server-redacted tool_results. Known connectors
+  // (flights/buses/food/weather) get a premium inline card; unknown tools fall back to markdown.
+  const cards = !mine && !m.approval ? renderToolCards(m.tool_results) : [];
+  // Deterministic, capability-aware next-step chips derived from what ran (no LLM). Only on a
+  // settled assistant reply — never while streaming or on an approval prompt.
+  const chips = !mine && !m.streaming && !m.approval ? followupChips(m.tool_results) : [];
   return (
-    <div className={`flex himmy-bubble-in ${mine ? "justify-end" : "justify-start"}`}>
+    <div className={`flex flex-col himmy-bubble-in ${mine ? "items-end" : "items-start"}`}>
       <div className={`max-w-[88%] rounded-2xl px-3.5 py-2.5 text-[13.5px] leading-relaxed ${
         mine ? "bg-mac-accent text-white whitespace-pre-wrap" : "bg-mac-fill border border-mac-stroke text-mac-ink"}`}>
-        {empty ? <TypingDots />
+        {empty ? (trace ? <TraceLine label={trace} /> : <TypingDots />)
           : mine ? m.text
           : <ChatMarkdown text={m.text} />}
+        {/* Rich cards sit above the bubble's tool-name footer, below the prose. */}
+        {cards.length > 0 && <div className="mt-2.5 space-y-2">{cards}</div>}
         {m.approval && (
           <ApprovalCard a={m.approval} busy={!!busy}
             onApprove={() => index !== undefined && onDecide?.(index, m.approval!.checkpointId, true)}
@@ -6950,8 +6988,245 @@ function Bubble({ m, index, busy, onDecide }: {
           </div>
         )}
       </div>
+      {/* Follow-up chips — same pill language as the empty-state suggestions. */}
+      {chips.length > 0 && onSend && (
+        <div className="mt-2 flex flex-wrap gap-2 max-w-[88%]">
+          {chips.map((c) => (
+            <button key={c.label} onClick={() => onSend(c.prompt)}
+              className="text-[12px] text-mac-ink2 bg-mac-fill border border-mac-stroke rounded-full px-3 py-1.5 hover:text-mac-ink hover:border-mac-strokeHi transition-colors">
+              {c.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
+}
+
+// The live tool-trace line that replaces the silent typing dots while a turn streams: a pulsing
+// dot + the doxing-safe human label coming over SSE ("Looking up flights…", "Checking your tasks…").
+function TraceLine({ label }: { label: string }) {
+  return (
+    <span className="inline-flex items-center gap-2 py-1 text-[12.5px] text-mac-ink2">
+      <span className="relative flex h-2 w-2 shrink-0">
+        <span className="absolute inline-flex h-full w-full rounded-full bg-mac-accentHi opacity-60 animate-ping" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-mac-accentHi" />
+      </span>
+      <span>{label}…</span>
+    </span>
+  );
+}
+
+/* ── rich connector cards ──────────────────────────────────────────────────
+   Draw the typed, SERVER-REDACTED tool_results as premium inline cards in the chat. Known
+   connectors render a tailored card (reusing FlightRow / BusRow / the weather strip pieces);
+   anything unknown is skipped here and left to the markdown reply, so the chat never breaks. */
+function renderToolCards(results: ToolResult[] | undefined): React.ReactNode[] {
+  if (!results || results.length === 0) return [];
+  const out: React.ReactNode[] = [];
+  results.forEach((tr, i) => {
+    const r: any = tr.result;
+    // A redacted/failed/empty connector result is not card-worthy → fall back to the prose.
+    if (!r || typeof r !== "object" || r.ok === false) return;
+    switch (tr.tool_name) {
+      case "buddha_air_flights":
+        if (Array.isArray(r.flights) && r.flights.length) out.push(<FlightCard key={`fl-${i}`} d={r as DoFlights} />);
+        break;
+      case "bussewa_buses":
+        if (Array.isArray(r.buses) && r.buses.length) out.push(<BusCard key={`bs-${i}`} d={r as DoBuses} />);
+        break;
+      case "foodmandu_search":
+        if (Array.isArray(r.restaurants) && r.restaurants.length) out.push(<FoodSearchCard key={`fs-${i}`} r={r} />);
+        break;
+      case "foodmandu_menu":
+        if (Array.isArray(r.categories) && r.categories.length) out.push(<FoodMenuCard key={`fm-${i}`} r={r as DoRestaurant} />);
+        break;
+      case "weather_forecast":
+        if (r.summary || (Array.isArray(r.daily) && r.daily.length)) out.push(<WeatherCard key={`wx-${i}`} w={r as DoWeather} />);
+        break;
+      default:
+        break; // unknown tool → markdown fallback (no card)
+    }
+  });
+  return out;
+}
+
+// Compact flight card: cheapest fare badge, cheapest outbound leg (reusing FlightRow), the
+// round-trip total when present, and a Book deep-link from result.booking_link.
+function FlightCard({ d }: { d: DoFlights }) {
+  const cheapest = d.cheapest || d.flights?.[0];
+  const rt = d.round_trip_total_npr;
+  return (
+    <div className="rounded-xl border border-mac-stroke bg-mac-fillHi overflow-hidden">
+      <div className="px-3 pt-2.5 pb-2 flex items-center gap-2">
+        <div className="h-7 w-7 shrink-0 grid place-items-center rounded-lg bg-[rgba(10,132,255,0.12)]">
+          {d.round_trip ? <ArrowRightLeft size={13} className="text-mac-accentHi" /> : <Plane size={13} className="text-mac-accentHi" />}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[12.5px] font-medium text-mac-ink truncate">{d.from} → {d.to}<span className="text-mac-ink3 font-normal"> · Buddha Air</span></div>
+          <div className="text-[10.5px] text-mac-ink3">{d.flights.length} flight{d.flights.length === 1 ? "" : "s"}{d.round_trip ? " · round trip" : ""}</div>
+        </div>
+        {rt ? (
+          <span className="shrink-0 text-[11px] font-semibold text-mac-accentHi bg-[rgba(10,132,255,0.1)] rounded-full px-2 py-0.5">round trip Rs {Math.round(rt).toLocaleString()}</span>
+        ) : cheapest ? (
+          <span className="shrink-0 text-[11px] font-semibold text-mac-accentHi bg-[rgba(10,132,255,0.1)] rounded-full px-2 py-0.5">from Rs {Math.round(cheapest.fare_npr).toLocaleString()}</span>
+        ) : null}
+      </div>
+      <div className="px-2.5 pb-2.5">
+        {cheapest && <FlightRow f={cheapest} best bookLink={d.booking_link} />}
+      </div>
+    </div>
+  );
+}
+
+// Compact bus card: cheapest fare/seats (reusing BusRow) + a Book deep-link from result.booking_link.
+function BusCard({ d }: { d: DoBuses }) {
+  const cheapest = d.cheapest || d.buses?.[0];
+  return (
+    <div className="rounded-xl border border-mac-stroke bg-mac-fillHi overflow-hidden">
+      <div className="px-3 pt-2.5 pb-2 flex items-center gap-2">
+        <div className="h-7 w-7 shrink-0 grid place-items-center rounded-lg bg-[rgba(10,132,255,0.12)]"><Bus size={13} className="text-mac-accentHi" /></div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[12.5px] font-medium text-mac-ink truncate">{d.from} → {d.to}<span className="text-mac-ink3 font-normal"> · bussewa</span></div>
+          <div className="text-[10.5px] text-mac-ink3">{d.count || d.buses.length} bus{(d.count || d.buses.length) === 1 ? "" : "es"}</div>
+        </div>
+        {cheapest && <span className="shrink-0 text-[11px] font-semibold text-mac-accentHi bg-[rgba(10,132,255,0.1)] rounded-full px-2 py-0.5">from Rs {Math.round(cheapest.fare_npr).toLocaleString()}</span>}
+      </div>
+      {d.via && <div className="px-3 pb-1.5 text-[10.5px] text-mac-accentHi">No direct bus — showing buses to {d.via.hub}.</div>}
+      <div className="px-2.5 pb-2.5">
+        {cheapest && <BusRow b={cheapest} best bookLink={d.booking_link} />}
+      </div>
+    </div>
+  );
+}
+
+// Restaurant search card: the top match (image + rating + open-now) with an order deep-link.
+function FoodSearchCard({ r }: { r: any }) {
+  const top = (r.restaurants || [])[0];
+  if (!top) return null;
+  return (
+    <div className="rounded-xl border border-mac-stroke bg-mac-fillHi overflow-hidden">
+      <div className="px-3 pt-2.5 pb-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-mac-accentHi">
+        <UtensilsCrossed size={12} /> Foodmandu · {r.count || (r.restaurants || []).length} place{(r.count || (r.restaurants || []).length) === 1 ? "" : "s"}
+      </div>
+      <a href={top.order_link || "#"} target="_blank" rel="noreferrer"
+        className="mx-2.5 mb-2.5 flex items-center gap-2.5 p-2 rounded-lg border border-mac-stroke bg-mac-fill hover:border-mac-strokeHi transition-colors">
+        {top.image
+          ? <img src={top.image} alt="" loading="lazy" onError={(e) => { e.currentTarget.style.display = "none"; }} className="h-11 w-11 shrink-0 rounded-md object-cover bg-mac-fillHi" />
+          : <div className="h-11 w-11 shrink-0 rounded-md grid place-items-center bg-mac-fillHi text-mac-ink3"><UtensilsCrossed size={15} /></div>}
+        <div className="min-w-0 flex-1">
+          <div className="text-[12.5px] text-mac-ink font-medium leading-snug truncate">{top.name}</div>
+          <div className="text-[10.5px] text-mac-ink3 truncate">
+            {top.cuisine || "Restaurant"}
+            {typeof top.rating === "number" && top.rating > 0 ? <> · <Star size={9} className="inline -mt-0.5 fill-amber-400 text-amber-400" /> {top.rating.toFixed(1)}</> : null}
+            <span className={top.open_now ? " text-mac-green" : ""}> · {top.open_now ? "Open now" : "Closed"}</span>
+          </div>
+        </div>
+        <span className="shrink-0 text-[11px] font-medium text-mac-accentHi inline-flex items-center gap-1">Order <ArrowUpRight size={12} strokeWidth={2.5} /></span>
+      </a>
+    </div>
+  );
+}
+
+// Restaurant-menu card: a couple of dishes (reusing the MenuItemRow visual) + order deep-link.
+function FoodMenuCard({ r }: { r: DoRestaurant }) {
+  const dishes = (r.recommended && r.recommended.length ? r.recommended : (r.categories?.[0]?.items || [])).slice(0, 3);
+  return (
+    <div className="rounded-xl border border-mac-stroke bg-mac-fillHi overflow-hidden">
+      <div className="px-3 pt-2.5 pb-2 flex items-center gap-2">
+        <div className="h-7 w-7 shrink-0 grid place-items-center rounded-lg bg-[rgba(10,132,255,0.12)]"><UtensilsCrossed size={13} className="text-mac-accentHi" /></div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[12.5px] font-medium text-mac-ink truncate">{r.restaurant}</div>
+          <div className="text-[10.5px] text-mac-ink3">{r.item_count} item{r.item_count === 1 ? "" : "s"} on the menu</div>
+        </div>
+        <a href={r.order_link || "#"} target="_blank" rel="noreferrer"
+          className="shrink-0 text-[11px] font-medium text-mac-accentHi inline-flex items-center gap-1">Order <ArrowUpRight size={12} strokeWidth={2.5} /></a>
+      </div>
+      <div className="px-2.5 pb-2.5 space-y-1.5">
+        {dishes.map((it) => (
+          <div key={it.id} className="flex items-center gap-2.5 p-2 rounded-lg border border-mac-stroke bg-mac-fill">
+            {it.image
+              ? <img src={it.image} alt="" loading="lazy" onError={(e) => { e.currentTarget.style.display = "none"; }} className="h-9 w-9 shrink-0 rounded-md object-cover bg-mac-fillHi" />
+              : <div className="h-9 w-9 shrink-0 rounded-md grid place-items-center bg-mac-fillHi text-mac-ink3"><UtensilsCrossed size={13} /></div>}
+            <div className="min-w-0 flex-1">
+              <div className="text-[12px] text-mac-ink font-medium leading-snug truncate">{it.name}</div>
+              {it.desc && <div className="text-[10.5px] text-mac-ink3 leading-snug truncate">{it.desc}</div>}
+            </div>
+            <span className="shrink-0 text-[12px] font-semibold text-mac-ink">Rs {it.price}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Compact weather card: today's emoji + Hi/Lo + rain%, plus the honest one-line summary. Stays
+// HONEST out of the forecast window — leads with the summary (seasonal pattern) and no fake days.
+function WeatherCard({ w }: { w: DoWeather }) {
+  const today = w.in_forecast_window && (w.daily || []).length ? w.daily[0] : null;
+  const cur = w.current;
+  return (
+    <div className="rounded-xl border border-mac-stroke bg-mac-fillHi p-3">
+      <div className="flex items-center gap-2.5">
+        <div className="text-[26px] leading-none shrink-0" title={today?.label || cur?.label}>{today?.emoji || cur?.emoji || "🌤️"}</div>
+        <div className="min-w-0 flex-1">
+          {today ? (
+            <div className="text-[13px] font-semibold text-mac-ink tnum leading-none">
+              {Math.round(today.t_max)}°<span className="text-mac-ink3 font-normal"> / {Math.round(today.t_min)}°</span>
+              <span className="ml-2 text-[11px] font-normal text-mac-ink3 inline-flex items-center gap-0.5"><Umbrella size={9} /> {today.rain_pct}%</span>
+            </div>
+          ) : cur ? (
+            <div className="text-[13px] font-semibold text-mac-ink tnum leading-none">{Math.round(cur.temp_c)}°<span className="ml-2 text-[11px] font-normal text-mac-ink3">now</span></div>
+          ) : (
+            <div className="text-[12px] font-semibold text-mac-ink">Weather</div>
+          )}
+          <div className="text-[11px] text-mac-ink3 leading-snug mt-1 line-clamp-2">{w.summary}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Deterministic, capability-aware next-step chips derived from the tool_results (no LLM). Tapping
+// a chip sends its prompt as a new turn. Dedup by label so two flight cards don't double the chips.
+type FollowupChip = { label: string; prompt: string };
+function followupChips(results: ToolResult[] | undefined): FollowupChip[] {
+  if (!results || results.length === 0) return [];
+  const chips: FollowupChip[] = [];
+  const push = (c: FollowupChip) => { if (!chips.some((x) => x.label === c.label)) chips.push(c); };
+  for (const tr of results) {
+    const r: any = tr.result;
+    if (!r || typeof r !== "object" || r.ok === false) continue;
+    const from = r.from ? String(r.from) : "";
+    const to = r.to ? String(r.to) : "";
+    const route = from && to ? ` ${from} to ${to}` : "";
+    switch (tr.tool_name) {
+      case "buddha_air_flights":
+        push({ label: "Find a bus instead", prompt: `Find a bus${route}` });
+        if (to) push({ label: `Plan a 2-day trip to ${to}`, prompt: `Plan a 2-day trip to ${to}` });
+        break;
+      case "bussewa_buses":
+        push({ label: "Check flights instead", prompt: `Find flights${route}` });
+        if (to) push({ label: `Plan a 2-day trip to ${to}`, prompt: `Plan a 2-day trip to ${to}` });
+        break;
+      case "foodmandu_search":
+      case "foodmandu_menu": {
+        const place = r.restaurant ? String(r.restaurant) : ((r.restaurants || [])[0]?.name || "");
+        if (place && tr.tool_name === "foodmandu_search") push({ label: `See ${place}'s menu`, prompt: `Show me the menu at ${place}` });
+        push({ label: "More options nearby", prompt: "Show me a few more restaurants nearby" });
+        break;
+      }
+      case "weather_forecast": {
+        const place = r.summary && /in\s+([^,.]+)/i.exec(String(r.summary))?.[1];
+        push({ label: place ? `Plan a trip to ${place.trim()}` : "Plan a trip there", prompt: place ? `Plan a 2-day trip to ${place.trim()}` : "Plan a 2-day trip there" });
+        push({ label: "What should I pack?", prompt: "What should I pack for this weather?" });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return chips.slice(0, 3); // keep it calm — at most three next-steps
 }
 
 // A gated tool call, resolved into a typed view the approval card can render richly.
