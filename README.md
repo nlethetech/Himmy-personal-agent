@@ -97,6 +97,24 @@ never leaves the laptop). All outbound connector calls go through one hardened H
 host allow-lists, redirect validation, content-type & size caps), and shareable artifacts (like an
 exported trip) are scrubbed of your personal details.
 
+## Install (macOS)
+
+The easy way — no Python, no terminal, nothing to set up:
+
+1. Download **Himmy.dmg** (Apple Silicon / M-series Macs).
+2. Open it and drag **Himmy** into your **Applications** folder.
+3. **First launch only:** right-click **Himmy** → **Open** → **Open**. (Himmy isn't signed with a
+   paid Apple certificate yet, so macOS asks once; after that it opens like any other app.)
+4. Himmy walks you through connecting an AI "brain" — paste an **OpenRouter** key (recommended, has a
+   free tier) or pick a local **Ollama** model. Your key is stored in the macOS **Keychain**, never in
+   a file, and never leaves your Mac.
+
+The whole app is self-contained: the AI backend, your library, tasks, and memory all run locally.
+
+> **Build the installer yourself:** `./scripts/build-mac.sh` freezes the Python backend, builds the
+> web UI, and produces `desktop/release/Himmy-<version>-arm64.dmg` (ad-hoc signed, no certificate
+> needed).
+
 ## How it's built
 
 - **App** — Electron + React + Vite + Tailwind; SF Pro, Lucide icons, native macOS vibrancy. Lives in
@@ -138,8 +156,10 @@ himmy-app "what have I saved on X?"    # one-shot
 
 ## Your data
 
-Keep `.scholar-desk/` in iCloud Drive / Dropbox to back it up and use Himmy on another Mac. The folder
-keeps its old name on purpose — renaming it would orphan your real data, and you never see it.
+Running from source, your data lives in `.scholar-desk/` next to this README — keep it in iCloud Drive /
+Dropbox to back it up. The folder keeps its old name on purpose: renaming it would orphan your real
+data, and you never see it. The **installed app** keeps the same data under
+`~/Library/Application Support/Himmy/` instead (your API key is shared via the Keychain either way).
 
 ---
 
