@@ -1617,8 +1617,14 @@ def create_app() -> FastAPI:
         return await do.restaurant_detail(vendor_id=id, name=name)
 
     @app.get("/do/search")
-    async def do_search(q: str, kind: str = "food") -> dict[str, Any]:
-        return await do.search(q, kind)
+    async def do_search(q: str, kind: str = "food", max_price: float | None = None,
+                        open_only: bool = False) -> dict[str, Any]:
+        return await do.search(q, kind, max_price=max_price, open_only=open_only)
+
+    @app.get("/do/suggestions")
+    async def do_suggestions(kind: str = "food") -> dict[str, Any]:
+        """Smart, personalised search suggestions (the user's tastes + saved food budget)."""
+        return do.suggestions(kind)
 
     @app.get("/do/flights")
     async def do_flights(origin: str = Query("", alias="from"), to: str = "", date: str = "",

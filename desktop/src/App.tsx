@@ -27,7 +27,7 @@ import {
   type Routine, type RoutineSchedule, type NotificationItem, type ReadingStats,
   type RecThread, type TaskExtras, type Subtask,
   type UserProfile, type ProfileLayer,
-  type DoBoard, type DoPick, type DoRestaurant, type DoMenuItem,
+  type DoBoard, type DoPick, type DoPromo, type DoSuggestion, type DoRestaurant, type DoMenuItem,
   type DoCartView, type DoCartAdd, type DoFlights, type DoFlight, type DoBuses, type DoBus,
   type PermsCatalog, type PermSurface, type ActivityItem,
   type DoTrip, type DoTripDay, type DoTripItem, type DoTripHotel, type DoTripEat,
@@ -496,6 +496,11 @@ function DoTab() {
   const [searching, setSearching] = useState(false);
   // The search call THREW — show a retry, not the "0 results" empty copy.
   const [searchError, setSearchError] = useState(false);
+  // Food/shop search: offer banners + smart, personalised suggestions (a rotating hint + dropdown).
+  const [promos, setPromos] = useState<DoPromo[]>([]);
+  const [suggestions, setSuggestions] = useState<DoSuggestion[]>([]);
+  const [hintIdx, setHintIdx] = useState(0);
+  const [suggOpen, setSuggOpen] = useState(false);
   const openFlight = (p: DoPick) => {
     const [f, t] = (p.key || "").split("-");
     setFlightRoute({ from: f || "KTM", to: t || "PKR", date: p.date || defaultDate });
@@ -543,6 +548,17 @@ function DoTab() {
     api.do.feedback({ kind: "down", key: p.key, rail, tags: p.tag ? [p.tag] : [] }).catch(() => {});
   };
 
+  // add a Foodmandu DISH (from the dish search) to the tray, grouped under its restaurant
+  const addDish = async (p: DoPick) => {
+    try {
+      const v = await api.do.cart.add({
+        key: p.key, name: p.title, price: doPriceNum(p.subtitle), source: "food",
+        place: p.meta || "Foodmandu", image: p.image, link: p.link, checkout_link: p.link,
+      });
+      setCart(v); setTrayOpen(true);
+    } catch { /* ignore */ }
+  };
+
   // add a Daraz product (deals / foryou / shop search) to the tray
   const addProduct = async (p: DoPick) => {
     try {
@@ -554,15 +570,40 @@ function DoTab() {
     } catch { /* ignore */ }
   };
 
-  const runSearch = async (q = searchQ, kind: SearchKind = searchKind) => {
+  const runSearch = async (q = searchQ, kind: SearchKind = searchKind, budget?: number | null) => {
     const term = q.trim();
     if (!term || kind === "flights" || kind === "buses" || kind === "trips") { setResults(null); return; }
+    setSuggOpen(false);
     setSearching(true); setSearchError(false);
-    try { const r = await api.do.search(term, kind); setResults(r.results || []); }
+    try {
+      // For food, the backend defaults to the user's SAVED food budget when we don't pass one —
+      // so a plain search already respects their budget. A suggestion may carry its own cap.
+      const r = await api.do.search(term, kind === "shop" ? "shop" : "food", kind === "food" ? (budget ?? null) : null);
+      setResults(r.results || []);
+      setPromos(kind === "food" ? (r.promos || []) : []);
+    }
     // A thrown call → error state (with Retry), NOT a friendly "0 results" — those mean
     // the search ran fine but matched nothing.
-    catch { setResults([]); setSearchError(true); } finally { setSearching(false); }
+    catch { setResults([]); setPromos([]); setSearchError(true); } finally { setSearching(false); }
   };
+  // Run one personalised suggestion (carries its own query + optional budget cap).
+  const runSuggestion = (s: DoSuggestion) => {
+    setSearchQ(s.query); setSuggOpen(false);
+    runSearch(s.query, s.kind === "shop" ? "shop" : "food", s.max_price ?? undefined);
+  };
+  // Load smart suggestions whenever the user switches into Food / Products.
+  useEffect(() => {
+    if (searchKind === "food" || searchKind === "shop") {
+      api.do.suggestions(searchKind).then((r) => { setSuggestions(r.suggestions || []); setHintIdx(0); })
+        .catch(() => setSuggestions([]));
+    } else { setSuggestions([]); }
+  }, [searchKind]);
+  // Rotate the in-bar hint while the field is empty (a gentle "Try: …" carousel).
+  useEffect(() => {
+    if (suggestions.length < 2 || searchQ) return;
+    const t = setInterval(() => setHintIdx((i) => (i + 1) % suggestions.length), 3200);
+    return () => clearInterval(t);
+  }, [suggestions, searchQ]);
   // Load the bussewa city list once the user first opens the Buses tab (powers autocomplete).
   useEffect(() => {
     if (searchKind === "buses" && busCities.length === 0) {
@@ -614,7 +655,7 @@ function DoTab() {
         </div>
 
         {/* unified command bar — mode segments + a context-aware search/flight field */}
-        <div className="mt-5 flex items-center h-12 rounded-2xl bg-white/[0.04] ring-1 ring-inset ring-white/10 focus-within:ring-white/[0.18] transition-all pl-1.5 pr-1.5">
+        <div className="relative mt-5 flex items-center h-12 rounded-2xl bg-white/[0.04] ring-1 ring-inset ring-white/10 focus-within:ring-white/[0.18] transition-all pl-1.5 pr-1.5">
           {/* Active-mode DROPDOWN — one slim control showing the current mode; opens to switch. */}
           {(() => {
             const active = SEARCH_MODES.find((m) => m.key === searchKind) || SEARCH_MODES[0];
@@ -734,17 +775,37 @@ function DoTab() {
               <Search size={15} className="text-mac-ink3 shrink-0" />
               <input value={searchQ} onChange={(e) => setSearchQ(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") runSearch(); }}
-                placeholder={searchKind === "food" ? "Search restaurants or dishes on Foodmandu…" : "Search products on Daraz…"}
+                onFocus={() => setSuggOpen(true)}
+                onBlur={() => setTimeout(() => setSuggOpen(false), 160)}
+                placeholder={!searchQ && suggestions.length
+                  ? `Try: ${suggestions[hintIdx % suggestions.length].label}…`
+                  : (searchKind === "food" ? "Search dishes on Foodmandu…" : "Search products on Daraz…")}
                 className="flex-1 bg-transparent text-[13px] text-mac-ink placeholder:text-mac-ink3 outline-none" />
               {searchQ && (
                 <button onClick={() => { setSearchQ(""); setResults(null); }} className="text-mac-ink3 hover:text-mac-ink shrink-0"><X size={14} /></button>
               )}
             </div>
           )}
+          {/* smart suggestions dropdown — personalised picks (tastes + saved budget), in the bar */}
+          {suggOpen && !searchQ && (searchKind === "food" || searchKind === "shop") && suggestions.length > 0 && (
+            <div className="absolute left-0 right-0 top-full mt-2 z-30 rounded-xl bg-[rgba(34,35,41,0.98)] backdrop-blur-xl border border-mac-strokeHi shadow-pop overflow-hidden py-1">
+              <div className="px-3 py-1.5 text-[10.5px] uppercase tracking-wide text-mac-ink3 flex items-center gap-1.5">
+                <Sparkles size={11} className="text-mac-accentHi" /> Suggested for you
+              </div>
+              {suggestions.map((s, i) => (
+                <button key={i} onMouseDown={(e) => { e.preventDefault(); runSuggestion(s); }}
+                  className="w-full text-left px-3 py-2 flex items-center gap-2.5 hover:bg-white/[0.06] transition-colors">
+                  <Search size={13} className="text-mac-ink3 shrink-0" />
+                  <span className="text-[13px] text-mac-ink">{s.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         {/* quick asks — mode-aware. Flights / Buses / Trips otherwise sit on a dead screen until
-            you type, so we offer tappable examples that drive the real state setters. */}
-        {!results && (
+            you type, so we offer tappable examples that drive the real state setters. (Food/Products
+            get smart in-bar suggestions instead — see the search field above.) */}
+        {!results && (searchKind === "flights" || searchKind === "buses" || searchKind === "trips") && (
           <div className="flex flex-wrap items-center gap-2 mt-3.5">
             {searchKind === "flights" ? (
               <>
@@ -811,14 +872,28 @@ function DoTab() {
                   <p className="text-[13px] text-mac-ink2">Nothing matched "{searchQ}" — try a different word.</p>
                 </div>
               ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
-                  {results.map((p) => (
-                    <DoPickCard key={p.key} p={p} rail={searchKind === "food" ? "food" : "deals"}
-                      action={searchKind === "food" ? "View menu" : "Buy"}
-                      onOpen={searchKind === "food" ? () => setDetail(p) : undefined}
-                      onAdd={searchKind === "shop" ? () => addProduct(p) : undefined} />
-                  ))}
-                </div>
+                <>
+                  {/* offers: vendor promo banners that came back with the dishes */}
+                  {searchKind === "food" && promos.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      {promos.map((pr, i) => (
+                        <a key={i} href={pr.order_link} target="_blank" rel="noreferrer"
+                          className="inline-flex items-center gap-1.5 h-8 pl-2.5 pr-3 rounded-full bg-mac-green/[0.12] ring-1 ring-inset ring-mac-green/25 text-[11.5px] text-mac-ink2 hover:text-mac-ink transition-colors">
+                          <Tag size={11} className="text-mac-green shrink-0" />
+                          <span className="font-medium text-mac-ink">{pr.restaurant}</span>
+                          <span className="text-mac-ink3">·</span> {pr.promo}
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
+                    {results.map((p) => (
+                      searchKind === "food"
+                        ? <DoDishCard key={p.key} p={p} onOpen={() => setDetail(p)} onAdd={() => addDish(p)} />
+                        : <DoPickCard key={p.key} p={p} rail="deals" action="Buy" onAdd={() => addProduct(p)} />
+                    ))}
+                  </div>
+                </>
               )}
             </section>
           ) : loading && !board ? (
@@ -911,6 +986,57 @@ function DoErrorState({ message, onRetry, className = "h-40" }: {
           className="mt-3.5 h-8 px-4 rounded-[9px] text-[12px] font-medium inline-flex items-center gap-1.5 bg-white/[0.06] ring-1 ring-inset ring-white/12 text-mac-ink hover:bg-white/[0.1] transition-colors">
           <RefreshCw size={13} /> Retry
         </button>
+      </div>
+    </div>
+  );
+}
+
+// A DISH search result (Foodmandu): the dish, its restaurant + rating, price, any discount/offer,
+// and quick actions — open the restaurant's menu to order, or drop the dish into the tray.
+function DoDishCard({ p, onOpen, onAdd }: { p: DoPick; onOpen: () => void; onAdd: () => void }) {
+  const btn = "h-9 flex-1 px-3 rounded-[10px] text-[12px] font-semibold inline-flex items-center justify-center gap-1.5 text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 shadow-[0_3px_12px_-3px_rgba(10,132,255,0.55)] hover:brightness-[1.06] transition-all";
+  return (
+    <div onClick={onOpen}
+      className="group relative flex flex-col rounded-2xl overflow-hidden bg-gradient-to-b from-white/[0.055] to-white/[0.018] border border-white/[0.07] shadow-[0_1px_2px_rgba(0,0,0,0.35)] hover:border-white/[0.15] hover:shadow-[0_18px_40px_-16px_rgba(0,0,0,0.8)] hover:-translate-y-0.5 transition-all duration-300 cursor-pointer">
+      <div className="relative h-36 w-full overflow-hidden bg-mac-fillHi">
+        {p.image
+          ? <img src={p.image} alt="" loading="lazy" onError={(e) => { e.currentTarget.style.display = "none"; }}
+              className="h-full w-full object-cover group-hover:scale-[1.06] transition-transform duration-[600ms] ease-out" />
+          : <div className="h-full w-full grid place-items-center text-mac-ink3"><UtensilsCrossed size={22} /></div>}
+        <div className="absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-black/45 to-transparent pointer-events-none" />
+        {p.discount && (
+          <span className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-black/55 backdrop-blur-md ring-1 ring-white/10 text-mac-green text-[10.5px] font-semibold tracking-wide">{p.discount}</span>
+        )}
+        <div className="absolute top-2 right-2 flex items-center gap-1.5">
+          {p.tag && <span className="px-2 py-0.5 rounded-full bg-black/55 backdrop-blur-md ring-1 ring-white/10 text-amber-300 text-[10px] font-semibold">★ {p.tag}</span>}
+          <span className={`px-2 py-0.5 rounded-full bg-black/55 backdrop-blur-md ring-1 ring-white/10 text-[10px] font-semibold ${p.open_now ? "text-mac-green" : "text-white/55"}`}>{p.open_now ? "Open" : "Closed"}</span>
+        </div>
+      </div>
+      <div className="flex flex-col flex-1 p-3.5">
+        <div className="text-[13.5px] text-mac-ink font-medium leading-snug line-clamp-2 tracking-[-0.005em]">{p.title}</div>
+        <div className="flex items-center gap-1.5 text-[11px] text-mac-ink3 mt-1">
+          {typeof p.rating === "number" && p.rating > 0 && (
+            <span className="inline-flex items-center gap-1 text-mac-ink2 font-medium"><Star size={10.5} className="text-amber-400 fill-amber-400" /> {p.rating.toFixed(1)}</span>
+          )}
+          {p.meta && <span className="truncate">· {p.meta}</span>}
+        </div>
+        <div className="flex items-baseline gap-1.5 mt-1.5">
+          <span className="font-semibold text-mac-ink text-[15px] tracking-[-0.01em]">{p.subtitle}</span>
+          {p.was && <span className="text-[11.5px] text-mac-ink3 line-through">{p.was}</span>}
+        </div>
+        {p.promo && (
+          <div className="flex items-start gap-1.5 mt-2">
+            <Tag size={11} className="text-mac-green shrink-0 mt-0.5" />
+            <p className="text-[11px] leading-snug line-clamp-2 text-mac-ink3">{p.promo}</p>
+          </div>
+        )}
+        <div className="mt-auto pt-3.5 flex items-center gap-2">
+          <button onClick={(e) => { e.stopPropagation(); onOpen(); }} className={btn}>View menu <ArrowUpRight size={13} strokeWidth={2.5} /></button>
+          <button onClick={(e) => { e.stopPropagation(); onAdd(); }} title="Add this dish to your tray"
+            className="h-9 w-9 shrink-0 grid place-items-center rounded-[10px] bg-white/[0.06] ring-1 ring-inset ring-white/10 text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.1] transition-colors">
+            <Plus size={15} strokeWidth={2.5} />
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -3196,6 +3322,7 @@ function LearnedList({ label, items }: { label: string; items: string[] }) {
 const VAULT_FIELDS = [
   "Home airport", "Preferred airline", "Seat preference", "Budget ceiling",
   "Home address", "Dietary needs", "Loyalty numbers", "Spend limit per action",
+  "Favourite food", "Food budget",
 ];
 
 // How Himmy talks to you — the personality tuner (a tone preset + an optional free-text note).
@@ -4360,6 +4487,19 @@ function OnbModelSelect({ value, onChange, options }: {
 function OnbDone({ p, model, latency, onClose }: {
   p: ProviderInfo; model: string; latency: number | null; onClose: () => void;
 }) {
+  // One-time "make Himmy yours" capture: the usual food budget, saved into the profile vault so
+  // Himmy only ever suggests food within it (editable later in Settings → You).
+  const [budget, setBudget] = useState<number | null>(null);
+  const [saved, setSaved] = useState(false);
+  const pickBudget = async (v: number) => {
+    setBudget(v); setSaved(false);
+    try {
+      const { profile } = await api.profile.get();
+      const details = { ...(profile.user.details || {}), "Food budget": `Rs ${v}` };
+      await api.profile.saveUser({ ...profile.user, details });
+      setSaved(true);
+    } catch { /* a failed save shouldn't block finishing onboarding */ }
+  };
   return (
     <div className="text-center pt-3 pb-2">
       <div className="mx-auto h-16 w-16 rounded-full grid place-items-center bg-mac-green/15 mb-5">
@@ -4369,13 +4509,35 @@ function OnbDone({ p, model, latency, onClose }: {
       <p className="text-[13.5px] leading-relaxed text-mac-ink2 mt-2.5 max-w-[34ch] mx-auto">
         Himmy is connected to <span className="text-mac-ink font-medium">{p.label}</span>
         {model ? <> on <span className="text-mac-ink font-medium">{model}</span></> : null} and answered in a flash
-        {latency != null ? <> ({latency} ms)</> : null}. You can start using it now.
+        {latency != null ? <> ({latency} ms)</> : null}.
       </p>
+
+      {/* food budget — a small personalisation Himmy will remember */}
+      <div className="mt-5 rounded-2xl bg-mac-fill border border-mac-stroke p-4 text-left">
+        <div className="flex items-center gap-2">
+          <UtensilsCrossed size={14} className="text-mac-accentHi" />
+          <span className="text-[13px] font-medium text-mac-ink">What's your usual food budget?</span>
+          {saved && <span className="ml-auto text-[11px] text-mac-green inline-flex items-center gap-1"><Check size={11} /> saved</span>}
+        </div>
+        <p className="text-[11.5px] text-mac-ink3 leading-snug mt-1">So Himmy only suggests food you'd actually order. You can change it later.</p>
+        <div className="flex flex-wrap gap-2 mt-3">
+          {[200, 400, 600, 1000].map((v) => {
+            const on = budget === v;
+            return (
+              <button key={v} onClick={() => pickBudget(v)}
+                className={`h-8 px-3 rounded-full text-[12px] inline-flex items-center gap-1.5 ring-1 ring-inset transition-colors ${on ? "bg-mac-accent/15 ring-mac-accent/40 text-mac-ink" : "bg-mac-fillHi ring-mac-stroke text-mac-ink2 hover:text-mac-ink"}`}>
+                <Wallet size={11} className={on ? "text-mac-accentHi" : "text-mac-ink3"} /> Rs {v}{v === 1000 ? "+" : ""}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <button onClick={onClose}
-        className="mt-6 h-11 w-full rounded-[12px] bg-mac-accent text-white text-[14px] font-medium hover:bg-mac-accentHi transition-colors inline-flex items-center justify-center gap-2">
+        className="mt-5 h-11 w-full rounded-[12px] bg-mac-accent text-white text-[14px] font-medium hover:bg-mac-accentHi transition-colors inline-flex items-center justify-center gap-2">
         Start using Himmy <ArrowRight size={16} strokeWidth={2.25} />
       </button>
-      <p className="text-[11.5px] text-mac-ink3 mt-3.5">You can change this any time in Settings → Preferences.</p>
+      <p className="text-[11.5px] text-mac-ink3 mt-3.5">You can change all of this in Settings.</p>
     </div>
   );
 }

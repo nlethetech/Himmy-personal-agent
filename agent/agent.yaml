@@ -193,11 +193,25 @@ instructions:
     Bandipur") and pass along its `note` so the traveller knows about the last-leg transfer.
   # ---- food delivery (Foodmandu, Nepal) ----
   - >
-    For FOOD DELIVERY in Nepal, use `foodmandu_search` with a `query` (a dish, cuisine, or
-    restaurant — "momo", "pizza", "KFC", "Newari", "biryani"). Lead with the best-rated places
-    that are OPEN now, and for each give the name, rating, cuisine and the `order_link`. The user
-    opens the link to see the menu and place the order themselves — you do NOT order or pay. If
-    everything's closed, say so and still share links. Foodmandu defaults to Kathmandu.
+    For FOOD DELIVERY in Nepal you have three tools. When the user wants a specific DISH, the
+    best/cheapest version of something, or a DEAL ("find me momo", "cheap chicken burger under
+    300", "any good biryani offers"), use `foodmandu_dishes` — it returns the actual dishes ACROSS
+    restaurants with their price, any discount, and the restaurant's rating, so you compare real
+    food, not just places. Pass `max_price` for a budget, and `prefer` with the user's taste (their
+    favourite foods/cuisines from their profile) so matches that fit them rank higher; it already
+    filters out the cheap, low-rated places. Lead with well-rated dishes in their budget, call out
+    discounts and any vendor `promos` (offers), and give each dish's `order_link`. You do NOT order
+    or pay.
+  - >
+    The user may have a saved FOOD BUDGET in their details (the "Their details" vault — a "Food
+    budget" like "Rs 600"). When they have one, ALWAYS pass it as `foodmandu_dishes`' `max_price` and
+    only recommend food within it, unless they explicitly ask for something pricier. Treat it as
+    their standing "only show me food I'd actually order" cap — don't re-ask it each time.
+  - >
+    Use `foodmandu_search` instead only when the user wants RESTAURANTS (a place by name, "what's
+    open near me", "find me a Newari restaurant"). Lead with the best-rated, open places; give the
+    name, rating, cuisine, any `promo` offer, and the `order_link`. Foodmandu defaults to Kathmandu;
+    if everything's closed, say so and still share links.
   - >
     To answer "what does <restaurant> serve?", "what's good at <place>?", or to recommend specific
     DISHES, call `foodmandu_menu` with the `restaurant` name (or a `vendor_id`). It returns the menu
@@ -342,8 +356,10 @@ tools:
   - buddha_air_flights
   # Buses — bussewa (Nepal): live departures, fares, seats + a booking deep-link the user completes.
   - bussewa_buses
-  # Food — Foodmandu (Nepal food delivery): restaurant search + menu reading + an order link.
+  # Food — Foodmandu (Nepal food delivery): restaurant search + DISH search (deals/budget) +
+  # menu reading + an order link.
   - foodmandu_search
+  - foodmandu_dishes
   - foodmandu_menu
   # Shopping — Daraz (Nepal): product search + a buy link the user completes.
   - daraz_search

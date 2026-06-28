@@ -72,7 +72,7 @@ SURFACES: list[dict[str, Any]] = [
         "desc": "Search restaurants and read menus.",
         "default": "on",
         "levels": [{"value": "off", "label": "Off"}, {"value": "on", "label": "On"}],
-        "tools": {"on": ["foodmandu_search", "foodmandu_menu"]},
+        "tools": {"on": ["foodmandu_search", "foodmandu_dishes", "foodmandu_menu"]},
     },
     {
         "key": "shopping", "label": "Daraz", "service": "Online shopping (Nepal)",

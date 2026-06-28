@@ -243,6 +243,23 @@ class DoCart:
 # --------------------------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------------------------
+def _is_budget_label(label: str) -> bool:
+    """A vault label that holds a money cap (so it's NOT a taste seed, despite matching 'food')."""
+    ll = (label or "").lower()
+    return any(w in ll for w in ("budget", "spend", "price", "limit"))
+
+
+def _parse_npr(val: Any) -> float | None:
+    """Pull a rupee amount out of free text ('Rs 600' / 'NPR 1,200' / '600') → 600.0, else None."""
+    m = re.search(r"(\d[\d,]*)", str(val or ""))
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
 def _vault(cfg: HimmyConfig) -> dict[str, str]:
     """The user's CONFIRMED label→value details (home airport, cuisines, budget, …).
 
@@ -639,12 +656,57 @@ class DoConcierge:
         """Words from the user's saved favourite foods/cuisines (e.g. {'momo','pizza','sekuwa'})."""
         toks: set[str] = set()
         for label, value in _vault(self.cfg).items():
+            if _is_budget_label(label):
+                continue  # 'Food budget' matches the food hint but is a cap, not a taste
             if any(h in label.lower() for h in _FOOD_VAULT_HINTS):
                 for part in re.split(r"[,/;]| and ", value):
                     for w in part.split():
                         if len(w) >= 3:
                             toks.add(w.strip().lower())
         return toks
+
+    def food_budget(self) -> float | None:
+        """The user's saved FOOD budget (NPR) from their vault — a remembered 'only recommend within
+        this' cap. Looks for a 'Food budget' (or food + spend/price) detail; None if unset."""
+        for label, value in _vault(self.cfg).items():
+            ll = label.lower()
+            if "food" in ll and ("budget" in ll or "spend" in ll or "price" in ll):
+                b = _parse_npr(value)
+                if b:
+                    return b
+        return None
+
+    def suggestions(self, kind: str = "food") -> dict[str, Any]:
+        """Smart, personalised search suggestions built from the user's saved tastes + budget — no
+        model, instant. Food: their favourite foods within their budget; shop: their interests."""
+        vault = _vault(self.cfg)
+        out: list[dict[str, Any]] = []
+        if kind == "shop":
+            seeds = _seeds_from_vault(vault, _SHOP_VAULT_HINTS, [])
+            picks = seeds[:4] or ["headphones", "smartwatch", "sneakers", "backpack"]
+            out = [{"label": f"Best {s} deals", "query": s, "kind": "shop"} for s in picks]
+        else:
+            budget = self.food_budget()
+            cap = f" under Rs {int(budget)}" if budget else ""
+            # Use the user's favourite FOODS/cuisines (momo, pizza…) for "Best X" suggestions — NOT
+            # restaurant names (a dish search for "Tazza" finds no dish), and not the budget label.
+            food_vault = {k: v for k, v in vault.items()
+                          if not _is_budget_label(k) and "restaurant" not in k.lower()}
+            foods = _seeds_from_vault(food_vault, _FOOD_VAULT_HINTS, _FOOD_SEEDS)
+            seen: set[str] = set()
+            for f in foods:
+                fl = f.lower()
+                if fl in seen:
+                    continue
+                seen.add(fl)
+                out.append({"label": f"Best {f}{cap}".strip(), "query": f,
+                            "max_price": budget, "kind": "food"})
+                if len(out) >= 4:
+                    break
+            if foods:
+                out.append({"label": f"{foods[0].title()} deals today", "query": foods[0],
+                            "max_price": budget, "kind": "food"})
+        return {"ok": True, "kind": kind, "budget": self.food_budget(), "suggestions": out[:6]}
 
     async def restaurant_detail(self, vendor_id: str = "", name: str = "") -> dict[str, Any]:
         if not self._on("food"):
@@ -1162,7 +1224,8 @@ class DoConcierge:
                                    json.dumps(cache, ensure_ascii=False))
 
     # ---- inline search over food (Foodmandu) + shopping (Daraz) ------------------------------
-    async def search(self, query: str, kind: str = "food") -> dict[str, Any]:
+    async def search(self, query: str, kind: str = "food",
+                     max_price: float | None = None, open_only: bool = False) -> dict[str, Any]:
         query = (query or "").strip()
         if not query:
             return {"ok": False, "results": [], "message": "Type something to search."}
@@ -1181,16 +1244,30 @@ class DoConcierge:
                     "meta": p.get("sold") or "", "image": p.get("image") or "",
                     "link": p.get("product_link"), "why": ""} for p in res.get("products", [])]
             return {"ok": True, "kind": "shop", "query": query, "results": out}
-        from himmy_app.connectors.foodmandu import _vendor_id_from_link, foodmandu_search
+        # FOOD = dish-level search across restaurants (not just restaurants), best-rated first, with
+        # the user's taste boosting matches and a budget cap filtering out the cheap, low-rated ones.
+        from himmy_app.connectors.foodmandu import foodmandu_dishes
 
-        res = await foodmandu_search({"query": query, "limit": 12})
-        out = [{"key": r.get("order_link"),
-                "vendor_id": _vendor_id_from_link(r.get("order_link") or ""),
-                "title": r.get("name"), "subtitle": r.get("cuisine"),
-                "rating": _rating(r.get("rating")), "open_now": bool(r.get("open_now")),
-                "image": r.get("image") or "", "link": r.get("order_link"), "why": ""}
-               for r in res.get("restaurants", [])]
-        return {"ok": True, "kind": "food", "query": query, "results": out}
+        prefer = " ".join(sorted(self._food_pref_tokens()))
+        # Respect the user's REMEMBERED food budget when the search doesn't override it, so Himmy
+        # only ever shows food they'd actually order.
+        if max_price is None:
+            max_price = self.food_budget()
+        res = await foodmandu_dishes({
+            "query": query, "limit": 16, "prefer": prefer,
+            "max_price": max_price, "open_only": open_only,
+        })
+        out = [{"key": f"{d.get('vendor_id')}:{d.get('name')}", "title": d.get("name"),
+                "subtitle": f"Rs {int(d.get('price') or 0)}", "meta": d.get("restaurant"),
+                "was": f"Rs {int(d['was'])}" if d.get("was") else None,
+                "discount": f"{d['discount_pct']}% off" if d.get("discount_pct") else "",
+                "rating": _rating(d.get("rating")), "open_now": bool(d.get("open_now")),
+                "image": d.get("image") or "", "link": d.get("order_link"),
+                "vendor_id": d.get("vendor_id"),
+                "tag": "Popular" if d.get("popular") else "", "promo": d.get("promo") or "",
+                "why": ""} for d in res.get("dishes", [])]
+        return {"ok": True, "kind": "food", "query": query, "results": out,
+                "promos": res.get("promos", [])}
 
     # ---- candidate generation (free, deterministic, live) -----------------------------------
     async def _candidates(

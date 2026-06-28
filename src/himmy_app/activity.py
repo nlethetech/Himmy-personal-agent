@@ -35,6 +35,7 @@ _ACTIONS: dict[str, tuple[str, str, list[str]]] = {
     "complete_task": ("tasks", "Completed a task", ["title"]),
     "list_tasks": ("tasks", "Checked your tasks", []),
     "foodmandu_search": ("food", "Searched Foodmandu", ["query"]),
+    "foodmandu_dishes": ("food", "Found dishes & deals", ["query"]),
     "foodmandu_menu": ("food", "Read a restaurant menu", ["restaurant", "vendor_id"]),
     "daraz_search": ("shopping", "Searched Daraz", ["query"]),
     "buddha_air_flights": ("flights", "Looked up flights", ["origin", "destination"]),

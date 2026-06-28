@@ -179,7 +179,13 @@ export type DoPick = {
   key: string; title: string; subtitle?: string; meta?: string; why?: string;
   link?: string; rating?: number; open_now?: boolean; image?: string; ai?: boolean;
   discount?: string; was?: string; tag?: string; date?: string; vendor_id?: string;
+  // Food dish search: the restaurant's current offer banner ("Combo from Rs 295"), if any.
+  promo?: string;
 };
+// A Foodmandu vendor's offer banner surfaced alongside dish-search results.
+export type DoPromo = { restaurant: string; promo: string; order_link: string; rating?: number };
+// A smart, personalised search suggestion (built from the user's tastes + saved budget).
+export type DoSuggestion = { label: string; query: string; kind: string; max_price?: number | null };
 export type DoBoard = {
   ok: boolean; headline: string; ai?: boolean; stale?: boolean; generated_at?: string;
   food: DoPick[]; deals: DoPick[]; foryou: DoPick[]; flights: DoPick[];
@@ -863,9 +869,19 @@ export const api = {
       if (opts.name) p.set("name", opts.name);
       return jget<DoRestaurant>(`/do/restaurant?${p.toString()}`);
     },
-    search: (q: string, kind: "food" | "shop") =>
-      jget<{ ok: boolean; kind: string; query: string; results: DoPick[] }>(
-        `/do/search?q=${encodeURIComponent(q)}&kind=${kind}`),
+    // Food search returns DISHES across restaurants (best-rated first); `maxPrice` is a budget cap,
+    // `openOnly` limits to open places. Shop search returns Daraz products (params ignored there).
+    search: (q: string, kind: "food" | "shop", maxPrice?: number | null, openOnly?: boolean) => {
+      const p = new URLSearchParams({ q, kind });
+      if (maxPrice) p.set("max_price", String(maxPrice));
+      if (openOnly) p.set("open_only", "true");
+      return jget<{ ok: boolean; kind: string; query: string; results: DoPick[]; promos?: DoPromo[] }>(
+        `/do/search?${p.toString()}`);
+    },
+    // Smart, personalised search suggestions (the user's tastes + their saved food budget).
+    suggestions: (kind: "food" | "shop") =>
+      jget<{ ok: boolean; kind: string; budget: number | null; suggestions: DoSuggestion[] }>(
+        `/do/suggestions?kind=${kind}`),
     // Pass returnDate (YYYY-MM-DD) to fetch a round-trip — the response then carries return_flights +
     // round_trip_total_npr. Omit it for a one-way search (the response stays backwards-compatible).
     flights: (from: string, to: string, date?: string, returnDate?: string) =>
