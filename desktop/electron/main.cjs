@@ -113,6 +113,11 @@ async function startBackend() {
     HIMMY_APP_PORT: BACKEND_PORT,
     HIMMY_APP_TOKEN: APP_TOKEN,
     PYTHONUNBUFFERED: "1",
+    // The local "HimalayaGPT (Gemma 4)" endpoint (Ollama-backed proxy on :8400) ignores auth, but
+    // himmy's OpenAI client still needs a non-empty key to initialise. Default a dummy; a real
+    // openai-compatible key in the environment still wins.
+    HIMMY_OPENAI_COMPAT_API_KEY:
+      process.env.HIMMY_OPENAI_COMPAT_API_KEY || "local",
   };
 
   let cmd;
