@@ -64,6 +64,26 @@ def test_world_gets_nepali_outlets_foreign(mocked_feeds):
     assert not any("Bagmati" in t or "milk bank" in t for t in titles)                 # domestic excluded
 
 
+def test_merge_collapses_duplicate_coverage():
+    """The same event from two outlets merges into one story carrying both reports; others stay."""
+    from himmy_app.news import _merge_duplicates
+    items = [
+        {"title": "Special Court extends Bishnu Paudel remand by three days",
+         "url": "http://x/1", "source": "The Kathmandu Post", "ts": 100, "ago": "1h"},
+        {"title": "Court extends Bishnu Paudel remand period",
+         "url": "http://x/2", "source": "Khabarhub", "ts": 99, "ago": "2h"},
+        {"title": "Wild elephants destroy six homes in Udayapur",
+         "url": "http://x/3", "source": "Online Khabar", "ts": 98, "ago": "3h"},
+    ]
+    m = _merge_duplicates(items)
+    assert len(m) == 2                                  # two Paudel reports collapsed to one
+    paudel = next(x for x in m if "Paudel" in x["title"])
+    assert paudel["report_count"] == 2
+    assert {r["source"] for r in paudel["reports"]} == {"The Kathmandu Post", "Khabarhub"}
+    elephants = next(x for x in m if "elephants" in x["title"])
+    assert elephants.get("report_count", 1) == 1        # a distinct story isn't over-merged
+
+
 def test_developing_clusters_shared_coverage(monkeypatch):
     """Headlines sharing >=2 distinctive terms group into one developing story; loners don't."""
     def feed_items(*titles):

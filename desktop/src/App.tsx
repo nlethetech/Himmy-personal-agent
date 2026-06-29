@@ -7194,6 +7194,12 @@ function NewsCard({ a, saved, onOpen, onToggleSave, isForYou = false, isNew = fa
         <div className="flex items-center gap-1.5 text-[11px] mb-1.5">
           <span className="font-medium" style={{ color: `hsl(${hue} 68% 68%)` }}>{a.source || "News"}</span>
           {a.ago && <span className="text-mac-ink3">· {a.ago}</span>}
+          {(a.report_count ?? 0) > 1 && (
+            <span title={`Also reported by ${(a.reports || []).map((r) => r.source).filter((s) => s !== a.source).join(", ")}`}
+              className="ml-auto inline-flex items-center gap-1 rounded-full bg-mac-accent/12 text-mac-accentHi px-1.5 py-[1px] text-[10px] font-medium shrink-0">
+              <Newspaper size={9} strokeWidth={2.2} /> {a.report_count} outlets
+            </span>
+          )}
         </div>
         <div className="text-[14px] text-mac-ink font-medium leading-snug line-clamp-2">{a.title}</div>
         {a.snippet && <div className="text-[12.5px] text-mac-ink2 mt-1.5 leading-snug line-clamp-2">{a.snippet}</div>}

@@ -110,6 +110,9 @@ export type NewsArticle = {
   snippet: string; ago: string; ts: number; topic?: string;
   // "For You" only: a short, human reason this story was surfaced ("Because you follow X").
   reason?: string;
+  // Cross-outlet merge: when several outlets reported the same event, the lead carries the rest.
+  report_count?: number;
+  reports?: { source: string; url: string; title: string; ago: string }[];
 };
 // The /news/feed envelope. `fetched_at` is an ISO timestamp the UI renders as "updated Xm ago".
 // It can be `null` for a legacy cache entry written before the `iso` field existed (the backend

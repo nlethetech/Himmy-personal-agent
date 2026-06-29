@@ -45,10 +45,16 @@ DEFAULT_FOLDER = "Reading List"
 #: Note: Reuters and the Associated Press no longer publish open public RSS feeds (their old
 #: endpoints now 404 / refuse connections), so they're intentionally absent rather than dead.
 SOURCES: dict[str, list[tuple[str, str]]] = {
+    # Nepal desk — the English-RSS outlets from the OSINT source registry (HTML-scrape-only outlets
+    # like The Himalayan Times / myRepublica are omitted: our reader is RSS/Atom). More outlets =
+    # more duplicate coverage of the same event, which the cross-outlet MERGE below collapses.
     "Nepal": [
         ("The Kathmandu Post", "https://kathmandupost.com/rss"),
         ("Online Khabar", "https://english.onlinekhabar.com/feed"),
         ("Ratopati", "https://english.ratopati.com/feed"),
+        ("Khabarhub", "https://english.khabarhub.com/feed/"),
+        ("Annapurna Express", "https://theannapurnaexpress.com/rss"),
+        ("The Rising Nepal", "https://risingnepaldaily.com/rss"),
     ],
     # International desk: deliberately multi-country so it reads as world news, not one outlet's.
     "World": [
@@ -92,7 +98,8 @@ TRUSTED_SOURCES: set[str] = {
     # Nepal
     "kathmandupost.com", "onlinekhabar.com", "english.onlinekhabar.com", "ratopati.com",
     "english.ratopati.com", "thehimalayantimes.com", "nepalitimes.com",
-    "myrepublica.nagariknetwork.com", "setopati.com",
+    "myrepublica.nagariknetwork.com", "setopati.com", "khabarhub.com", "english.khabarhub.com",
+    "theannapurnaexpress.com", "risingnepaldaily.com", "nagariknetwork.com", "gorkhapatraonline.com",
     # World / international wires + broadsheets
     "bbc.co.uk", "bbc.com", "aljazeera.com", "theguardian.com", "dw.com", "france24.com",
     "npr.org", "cnn.com", "reuters.com", "apnews.com", "nytimes.com", "washingtonpost.com",
@@ -249,6 +256,53 @@ def _signif_tokens(title: str) -> set[str]:
         if len(lw) >= 4 and lw not in _CLUSTER_STOP:
             out.add(lw)
     return out
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    return len(a & b) / len(a | b) if (a and b) else 0.0
+
+
+def _merge_duplicates(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse cross-outlet duplicate coverage into ONE story carrying its other reports.
+
+    Like the OSINT desk: when several outlets cover the same event, show it once. Two headlines are
+    the same story when they share >= 2 distinctive terms AND their term sets overlap enough
+    (Jaccard >= 0.34) — so 'PM Oli resigns' / 'Oli steps down as PM' merge, but loosely-related
+    stories don't. Single-link: a headline joins a cluster if it matches ANY member. The LEAD report
+    is the most-trusted (then newest); the rest ride along as ``reports`` with a ``report_count``.
+    (English-only matching — cross-lingual Nepali↔English merging needs multilingual embeddings, the
+    OSINT path, which we can add next.) Input is assumed newest-first; output stays recency-sorted."""
+    clusters: list[dict[str, Any]] = []
+    for it in items:
+        toks = _signif_tokens(it.get("title", ""))
+        placed = False
+        if len(toks) >= 2:
+            for cl in clusters:
+                for mt in cl["member_tokens"]:
+                    if len(toks & mt) >= 2 and _jaccard(toks, mt) >= 0.34:
+                        cl["items"].append(it)
+                        cl["member_tokens"].append(toks)
+                        placed = True
+                        break
+                if placed:
+                    break
+        if not placed:
+            clusters.append({"member_tokens": [set(toks)], "items": [it]})
+
+    merged: list[dict[str, Any]] = []
+    for cl in clusters:
+        group = cl["items"]
+        if len(group) == 1:
+            merged.append(group[0])
+            continue
+        lead = max(group, key=lambda g: (_source_is_trusted(g), g.get("ts", 0.0) or 0.0))
+        out = dict(lead)
+        out["report_count"] = len(group)
+        out["reports"] = [{"source": g.get("source", ""), "url": g.get("url", ""),
+                           "title": g.get("title", ""), "ago": g.get("ago", "")} for g in group]
+        merged.append(out)
+    merged.sort(key=lambda x: x.get("ts", 0.0) or 0.0, reverse=True)
+    return merged
 
 
 def _is_domestic_nepal(title: str) -> bool:
@@ -534,7 +588,8 @@ class NewsService:
         elif cat == "World":
             deduped = [it for it in deduped
                        if it.get("source") not in _NEPAL_SOURCE_NAMES or not _is_domestic_nepal(it["title"])]
-        return deduped[:45]
+        # Merge cross-outlet duplicate coverage into one story (carrying its other reports).
+        return _merge_duplicates(deduped)[:45]
 
     # ---- "For You" — a taste-RANKED personal feed -------------------------------------------
     async def _google_news(self, client: httpx.AsyncClient, query: str, *, limit: int = 8) -> list[dict[str, Any]]:
