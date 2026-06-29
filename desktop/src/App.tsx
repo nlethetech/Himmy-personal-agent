@@ -2140,6 +2140,10 @@ function minutesOfDay(iso: string | null | undefined): number {
   return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
 }
 
+// Grace (minutes) after a timed item's start before "Today" drops it — long enough that something
+// just starting/ongoing doesn't vanish, short enough that the past clears off and you don't scroll.
+const AGENDA_GRACE_MIN = 30;
+
 // Build TODAY's single time-sorted agenda: events today + tasks scheduled today + tasks due
 // today (de-duped so a task that's both scheduled and due appears once). Best-effort/never throws.
 function buildTodayAgenda(events: CalendarEvent[], tasks: Task[]): AgendaItem[] {
@@ -2618,13 +2622,18 @@ function Today({ health }: { health: Health | null }) {
 
   // Smart sort: open first, overdue, priority desc, due asc (see compareTasks).
   const openTasks = (tasks ?? []).filter((t) => !t.done).sort(compareTasks);
-  // The To-do card = today's calendar events (checkable) + your open tasks. Count what's left to do,
-  // and how many timed items have slipped past their time without being ticked (overdue).
+  // The To-do card = today's calendar events (checkable) + your open tasks. Ticked-off events drop
+  // out (like completed tasks) so the list stays tight; what's left = open tasks + not-done events.
   const todayEvents = planEvents ?? [];
-  const todoOpenCount = openTasks.length + todayEvents.filter((e) => !eventDone.has(e.id)).length;
-  const overdueCount = todayEvents.filter((e) => !eventDone.has(e.id) && isPastTime(e.time)).length;
-  // Today agenda — one time-sorted timeline merging calendar + scheduled/due tasks.
-  const agenda = buildTodayAgenda(events ?? [], tasks ?? []);
+  const visibleEvents = todayEvents.filter((e) => !eventDone.has(e.id));
+  const todoOpenCount = openTasks.length + visibleEvents.length;
+  const overdueCount = visibleEvents.filter((e) => isPastTime(e.time)).length;
+  // Today agenda — a FORWARD-looking timeline: calendar + scheduled/due tasks, with anything whose
+  // time has already passed (beyond a short grace) dropped, so "Today" shows the rest of your day
+  // and stays scroll-free. `agendaAll` keeps the unfiltered set to tell "all done" from "nothing on".
+  const nowMin = new Date().getHours() * 60 + new Date().getMinutes();
+  const agendaAll = buildTodayAgenda(events ?? [], tasks ?? []);
+  const agenda = agendaAll.filter((it) => it.sortMin < 0 || it.sortMin >= nowMin - AGENDA_GRACE_MIN);
   // Due-soon nudge — open tasks due today or tomorrow (within ~36h).
   const soon = dueSoon(tasks ?? []);
 
@@ -2676,7 +2685,10 @@ function Today({ health }: { health: Health | null }) {
               {(events === null && googleConnected) || tasks === null ? (
                 <div className="h-full grid place-items-center"><Loader2 size={16} className="animate-spin text-mac-ink3" /></div>
               ) : agenda.length === 0 ? (
-                <Placeholder icon={CalendarClock} text="Nothing on today. Schedule a task or add an event to fill your day." />
+                <Placeholder icon={agendaAll.length ? CheckCircle2 : CalendarClock}
+                  text={agendaAll.length
+                    ? "That's a wrap for today — nothing left on your schedule."
+                    : "Nothing on today. Schedule a task or add an event to fill your day."} />
               ) : (
                 agenda.map((it) => (
                   <AgendaRow key={it.key} item={it}
@@ -2702,13 +2714,13 @@ function Today({ health }: { health: Health | null }) {
             <div className="flex-1 min-h-0 overflow-auto -mt-1">
               {tasks === null ? (
                 <div className="h-full grid place-items-center"><Loader2 size={16} className="animate-spin text-mac-ink3" /></div>
-              ) : todayEvents.length === 0 && openTasks.length === 0 ? (
-                <Placeholder icon={CheckCircle2} text={taskCount.total ? "All caught up." : "Nothing on today — add a task below or schedule your day."} />
+              ) : visibleEvents.length === 0 && openTasks.length === 0 ? (
+                <Placeholder icon={CheckCircle2} text={(taskCount.total || todayEvents.length) ? "All caught up." : "Nothing on today — add a task below or schedule your day."} />
               ) : (
                 <>
-                  {todayEvents.map((e, i) => (
-                    <PlanEventRow key={`evt-${e.id}`} item={e} done={eventDone.has(e.id)}
-                      last={i === todayEvents.length - 1 && openTasks.length === 0}
+                  {visibleEvents.map((e, i) => (
+                    <PlanEventRow key={`evt-${e.id}`} item={e} done={false}
+                      last={i === visibleEvents.length - 1 && openTasks.length === 0}
                       onToggle={() => toggleEvent(e.id)} />
                   ))}
                   {openTasks.map((t, i, a) => (
