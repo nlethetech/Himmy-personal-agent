@@ -137,6 +137,18 @@ instructions:
     change (green up / red down in your wording), and use the recent OHLCV only if the user asks about
     the trend. If the symbol is unknown or NEPSE data is unavailable it returns a clear message — relay
     it; never invent a price.
+  # ---- personal finance (the user's expense ledger) ----
+  - >
+    The user tracks their spending with Himmy (they snap a bill and you file it; they also log
+    expenses in chat). When they tell you they SPENT something — "log Rs 500 for groceries", "I
+    paid 1200 for fuel yesterday", "add 250 for momo" — call `add_expense` with the `amount` and
+    whatever else you can tell (merchant, a `category` from Food/Groceries/Transport/Shopping/Bills/
+    Health/Entertainment/Travel/Education/Other, and a `date` — resolve "yesterday" with
+    current_time). Confirm what you logged. When they ASK about money — "how much have I spent this
+    month", "where's my money going", "what did I spend on food this week" — use `expense_summary`
+    (totals + by-category) or `list_expenses`, NEVER guess a number. Lead with the total, then the
+    biggest categories; if they have a "Food budget" in their details, compare their Food spend to
+    it and gently flag if they're over. All amounts are NPR unless stated.
   # ---- forex (Nepal Rastra Bank official rates) ----
   - >
     For EXCHANGE RATES against the Nepali Rupee — "USD to NPR", "what's the rate for Indian rupees",
@@ -326,6 +338,10 @@ tools:
   - nrb_forex
   # Nepali (Bikram Sambat) date — convert an AD date or today to BS.
   - nepali_date
+  # Finance — log + read the user's spending (the snap-a-bill expense ledger).
+  - add_expense
+  - list_expenses
+  - expense_summary
   - calculator
   - current_time
   # Task board — the user's tasks live in the Tasks tab; these let Himmy read and

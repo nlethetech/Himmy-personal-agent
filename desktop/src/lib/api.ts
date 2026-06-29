@@ -393,6 +393,22 @@ export type AttachmentItem = {
 export type AssistantStyleOpt = { id: string; label: string; blurb: string };
 export type AssistantConfig = { style: string; note: string };
 
+// Personal finance — the expense ledger (snap a bill, track spending, Excel in/out).
+export type Expense = {
+  id: string; date: string; merchant: string; amount: number; currency: string;
+  category: string; note: string; items: string[]; source: string; created: number;
+};
+// A bill Himmy read but hasn't filed yet — the user confirms it before it's saved.
+export type ExpenseDraft = {
+  date: string; merchant: string; amount: number; currency: string;
+  category: string; items: string[]; note: string;
+};
+export type CategoryTotal = { category: string; total: number; count: number };
+export type FinanceSummary = {
+  ok: boolean; period: string; label: string; from: string | null; to: string | null;
+  total: number; count: number; currency: string; by_category: CategoryTotal[];
+};
+
 // Routines — saved automations that run on a schedule (himmy's Schedule model + cron/tz math,
 // fired through the same agent as /ask; results land in notifications below).
 export type RoutineSchedule = {
@@ -756,6 +772,36 @@ export const api = {
   assistant: {
     get: () => jget<{ ok: boolean; assistant: AssistantConfig; styles: AssistantStyleOpt[]; vision_available: boolean }>("/assistant"),
     set: (style: string, note: string) => jput<{ ok: boolean; assistant: AssistantConfig }>("/assistant", { style, note }),
+  },
+  // Personal finance — snap a bill, track spending, Excel in & out.
+  finance: {
+    list: (month?: string, category?: string) => {
+      const p = new URLSearchParams();
+      if (month) p.set("month", month);
+      if (category) p.set("category", category);
+      const qs = p.toString();
+      return jget<{ ok: boolean; expenses: Expense[]; months: string[] }>(`/finance/expenses${qs ? `?${qs}` : ""}`);
+    },
+    summary: (period: "week" | "month" | "year" | "all" = "month") =>
+      jget<FinanceSummary>(`/finance/summary?period=${period}`),
+    add: (e: Partial<ExpenseDraft> & { amount: number }) =>
+      jpost<{ ok: boolean; expense: Expense }>("/finance/expenses", e),
+    remove: (id: string) => jdelete<{ ok: boolean }>(`/finance/expenses/${id}`),
+    // Snap a bill: upload the photo, get back a structured DRAFT to confirm (not yet saved).
+    snap: async (file: File): Promise<{ ok: boolean; expense?: ExpenseDraft; message?: string; text?: string }> => {
+      const fd = new FormData(); fd.append("file", file);
+      const res = await fetch(`${BASE}/finance/snap`, { method: "POST", headers: authHeaders(), body: fd });
+      if (!res.ok) throw new Error(`/finance/snap → ${res.status}`);
+      return res.json();
+    },
+    importFile: async (file: File): Promise<{ ok: boolean; imported?: number; rows?: number; message?: string }> => {
+      const fd = new FormData(); fd.append("file", file);
+      const res = await fetch(`${BASE}/finance/import`, { method: "POST", headers: authHeaders(), body: fd });
+      if (!res.ok) throw new Error(`/finance/import → ${res.status}`);
+      return res.json();
+    },
+    exportFile: (fmt: "xlsx" | "csv" = "xlsx") =>
+      jget<{ ok: boolean; path?: string; message?: string }>(`/finance/export?fmt=${fmt}`),
   },
   collections: {
     list: () => jget<{ ok: boolean; collections: Collection[] }>("/collections"),

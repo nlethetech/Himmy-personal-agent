@@ -130,6 +130,16 @@ class AssistantUpdate(BaseModel):
     note: str = ""
 
 
+class ExpenseRequest(BaseModel):
+    # A manually-added (or snap-confirmed) expense for the finance ledger.
+    amount: float
+    merchant: str = ""
+    category: str = ""
+    date: str = ""
+    note: str = ""
+    currency: str = "NPR"
+
+
 def _compose_prompt(message: str, context: str | None) -> str:
     """Front a turn with the open-item context, if any (a paper/article the user is viewing, or a
     file they just dropped into the chat).
@@ -1362,6 +1372,64 @@ def create_app() -> FastAPI:
         except Exception:  # noqa: BLE001
             pass
         return r
+
+    # ---- finance: snap a bill, track spending, Excel in & out ----------------------------
+    @app.get("/finance/expenses")
+    async def finance_list(month: str | None = None, category: str | None = None,
+                           limit: int = 300) -> dict[str, Any]:
+        from himmy_app.finance import ExpenseStore
+
+        store = ExpenseStore(cfg)
+        return {"ok": True, "expenses": store.list(limit=limit, month=month, category=category),
+                "months": store.months()}
+
+    @app.get("/finance/summary")
+    async def finance_summary(period: str = "month") -> dict[str, Any]:
+        from himmy_app.finance import ExpenseStore
+
+        return ExpenseStore(cfg).summary(period)
+
+    @app.post("/finance/expenses")
+    async def finance_add(body: ExpenseRequest) -> dict[str, Any]:
+        from himmy_app.finance import ExpenseStore
+
+        exp = ExpenseStore(cfg).add(body.model_dump(), source="manual")
+        return {"ok": True, "expense": exp}
+
+    @app.delete("/finance/expenses/{exp_id}")
+    async def finance_delete(exp_id: str) -> dict[str, Any]:
+        from himmy_app.finance import ExpenseStore
+
+        return ExpenseStore(cfg).delete(exp_id)
+
+    @app.post("/finance/snap")
+    async def finance_snap(file: UploadFile = File(...)) -> dict[str, Any]:
+        """Read a snapped bill into a structured expense DRAFT (not saved — the UI confirms it)."""
+        from himmy_app.finance import extract_bill
+
+        data = await file.read()
+        if not data:
+            return {"ok": False, "message": "That image was empty."}
+        if len(data) > 25 * 1024 * 1024:
+            return {"ok": False, "message": "That file is too large (max 25 MB)."}
+        return await extract_bill(data, file.content_type or "", file.filename or "", cfg)
+
+    @app.post("/finance/import")
+    async def finance_import(file: UploadFile = File(...)) -> dict[str, Any]:
+        """Import expenses from an uploaded CSV / Excel file into the ledger."""
+        from himmy_app.finance import ExpenseStore
+
+        data = await file.read()
+        if not data:
+            return {"ok": False, "message": "That file was empty."}
+        return ExpenseStore(cfg).import_bytes(data, file.filename or "")
+
+    @app.get("/finance/export")
+    async def finance_export(fmt: str = "xlsx") -> dict[str, Any]:
+        """Write the whole ledger to ~/Downloads as .xlsx (or .csv); return the path."""
+        from himmy_app.finance import ExpenseStore
+
+        return ExpenseStore(cfg).export(fmt=fmt if fmt in ("xlsx", "csv") else "xlsx")
 
     @app.post("/library/dedupe")
     async def library_dedupe() -> dict[str, Any]:

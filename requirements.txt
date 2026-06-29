@@ -13,3 +13,5 @@
 himmy[toolkit,api,openai,embeddings,cron]
 httpx>=0.27
 pypdf>=4
+# Excel (.xlsx) import/export for the finance ledger, and the framework's ExcelReader.
+openpyxl>=3.1

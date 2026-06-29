@@ -138,6 +138,14 @@ SURFACES: list[dict[str, Any]] = [
         "tools": {"on": ["ask_papers", "index_papers", "add_paper", "save_article"]},
     },
     {
+        "key": "finance", "label": "Finance", "service": "Your expense ledger",
+        "desc": "Track your spending — log expenses, read your bills, and summarise where your "
+                "money goes.",
+        "default": "on",
+        "levels": [{"value": "off", "label": "Off"}, {"value": "on", "label": "On"}],
+        "tools": {"on": ["add_expense", "list_expenses", "expense_summary"]},
+    },
+    {
         "key": "files", "label": "Files & media", "service": "Things you upload",
         "desc": "Read files you send Himmy — including reading images/screenshots and "
                 "transcribing voice notes.",

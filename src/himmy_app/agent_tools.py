@@ -311,6 +311,14 @@ def register(registry: ToolRegistry) -> list[str]:
     except Exception:  # noqa: BLE001 - best-effort; NEPSE prices just won't be offered
         pass
 
+    # --- Finance: log + summarise the user's spending (the snap-a-bill ledger) ---------------
+    try:
+        from himmy_app.connectors.finance import FinanceConnector
+
+        registered += FinanceConnector().register_tools(registry)
+    except Exception:  # noqa: BLE001 - best-effort; finance tools just won't be offered
+        pass
+
     # --- NRB forex: official Nepal Rastra Bank foreign-exchange rates vs NPR (keyless) --------
     try:
         from himmy_app.connectors.forex import ForexConnector
