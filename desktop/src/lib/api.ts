@@ -435,6 +435,25 @@ export type NotificationItem = {
   checkpoint_id: string | null; created_at: string; read: boolean;
 };
 
+// Himmy's proactive brain — an always-on chief-of-staff layer that watches across
+// surfaces (tasks / Money / calendar / mail) and surfaces a few high-quality, actionable
+// observations ("Himmy noticed …"), each with one ready-to-run action.
+export type Observation = {
+  id: string;
+  key: string;                 // stable dedupe key (internal; safe to ignore in UI)
+  kind: "deterministic" | "connect" | "prep" | "budget" | "mail" | "task" | "trip";
+  title: string;               // short headline
+  detail: string;              // one line of why
+  action_label: string;        // button label, e.g. "Log to Money"
+  instruction: string;         // the NL command /do runs through Himmy's agent
+  surface: "tasks" | "finance" | "calendar" | "mail" | string;
+  status: "active" | "done" | "dismissed" | "snoozed";
+  snooze_until: string | null; // RFC3339-Z when snoozed
+  created: string;             // RFC3339-Z
+};
+export type ProactiveLevel = "off" | "gentle" | "calm" | "always";
+export type ProactiveSettings = { level: ProactiveLevel; levels: ProactiveLevel[] };
+
 // Google (read-only Mail + Calendar over the connected account).
 export type GoogleStatus = {
   ok: boolean;
@@ -1044,6 +1063,27 @@ export const api = {
     read: (id: string) => jpost<{ ok: boolean }>(`/notifications/${id}/read`, {}),
     readAll: () => jpost<{ ok: boolean; marked: number }>("/notifications/read-all", {}),
     remove: (id: string) => jdelete<{ ok: boolean }>(`/notifications/${id}`),
+  },
+  // Himmy's proactive brain — the always-on layer of cross-surface observations. `list` reads
+  // the active set + current level; `refresh` runs a full scan now; `do` executes an observation's
+  // ready-to-run instruction through Himmy's agent (risky actions auto-park for approval — surface
+  // the result via the existing approvals/bell flow when awaiting_approval). dismiss/snooze tune
+  // the noise. getSettings/setSettings drive the off|gentle|calm|always dial.
+  proactive: {
+    list: () =>
+      jget<{ ok: boolean; observations: Observation[]; level: ProactiveLevel }>("/proactive"),
+    refresh: () =>
+      jpost<{ ok: boolean; created: number; pushed: number; active: number; level: ProactiveLevel;
+              errors: Record<string, string>; observations: Observation[] }>("/proactive/refresh", {}),
+    do: (id: string) =>
+      jpost<{ ok: boolean; error?: string; result?: TurnResult; observation?: Observation }>(
+        `/proactive/${id}/do`, {}),
+    dismiss: (id: string) => jpost<{ ok: boolean }>(`/proactive/${id}/dismiss`, {}),
+    snooze: (id: string, hours = 4) =>
+      jpost<{ ok: boolean; observation: Observation | null }>(`/proactive/${id}/snooze`, { hours }),
+    getSettings: () => jget<ProactiveSettings & { ok: boolean }>("/proactive/settings"),
+    setSettings: (level: ProactiveLevel) =>
+      jput<ProactiveSettings & { ok: boolean }>("/proactive/settings", { level }),
   },
   // Read-only Mail + Calendar over the connected Google account.
   google: {

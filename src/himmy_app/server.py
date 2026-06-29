@@ -27,7 +27,7 @@ import os
 
 import re
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
@@ -964,11 +964,42 @@ def create_app() -> FastAPI:
                 # Re-check every 15 min so we catch the post-close window soon after it opens.
                 await asyncio.sleep(15 * 60)
 
+        # Proactive brain: the always-on chief-of-staff loop. Every ~45 min it scans across
+        # tasks/Money/calendar/mail and surfaces a small set of "Himmy noticed …" observations
+        # (deterministic rules + ONE cheap connect-the-dots model pass), pushing important new ones
+        # into the same bell Inbox + Telegram — honoring the proactive_level setting and quiet
+        # hours (so `notice` itself no-ops at level 'off'/'gentle'-push and during 22:00–07:00). It
+        # also fires a morning rundown (~07:00) and an evening recap (~20:00) once per local day.
+        # Mirrors _nudge_loop; wrapped so a bad pass can NEVER crash the loop or the server.
+        async def _proactive_loop() -> None:
+            from himmy_app import proactive
+
+            await asyncio.sleep(25)  # let first-run indexing / Google settle before the first scan
+            last_rundown: dict[str, str] = {}  # part -> local YYYY-MM-DD it last fired
+            while True:
+                try:
+                    await proactive.notice(cfg)
+                    # Morning rundown ~07:00, evening recap ~20:00 — once per local day each, and
+                    # only when the level is at its fullest ('always') so quieter levels stay quiet.
+                    if proactive.get_level(cfg) == "always":
+                        now_local = proactive._local_now()
+                        day = now_local.date().isoformat()
+                        if now_local.hour == 7 and last_rundown.get("morning") != day:
+                            await proactive.rundown(cfg, part="morning")
+                            last_rundown["morning"] = day
+                        elif now_local.hour == 20 and last_rundown.get("evening") != day:
+                            await proactive.rundown(cfg, part="evening")
+                            last_rundown["evening"] = day
+                except Exception:  # noqa: BLE001 - a bad proactive pass must never crash the server
+                    pass
+                await asyncio.sleep(proactive.PROACTIVE_INTERVAL_S)
+
         warm_task = asyncio.create_task(_warm_recs())
         news_task = asyncio.create_task(_refresh_news())
         learn_task = asyncio.create_task(_auto_learn())
         nudge_task = asyncio.create_task(_nudge_loop())
         nepse_task = asyncio.create_task(_nepse_refresh_loop())
+        proactive_task = asyncio.create_task(_proactive_loop())
         # Telegram bridge — only does anything if the user has set a bot token.
         try:
             from himmy_app import telegram as _tg
@@ -984,6 +1015,7 @@ def create_app() -> FastAPI:
             learn_task.cancel()
             nudge_task.cancel()
             nepse_task.cancel()
+            proactive_task.cancel()
             try:
                 from himmy_app import telegram as _tg
 
@@ -992,7 +1024,7 @@ def create_app() -> FastAPI:
                 pass
             # Await the cancelled tasks so in-flight I/O unwinds before we stop the scheduler.
             await asyncio.gather(
-                warm_task, news_task, learn_task, nudge_task, nepse_task,
+                warm_task, news_task, learn_task, nudge_task, nepse_task, proactive_task,
                 return_exceptions=True,
             )
             await routines_mod.get_scheduler().stop()
@@ -2048,6 +2080,61 @@ def create_app() -> FastAPI:
         from himmy_app import nudges
 
         return await nudges.generate(cfg)
+
+    # ---- proactive brain: always-on chief-of-staff observations ----------------------------
+    # A small, high-quality stream of "Himmy noticed …" observations across tasks/Money/calendar/
+    # mail, each with a one-tap action that runs its instruction through ask_turn (HITL — risky
+    # actions auto-park for approval). New important ones are pushed into the SAME bell Inbox +
+    # Telegram, respecting the proactive_level setting and quiet hours.
+    @app.get("/proactive")
+    async def proactive_list() -> dict[str, Any]:
+        from himmy_app import proactive
+
+        return {
+            "ok": True,
+            "observations": proactive.get_store().list_active(),
+            "level": proactive.get_level(cfg),
+        }
+
+    @app.post("/proactive/refresh")
+    async def proactive_refresh() -> dict[str, Any]:
+        from himmy_app import proactive
+
+        summary = await proactive.notice(cfg)
+        return {**summary, "observations": proactive.get_store().list_active()}
+
+    @app.post("/proactive/{obs_id}/do")
+    async def proactive_do(obs_id: str) -> dict[str, Any]:
+        from himmy_app import proactive
+
+        return await proactive.execute(obs_id, cfg)
+
+    @app.post("/proactive/{obs_id}/dismiss")
+    async def proactive_dismiss(obs_id: str) -> dict[str, Any]:
+        from himmy_app import proactive
+
+        return {"ok": proactive.get_store().dismiss(obs_id)}
+
+    @app.post("/proactive/{obs_id}/snooze")
+    async def proactive_snooze(obs_id: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        from himmy_app import proactive
+
+        hours = float(body.get("hours") or 4)
+        row = proactive.get_store().snooze(obs_id, hours)
+        return {"ok": row is not None, "observation": row}
+
+    @app.get("/proactive/settings")
+    async def proactive_settings_get() -> dict[str, Any]:
+        from himmy_app import proactive
+
+        return {"ok": True, "level": proactive.get_level(cfg), "levels": list(proactive.PROACTIVE_LEVELS)}
+
+    @app.put("/proactive/settings")
+    async def proactive_settings_put(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        from himmy_app import proactive
+
+        level = proactive.set_level(str(body.get("level") or ""), cfg)
+        return {"ok": True, "level": level, "levels": list(proactive.PROACTIVE_LEVELS)}
 
     # ---- Google: read-only Mail + Calendar (himmy studio_google, OAuth2 loopback) --------
     # Sign-in flow: the UI opens /google/auth-url in the system browser; Google redirects

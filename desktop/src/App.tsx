@@ -38,6 +38,7 @@ import {
   type ToolResult,
   type AttachmentResult, type AttachmentItem, type AssistantConfig, type AssistantStyleOpt,
   type Expense, type ExpenseDraft, type FinanceSummary,
+  type Observation, type ProactiveLevel,
 } from "./lib/api";
 import { apa, mla, bibtex } from "./lib/cite";
 import Reader from "./Reader";
@@ -175,6 +176,12 @@ function openPaper(id: string) {
   window.dispatchEvent(new CustomEvent("himmy:open-paper", { detail: id }));
 }
 
+// Open the notification bell / approvals panel from anywhere (e.g. a proactive "Do it" that
+// parked a risky action for HITL approval). The App shell listens and flips the bell open.
+function openBell() {
+  window.dispatchEvent(new CustomEvent("himmy:bell"));
+}
+
 /* ───────────────────────────────────────── shell */
 export default function App() {
   const [section, setSection] = useState<Section>("today");
@@ -283,14 +290,19 @@ export default function App() {
       setSection("library");
       setOpenId(id);
     };
+    // Open the bell (approvals inbox) on demand — a proactive action that parked for approval
+    // refreshes the inbox first, then opens it so the Approve/Cancel card is right there.
+    const onBell = () => { loadNotifs(); setNotifOpen(true); };
     const prevent = (e: DragEvent) => e.preventDefault();
     window.addEventListener("himmy:nav", onNav);
     window.addEventListener("himmy:open-paper", onOpenPaper);
+    window.addEventListener("himmy:bell", onBell);
     window.addEventListener("dragover", prevent);
     window.addEventListener("drop", prevent);
     return () => {
       window.removeEventListener("himmy:nav", onNav);
       window.removeEventListener("himmy:open-paper", onOpenPaper);
+      window.removeEventListener("himmy:bell", onBell);
       window.removeEventListener("dragover", prevent);
       window.removeEventListener("drop", prevent);
     };
@@ -460,10 +472,11 @@ function doPriceNum(s?: string): number {
    ──────────────────────────────────────────────────────────────────────────── */
 const FIN_CATS = ["Food", "Groceries", "Transport", "Shopping", "Bills", "Health",
   "Entertainment", "Travel", "Education", "Other"];
+// macOS system colors — native, harmonious with the app's system-blue accent.
 const CAT_COLOR: Record<string, string> = {
-  Food: "#f59e0b", Groceries: "#10b981", Transport: "#3b82f6", Shopping: "#ec4899",
-  Bills: "#ef4444", Health: "#06b6d4", Entertainment: "#8b5cf6", Travel: "#14b8a6",
-  Education: "#6366f1", Other: "#94a3b8",
+  Food: "#FF9F0A", Groceries: "#30D158", Transport: "#0A84FF", Shopping: "#FF375F",
+  Bills: "#FF453A", Health: "#40C8E0", Entertainment: "#BF5AF2", Travel: "#64D2FF",
+  Education: "#5E5CE6", Other: "#98989D",
 };
 const catColor = (c: string) => CAT_COLOR[c] || "#94a3b8";
 const fmtMoney = (n: number, cur = "NPR") => `${cur} ${Math.round(n).toLocaleString()}`;
@@ -523,112 +536,140 @@ function MoneyTab() {
   };
 
   const cur = summary?.currency || "NPR";
-  const top = summary?.by_category?.[0]?.total || 1;
+  const cats = summary?.by_category || [];
+  const total = summary?.total || 0;
+  const topCat = cats[0]?.category;
+  const pctOf = (v: number) => (total > 0 ? (v / total) * 100 : 0);
   const periods: { id: FinPeriod; label: string }[] = [
     { id: "week", label: "Week" }, { id: "month", label: "Month" },
     { id: "year", label: "Year" }, { id: "all", label: "All" }];
+  const fmtDate = (iso: string) => {
+    const d = new Date(iso + "T00:00:00");
+    return isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  };
 
   return (
-    <div className="h-full overflow-y-auto pb-12">
+    <div className="h-full overflow-y-auto">
       <input ref={snapRef} type="file" accept="image/*,.pdf" className="hidden"
         onChange={(e) => { if (e.target.files?.[0]) onSnap(e.target.files[0]); e.target.value = ""; }} />
       <input ref={importRef} type="file" accept=".csv,.xlsx,.xlsm" className="hidden"
         onChange={(e) => { if (e.target.files?.[0]) onImport(e.target.files[0]); e.target.value = ""; }} />
 
-      <div className="mx-auto w-full max-w-[1180px] px-9 pt-8">
+      <div className="mx-auto w-full max-w-[860px] px-8 pt-9 pb-16">
         {/* header */}
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="font-display text-[28px] font-semibold leading-[1.1] tracking-[-0.025em] bg-gradient-to-b from-white to-white/75 bg-clip-text text-transparent">Money</h1>
-            <p className="text-[11.5px] text-mac-ink3 mt-1.5">Snap a bill and Himmy files it. Your spending, in one place.</p>
+            <h1 className="text-[26px] font-semibold leading-tight tracking-[-0.02em] text-mac-ink">Money</h1>
+            <p className="text-[12.5px] text-mac-ink3 mt-1">Snap a bill and Himmy files it — your spending, in one place.</p>
           </div>
-          <div className="shrink-0 flex items-center gap-2">
+          <div className="shrink-0 flex items-center gap-1.5 pt-0.5">
             <button onClick={() => importRef.current?.click()} disabled={busy === "import"}
-              className="h-9 px-3.5 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-white/[0.05] ring-1 ring-inset ring-white/10 text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.09] transition-colors disabled:opacity-60">
+              className="h-8 px-2.5 rounded-[8px] text-[12px] font-medium inline-flex items-center gap-1.5 text-mac-ink2 hover:text-mac-ink hover:bg-mac-fill transition-colors disabled:opacity-60">
               {busy === "import" ? <Loader2 size={13} className="animate-spin" /> : <FileUp size={13} />} Import
             </button>
             <button onClick={doExport} disabled={busy === "export" || !summary?.count}
-              className="h-9 px-3.5 rounded-[10px] text-[12.5px] font-medium inline-flex items-center gap-1.5 bg-white/[0.05] ring-1 ring-inset ring-white/10 text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.09] transition-colors disabled:opacity-50">
+              className="h-8 px-2.5 rounded-[8px] text-[12px] font-medium inline-flex items-center gap-1.5 text-mac-ink2 hover:text-mac-ink hover:bg-mac-fill transition-colors disabled:opacity-40">
               {busy === "export" ? <Loader2 size={13} className="animate-spin" /> : <FileDown size={13} />} Export
             </button>
           </div>
         </div>
 
         {/* primary actions */}
-        <div className="mt-5 flex flex-wrap items-center gap-2.5">
+        <div className="mt-6 flex items-center gap-2.5">
           <button onClick={() => snapRef.current?.click()} disabled={busy === "snap"}
-            className="h-11 px-5 rounded-xl text-[13.5px] font-semibold inline-flex items-center gap-2 text-white bg-gradient-to-b from-mac-accentHi to-mac-accent ring-1 ring-inset ring-white/15 shadow-[0_3px_14px_-3px_rgba(10,132,255,0.6)] hover:brightness-[1.06] transition-all">
-            {busy === "snap" ? <Loader2 size={16} className="animate-spin" /> : <Camera size={16} />}
+            className="h-10 px-4 rounded-[11px] text-[13px] font-medium inline-flex items-center gap-2 text-white bg-mac-accent hover:bg-mac-accentHi active:brightness-95 transition-colors shadow-[0_1px_2px_rgba(0,0,0,0.3)] disabled:opacity-70">
+            {busy === "snap" ? <Loader2 size={15} className="animate-spin" /> : <Camera size={15} strokeWidth={2} />}
             {busy === "snap" ? "Reading your bill…" : "Snap a bill"}
           </button>
           <button onClick={() => setDraft({ date: todayISO(), merchant: "", amount: 0, currency: "NPR", category: "Other", items: [], note: "" })}
-            className="h-11 px-4 rounded-xl text-[13px] font-medium inline-flex items-center gap-1.5 bg-white/[0.05] ring-1 ring-inset ring-white/10 text-mac-ink2 hover:text-mac-ink hover:bg-white/[0.09] transition-colors">
-            <Plus size={15} /> Add expense
+            className="h-10 px-3.5 rounded-[11px] text-[13px] font-medium inline-flex items-center gap-1.5 bg-mac-fill ring-1 ring-inset ring-mac-stroke text-mac-ink2 hover:text-mac-ink hover:bg-mac-fillHi transition-colors">
+            <Plus size={15} strokeWidth={2.25} /> Add expense
           </button>
         </div>
 
         {/* summary card */}
-        <div className="mt-5 rounded-2xl bg-gradient-to-b from-white/[0.055] to-white/[0.018] border border-white/[0.07] p-5">
-          <div className="flex items-center justify-between gap-3 mb-4">
-            <div>
-              <div className="text-[11px] uppercase tracking-wide text-mac-ink3">Spent · {summary?.label || "this month"}</div>
-              <div className="text-[30px] font-semibold tracking-[-0.02em] text-mac-ink mt-0.5">
-                {summary ? fmtMoney(summary.total, cur) : "—"}
+        <div className="mt-6 rounded-[18px] bg-mac-fill border border-mac-stroke shadow-mac p-5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[11px] uppercase tracking-[0.06em] font-medium text-mac-ink3">{summary?.label || "This month"}</div>
+              <div className="mt-1 flex items-baseline gap-1">
+                <span className="text-[15px] text-mac-ink2 font-medium">{cur}</span>
+                <span className="text-[34px] leading-none font-semibold tracking-[-0.03em] text-mac-ink tabular-nums">
+                  {summary ? Math.round(total).toLocaleString() : "—"}
+                </span>
               </div>
-              <div className="text-[11.5px] text-mac-ink3 mt-0.5">{summary?.count || 0} expense{summary?.count === 1 ? "" : "s"}</div>
+              <div className="text-[12px] text-mac-ink3 mt-1.5">
+                {summary?.count || 0} expense{summary?.count === 1 ? "" : "s"}{topCat ? <> · most on <span className="text-mac-ink2">{topCat}</span></> : null}
+              </div>
             </div>
-            <div className="flex items-center gap-1 rounded-[10px] bg-white/[0.04] ring-1 ring-inset ring-white/10 p-1">
+            {/* native-style segmented control */}
+            <div className="flex items-center gap-0.5 rounded-[9px] bg-mac-fillHi ring-1 ring-inset ring-mac-stroke p-0.5">
               {periods.map((p) => (
                 <button key={p.id} onClick={() => setPeriod(p.id)}
-                  className={`h-7 px-2.5 rounded-md text-[11.5px] font-medium transition-colors ${period === p.id ? "bg-white/[0.1] text-mac-ink" : "text-mac-ink3 hover:text-mac-ink2"}`}>{p.label}</button>
+                  className={`h-7 px-2.5 rounded-[7px] text-[11.5px] font-medium transition-all ${period === p.id ? "bg-[rgba(255,255,255,0.14)] text-mac-ink shadow-[0_1px_2px_rgba(0,0,0,0.25)]" : "text-mac-ink3 hover:text-mac-ink2"}`}>{p.label}</button>
               ))}
             </div>
           </div>
+
           {loading ? (
-            <div className="h-20 grid place-items-center text-mac-ink3"><Loader2 size={16} className="animate-spin" /></div>
-          ) : !summary?.by_category?.length ? (
-            <div className="py-6 text-center">
-              <PieChart size={22} className="mx-auto text-mac-ink3" />
-              <p className="text-[12.5px] text-mac-ink2 mt-2">No spending yet for this period.</p>
-              <p className="text-[11.5px] text-mac-ink3">Snap a bill or add an expense to get started.</p>
+            <div className="h-24 grid place-items-center text-mac-ink3"><Loader2 size={16} className="animate-spin" /></div>
+          ) : !cats.length ? (
+            <div className="py-8 text-center">
+              <div className="mx-auto h-11 w-11 rounded-2xl grid place-items-center bg-mac-fillHi"><PieChart size={20} className="text-mac-ink3" /></div>
+              <p className="text-[12.5px] text-mac-ink2 mt-3">Nothing tracked for this period yet.</p>
+              <p className="text-[11.5px] text-mac-ink3 mt-0.5">Snap a bill or add an expense to start.</p>
             </div>
           ) : (
-            <div className="space-y-2.5">
-              {summary.by_category.map((c) => (
-                <div key={c.category} className="flex items-center gap-3">
-                  <div className="w-24 shrink-0 flex items-center gap-1.5">
+            <>
+              {/* stacked proportion bar */}
+              <div className="mt-5 flex gap-[3px] h-2.5">
+                {cats.map((c) => (
+                  <div key={c.category} className="rounded-[3px] first:rounded-l-full last:rounded-r-full transition-all"
+                    style={{ width: `${Math.max(2, pctOf(c.total))}%`, background: catColor(c.category) }} title={`${c.category} · ${Math.round(pctOf(c.total))}%`} />
+                ))}
+              </div>
+              {/* breakdown list — aligned %/amount columns, no ragged gap */}
+              <div className="mt-4">
+                {cats.map((c) => (
+                  <div key={c.category} className="flex items-center gap-3 py-2.5 border-t border-mac-stroke first:border-t-0">
                     <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: catColor(c.category) }} />
-                    <span className="text-[12px] text-mac-ink2 truncate">{c.category}</span>
+                    <span className="flex-1 text-[13px] text-mac-ink2 truncate">{c.category}</span>
+                    <span className="w-12 text-right text-[12px] text-mac-ink3 tabular-nums">{Math.round(pctOf(c.total))}%</span>
+                    <span className="w-28 text-right text-[13px] font-medium text-mac-ink tabular-nums">{fmtMoney(c.total, cur)}</span>
                   </div>
-                  <div className="flex-1 h-2.5 rounded-full bg-white/[0.05] overflow-hidden">
-                    <div className="h-full rounded-full" style={{ width: `${Math.max(4, (c.total / top) * 100)}%`, background: catColor(c.category) }} />
-                  </div>
-                  <span className="w-24 shrink-0 text-right text-[12px] font-medium text-mac-ink tabular-nums">{fmtMoney(c.total, cur)}</span>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            </>
           )}
         </div>
 
         {/* recent expenses */}
-        <div className="mt-6">
-          <h2 className="font-display text-[15px] font-semibold text-mac-ink mb-2.5">Recent</h2>
+        <div className="mt-7">
+          <h2 className="text-[12px] uppercase tracking-[0.06em] font-semibold text-mac-ink3 mb-2.5 px-0.5">Recent</h2>
           {expenses.length === 0 ? (
-            <p className="text-[12.5px] text-mac-ink3 py-4">No expenses logged yet.</p>
+            <div className="rounded-[18px] bg-mac-fill border border-mac-stroke shadow-mac py-10 text-center">
+              <p className="text-[12.5px] text-mac-ink3">No expenses logged yet.</p>
+            </div>
           ) : (
-            <div className="rounded-2xl bg-white/[0.025] border border-white/[0.07] overflow-hidden divide-y divide-white/[0.05]">
+            <div className="rounded-[18px] bg-mac-fill border border-mac-stroke shadow-mac overflow-hidden">
               {expenses.slice(0, 60).map((e) => (
-                <div key={e.id} className="group flex items-center gap-3 px-4 py-2.5 hover:bg-white/[0.03] transition-colors">
-                  <span className="h-8 w-8 shrink-0 grid place-items-center rounded-lg" style={{ background: `${catColor(e.category)}22`, color: catColor(e.category) }}>
-                    <Receipt size={14} />
+                <div key={e.id} className="group flex items-center gap-3 px-4 py-3 border-t border-mac-stroke first:border-t-0 hover:bg-mac-fillHi transition-colors">
+                  <span className="h-9 w-9 shrink-0 grid place-items-center rounded-[11px] ring-1 ring-inset ring-white/[0.06]"
+                    style={{ background: `${catColor(e.category)}1f`, color: catColor(e.category) }}>
+                    <Receipt size={15} strokeWidth={2} />
                   </span>
                   <div className="flex-1 min-w-0">
-                    <div className="text-[13px] text-mac-ink truncate">{e.merchant}</div>
-                    <div className="text-[11px] text-mac-ink3">{e.date} · {e.category}{e.source === "snap" ? " · snapped" : ""}</div>
+                    <div className="text-[13.5px] text-mac-ink truncate leading-tight">{e.merchant}</div>
+                    <div className="text-[11.5px] text-mac-ink3 mt-0.5 flex items-center gap-1.5">
+                      <span>{fmtDate(e.date)}</span>
+                      <span className="h-2.5 w-px bg-mac-strokeHi" />
+                      <span style={{ color: catColor(e.category) }}>{e.category}</span>
+                      {e.source === "snap" && <><span className="h-2.5 w-px bg-mac-strokeHi" /><span className="inline-flex items-center gap-0.5"><Camera size={9} /> snapped</span></>}
+                    </div>
                   </div>
-                  <span className="shrink-0 text-[13.5px] font-medium text-mac-ink tabular-nums">{fmtMoney(e.amount, e.currency)}</span>
+                  <span className="shrink-0 text-[14px] font-semibold text-mac-ink tabular-nums tracking-[-0.01em]">{fmtMoney(e.amount, e.currency)}</span>
                   <button onClick={() => remove(e.id)} title="Delete"
-                    className="shrink-0 opacity-0 group-hover:opacity-100 h-7 w-7 grid place-items-center rounded-md text-mac-ink3 hover:text-mac-red hover:bg-white/[0.06] transition-all">
+                    className="shrink-0 -mr-1 opacity-0 group-hover:opacity-100 h-7 w-7 grid place-items-center rounded-[8px] text-mac-ink3 hover:text-mac-red hover:bg-mac-fill transition-all">
                     <Trash2 size={13} />
                   </button>
                 </div>
@@ -640,7 +681,7 @@ function MoneyTab() {
 
       {draft && <ExpenseEditor draft={draft} busy={busy === "save"} onCancel={() => setDraft(null)} onSave={saveDraft} />}
       {toast && (
-        <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl bg-[rgba(34,35,41,0.98)] border border-mac-strokeHi shadow-pop text-[12.5px] text-mac-ink">{toast}</div>
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-[12px] bg-[rgba(40,41,48,0.98)] border border-mac-strokeHi shadow-pop text-[12.5px] text-mac-ink">{toast}</div>
       )}
     </div>
   );
@@ -2499,6 +2540,119 @@ function LiveClock() {
    segmented control, so Planner no longer needs its own top-bar slot. */
 // Himmy's proactive daily brief — the first thing you see on Today. Served from a daily cache
 // (instant); a stale or cold brief generates in the background and we poll until it lands.
+// Map a proactive observation's surface to its icon + accent tint, so each card reads at a glance.
+function obsSurfaceIcon(o: Observation): LucideIcon {
+  switch (o.surface) {
+    case "finance": return Wallet;
+    case "calendar": return CalendarClock;
+    case "mail": return Mail;
+    case "tasks": return ListChecks;
+    default:
+      // fall back on kind for the cross-surface "connect" / "trip" observations
+      if (o.kind === "trip") return Plane;
+      if (o.kind === "prep") return CalendarClock;
+      if (o.kind === "budget") return Wallet;
+      return Lightbulb;
+  }
+}
+
+// "Himmy noticed …" — the proactive brain's strip at the top of Today. A small set of premium
+// cards, each a single high-quality observation with a one-tap action (Do it · Dismiss · Snooze).
+// Hidden entirely when there's nothing active, so the no-scroll Today layout is preserved.
+function HimmyNoticed() {
+  const [obs, setObs] = useState<Observation[] | null>(null);
+  // ids with an action in flight ("doing") or just acted-on locally (dismiss/snooze), so the UI
+  // can disable buttons + slide the card out without waiting on a reload.
+  const [busy, setBusy] = useState<Record<string, "do" | "dismiss" | "snooze">>({});
+
+  const load = async () => {
+    try { const r = await api.proactive.list(); setObs(r.observations || []); }
+    catch { setObs((o) => o ?? []); }
+  };
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 30_000);   // poll ~30s so new observations surface live
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useRefreshSignal("tasks", load);
+  useRefreshSignal("calendar", load);
+
+  const doIt = async (o: Observation) => {
+    setBusy((b) => ({ ...b, [o.id]: "do" }));
+    try {
+      const r = await api.proactive.do(o.id);
+      if (r.ok && r.result?.awaiting_approval) {
+        // Risky action parked for HITL — route the user to the bell/approval card.
+        openBell();
+        // leave the observation active; clear busy so it can be retried/inspected
+      } else {
+        // Completed (or errored) — drop it from the strip and refresh from source.
+        setObs((list) => (list ?? []).filter((x) => x.id !== o.id));
+        emitRefresh("tasks");
+      }
+    } catch { /* best-effort */ }
+    finally { setBusy((b) => { const n = { ...b }; delete n[o.id]; return n; }); }
+  };
+  const dismiss = async (o: Observation) => {
+    setBusy((b) => ({ ...b, [o.id]: "dismiss" }));
+    setObs((list) => (list ?? []).filter((x) => x.id !== o.id));
+    try { await api.proactive.dismiss(o.id); } catch { load(); }
+  };
+  const snooze = async (o: Observation) => {
+    setBusy((b) => ({ ...b, [o.id]: "snooze" }));
+    setObs((list) => (list ?? []).filter((x) => x.id !== o.id));
+    try { await api.proactive.snooze(o.id, 4); } catch { load(); }
+  };
+
+  const items = obs ?? [];
+  if (!items.length) return null;   // never show an empty box
+
+  return (
+    <div className="relative mt-4 rounded-2xl border border-mac-stroke bg-gradient-to-b from-white/[0.045] to-white/[0.012] p-4">
+      <div className="flex items-center gap-1.5 mb-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-mac-accentHi">
+        <Sparkles size={12} strokeWidth={2.2} /> Himmy noticed
+        <span className="text-mac-ink4 normal-case tracking-normal font-medium">· {items.length}</span>
+      </div>
+      <div className="flex gap-2.5 overflow-x-auto pb-0.5 -mb-0.5">
+        {items.map((o) => {
+          const Icon = obsSurfaceIcon(o);
+          const b = busy[o.id];
+          return (
+            <div key={o.id}
+              className="shrink-0 w-[268px] rounded-[14px] border border-mac-stroke bg-mac-fill hover:bg-mac-fillHi transition-colors p-3 flex flex-col">
+              <div className="flex items-start gap-2.5">
+                <div className="h-7 w-7 shrink-0 grid place-items-center rounded-[8px] bg-mac-fillHi ring-1 ring-inset ring-white/[0.06]">
+                  <Icon size={14} strokeWidth={2} className="text-mac-accentHi" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] font-semibold text-mac-ink leading-snug truncate">{o.title}</div>
+                  <div className="text-[12px] text-mac-ink3 leading-snug mt-0.5 line-clamp-2">{o.detail}</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 mt-3">
+                <button onClick={() => doIt(o)} disabled={!!b}
+                  className="flex-1 h-7 inline-flex items-center justify-center gap-1.5 rounded-[8px] bg-mac-accent/90 hover:bg-mac-accent text-white text-[12px] font-semibold transition-colors disabled:opacity-60">
+                  {b === "do" ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} strokeWidth={2.4} />}
+                  <span className="truncate">{o.action_label || "Do it"}</span>
+                </button>
+                <button onClick={() => snooze(o)} disabled={!!b} title="Snooze 4 hours"
+                  className="h-7 w-7 grid place-items-center rounded-[8px] text-mac-ink3 hover:text-mac-ink hover:bg-mac-fillHi transition-colors disabled:opacity-60">
+                  <Clock size={13} />
+                </button>
+                <button onClick={() => dismiss(o)} disabled={!!b} title="Dismiss"
+                  className="h-7 w-7 grid place-items-center rounded-[8px] text-mac-ink3 hover:text-mac-ink hover:bg-mac-fillHi transition-colors disabled:opacity-60">
+                  <X size={13} />
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function TodayBrief() {
   const [brief, setBrief] = useState<{ text: string; generating?: boolean; stale?: boolean; generated_at?: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -2702,6 +2856,11 @@ function Today({ health }: { health: Health | null }) {
           <LiveClock />
         </div>
         <TodayBrief />
+      </div>
+
+      {/* Himmy noticed — the proactive brain's actionable observations (hidden when empty) */}
+      <div className="shrink-0">
+        <HimmyNoticed />
       </div>
 
       <div className="flex-1 min-h-0 grid grid-cols-12 grid-rows-1 gap-4">
@@ -4008,6 +4167,59 @@ function PermissionRow({ s, onSet, onGoConnections }: {
   );
 }
 
+// How loud Himmy's proactive brain is — each level has a plain-English one-liner.
+const PROACTIVE_LEVELS: { value: ProactiveLevel; label: string; desc: string }[] = [
+  { value: "off",    label: "Off",    desc: "Himmy won't watch or notice anything in the background." },
+  { value: "gentle", label: "Gentle", desc: "Notices things quietly — they appear on Today, but Himmy never pings you." },
+  { value: "calm",   label: "Calm",   desc: "Pings you only for the urgent ones (deadlines, budgets, meeting prep)." },
+  { value: "always", label: "Always", desc: "Full chief-of-staff: notices, pings, plus a morning rundown and evening recap." },
+];
+
+function ProactiveSection() {
+  const [level, setLevel] = useState<ProactiveLevel | null>(null);
+  useEffect(() => {
+    api.proactive.getSettings().then((r) => setLevel(r.level)).catch(() => setLevel("always"));
+  }, []);
+  const choose = async (v: ProactiveLevel) => {
+    setLevel(v);   // optimistic
+    try { const r = await api.proactive.setSettings(v); setLevel(r.level); } catch { /* keep optimistic */ }
+  };
+  const active = PROACTIVE_LEVELS.find((l) => l.value === level);
+  return (
+    <div className="space-y-4">
+      <SectionHeader title="Proactive"
+        sub="Himmy's always-on chief-of-staff. It watches across your tasks, money, calendar and mail and surfaces a few high-quality, one-tap things worth doing. Nothing risky ever happens without your approval." />
+      {!level ? (
+        <div className="h-32 grid place-items-center text-mac-ink3"><Loader2 size={18} className="animate-spin" /></div>
+      ) : (
+        <div className="rounded-xl border border-mac-stroke bg-mac-fill p-3.5 flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <Lightbulb size={14} className="text-mac-accentHi shrink-0" />
+              <span className="text-[13px] font-medium text-mac-ink">How proactive should Himmy be?</span>
+            </div>
+            <div className="text-[11.5px] text-mac-ink3 mt-1 max-w-[46ch] leading-snug">{active?.desc}</div>
+          </div>
+          <div className="shrink-0 flex items-center p-0.5 rounded-[10px] bg-black/20 ring-1 ring-inset ring-white/[0.06]">
+            {PROACTIVE_LEVELS.map((l) => {
+              const on = level === l.value;
+              const isOff = l.value === "off";
+              return (
+                <button key={l.value} onClick={() => choose(l.value)}
+                  className={`h-7 px-2.5 rounded-[8px] text-[11.5px] font-medium transition-colors whitespace-nowrap ${
+                    on ? (isOff ? "bg-mac-red/20 text-mac-red" : "bg-mac-fillHi text-mac-ink shadow-sm")
+                       : "text-mac-ink3 hover:text-mac-ink"}`}>
+                  {l.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const ACT_ICON: Record<string, LucideIcon> = {
   mail: Mail, calendar: Calendar, tasks: CheckSquare, food: UtensilsCrossed,
   shopping: ShoppingBag, flights: Plane, web: Globe, live_data: MapPin,
@@ -4390,12 +4602,13 @@ const PROVIDER_ICON: Record<string, LucideIcon> = {
   ollama: CpuIcon,
 };
 
-type AccountTab = "you" | "files" | "connections" | "permissions" | "activity" | "backup" | "preferences";
+type AccountTab = "you" | "files" | "connections" | "permissions" | "proactive" | "activity" | "backup" | "preferences";
 const ACCOUNT_SECTIONS: { id: AccountTab; label: string; icon: LucideIcon }[] = [
   { id: "you", label: "You", icon: Sparkles },
   { id: "files", label: "Files", icon: Paperclip },
   { id: "connections", label: "Connections", icon: Link2 },
   { id: "permissions", label: "Permissions", icon: ShieldCheck },
+  { id: "proactive", label: "Proactive", icon: Lightbulb },
   { id: "activity", label: "Activity", icon: ListChecks },
   { id: "backup", label: "Backup & Sync", icon: FileDown },
   { id: "preferences", label: "Preferences", icon: Settings },
@@ -4851,6 +5064,7 @@ function AccountPanel({ onClose }: { onClose: () => void }) {
             {tab === "files" && <FilesSection />}
             {tab === "connections" && <ConnectionsSection g={g} />}
             {tab === "permissions" && <PermissionsSection onGoConnections={() => setTab("connections")} />}
+            {tab === "proactive" && <ProactiveSection />}
             {tab === "activity" && <ActivitySection />}
             {tab === "preferences" && <PreferencesSection dir={dir} onReveal={reveal} />}
             {tab === "backup" && (

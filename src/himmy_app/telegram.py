@@ -332,6 +332,28 @@ def get_bridge(cfg: HimmyConfig | None = None) -> TelegramBridge:
     return _bridge
 
 
+async def push(text: str, cfg: HimmyConfig | None = None) -> bool:
+    """Send a message to the linked owner chat (no-op if no bot/owner is linked).
+
+    A one-way outbound push used by the proactive brain to surface an important observation in
+    Telegram. It reuses the SAME bridge ``_send`` the poll loop replies with (so chunking +
+    markdown→HTML are handled), but does NOT need the poll loop running — ``_send`` is standalone.
+    Returns True only if a message was actually dispatched; any missing config or send error is a
+    silent no-op (proactive push must never crash a scan).
+    """
+    cfg = cfg or load_config()
+    d = load_tg(cfg)
+    token = str(d.get("token") or "").strip()
+    owner = d.get("owner_chat_id")
+    if not token or not owner:
+        return False
+    try:
+        await get_bridge(cfg)._send(token, int(owner), text)
+        return True
+    except Exception:  # noqa: BLE001 - a failed push must never break the proactive scan
+        return False
+
+
 async def verify_token(token: str) -> dict[str, Any]:
     """Check a bot token with getMe (so the UI can confirm it before saving)."""
     try:
@@ -345,4 +367,4 @@ async def verify_token(token: str) -> dict[str, Any]:
         return {"ok": False, "message": f"{type(exc).__name__}"}
 
 
-__all__ = ["TelegramBridge", "get_bridge", "load_tg", "save_tg", "status", "verify_token"]
+__all__ = ["TelegramBridge", "get_bridge", "load_tg", "push", "save_tg", "status", "verify_token"]
