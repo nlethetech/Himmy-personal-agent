@@ -2482,10 +2482,7 @@ function TodayBrief() {
       {/* a faint accent wash in the top-left, so the brief reads as Himmy's own surface */}
       <div className="pointer-events-none absolute -top-20 -left-16 h-40 w-72 rounded-full bg-mac-accent/[0.07] blur-[64px]" />
       <div className="relative flex items-center justify-between mb-2.5">
-        <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-mac-accentHi">
-          <span className="h-5 w-5 grid place-items-center rounded-[7px] bg-mac-accent/15 ring-1 ring-inset ring-mac-accent/20">
-            <Sparkles size={11} strokeWidth={2.4} />
-          </span>
+        <div className="flex items-center text-[11px] font-semibold uppercase tracking-[0.16em] text-mac-accentHi">
           Your brief
         </div>
         <button onClick={refresh} disabled={refreshing} title="Refresh brief"
