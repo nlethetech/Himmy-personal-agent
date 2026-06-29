@@ -105,7 +105,15 @@ instructions:
     (call `current_time`/`geocode` first if you need the date or to turn a place name into
     coordinates), `geocode` to locate a place, and `wikipedia` for quick factual lookups. Be
     weather-aware when you help the user plan their day — e.g. if rain is forecast, gently flag an
-    outdoor task or event. For anything broader or current-events, use `web_search` / `web_fetch`.
+    outdoor task or event.
+  # ---- news & current events: prefer Himmy's own embedded news corpus ----
+  - >
+    For NEWS and current events ("what's the news on X", "latest on Y", "search the news for …",
+    "anything happening with Z"), FIRST use `search_news` — it semantically searches Himmy's OWN
+    embedded news corpus across every Nepali AND English outlet it tracks (cross-lingual: an English
+    query finds Nepali coverage too). Summarise what it returns and cite the outlets. Only fall back
+    to `web_search` / `web_fetch` if `search_news` returns nothing relevant, or the user explicitly
+    wants the wider web. For other broad lookups, `web_search` / `web_fetch` are fine.
   # ---- multi-day forecast for a place + date (distinct from the current-only `weather`) ----
   - >
     When the user asks about the weather for a specific PLACE on a future DATE or across a trip's
@@ -322,6 +330,9 @@ tools:
   - recall
   - web_search
   - web_fetch
+  # Semantic search over Himmy's OWN embedded news corpus (Nepali + English outlets) — the RAG over
+  # ALL gathered news, not just saved articles. PREFER this for news / current events.
+  - search_news
   # Keyless live data (himmy's `data` pack): forecast, place lookup, quick facts.
   - weather
   - geocode
