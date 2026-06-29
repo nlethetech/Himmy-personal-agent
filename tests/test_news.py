@@ -199,6 +199,12 @@ def test_refresh_all_refreshes_every_category(cfg, monkeypatch):
         return {"ok": True, "category": category, "items": []}
 
     monkeypatch.setattr(NewsService, "feed", fake_feed)
+    # The corpus-embedding step does real network + embedding — no-op it; this test is the feed loop.
+    import himmy_app.news as news_mod
+
+    async def _noop_ingest(*_a, **_k):
+        return {"ok": True, "ingested": 0}
+    monkeypatch.setattr(news_mod, "ingest_corpus", _noop_ingest)
     asyncio.run(refresh_all(svc, force=True))
     # One iteration touches EVERY category. "For You" is refreshed LAST by design (it pulls a
     # breadth pool from the other categories, so refreshing them first leaves their caches warm).
@@ -217,6 +223,11 @@ def test_refresh_all_one_failing_category_does_not_stop_the_loop(cfg, monkeypatc
         return {"ok": True, "category": category, "items": []}
 
     monkeypatch.setattr(NewsService, "feed", fake_feed)
+    import himmy_app.news as news_mod
+
+    async def _noop_ingest(*_a, **_k):
+        return {"ok": True, "ingested": 0}
+    monkeypatch.setattr(news_mod, "ingest_corpus", _noop_ingest)
     asyncio.run(refresh_all(svc, force=True))  # must NOT raise
     # Every category was still attempted despite "World" exploding ("For You" runs last by design).
     expected = [c for c in CATEGORIES if c != "For You"] + (["For You"] if "For You" in CATEGORIES else [])

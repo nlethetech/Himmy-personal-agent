@@ -1613,6 +1613,29 @@ def create_app() -> FastAPI:
         """A short 'catch me up' digest of today's top Nepal + World stories."""
         return await news.digest(title="Your news digest")
 
+    @app.get("/news/search")
+    async def news_search(q: str, k: int = 12) -> dict[str, Any]:
+        """Semantic search over the WHOLE embedded news corpus (Nepali + English) — the RAG layer."""
+        from himmy_app.news_index import get_news_index
+
+        hits = await asyncio.to_thread(get_news_index().search, q, k=max(1, min(int(k), 40)))
+        return {"ok": True, "query": q, "results": hits}
+
+    @app.get("/news/stories")
+    async def news_stories(cat: str = "Nepal", limit: int = 45) -> dict[str, Any]:
+        """Cross-lingual MERGED stories from the index (same-event Nepali+English reports, once)."""
+        from himmy_app.news_index import get_news_index
+
+        st = await asyncio.to_thread(get_news_index().stories, category=cat, lang="en",
+                                     limit=max(1, min(int(limit), 80)))
+        return {"ok": True, "category": cat, "stories": st}
+
+    @app.get("/news/index/stats")
+    async def news_index_stats() -> dict[str, Any]:
+        from himmy_app.news_index import get_news_index
+
+        return {"ok": True, **get_news_index().stats()}
+
     @app.get("/news/recommendations")
     async def news_recommendations(force: bool = False) -> dict[str, Any]:
         return await news.recommendations(force=force)

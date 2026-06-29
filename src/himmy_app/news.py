@@ -12,6 +12,7 @@ separate "Recommended papers" surface, not this news reader.)
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import html
 import json
@@ -85,6 +86,23 @@ SOURCES: dict[str, list[tuple[str, str]]] = {
         ("Rest of World", "https://restofworld.org/feed/latest/"),
     ],
 }
+#: NEPALI-LANGUAGE outlets (from the OSINT registry) — these feed the multilingual NEWS INDEX only,
+#: NOT the English display lists above. The index embeds them and MERGES same-event Nepali↔English
+#: reports cross-lingually (so a story covered by Setopati in Nepali and the Post in English is one).
+NEPAL_NE_SOURCES: list[tuple[str, str]] = [
+    ("OnlineKhabar", "https://www.onlinekhabar.com/feed"),
+    ("Setopati", "https://www.setopati.com/feed"),
+    ("Nagarik News", "https://nagariknews.nagariknetwork.com/feed"),
+    ("Annapurna Post", "https://annapurnapost.com/rss"),
+    ("Baahrakhari", "https://baahrakhari.com/feed"),
+    ("Lokaantar", "https://lokaantar.com/feed"),
+    ("Himal Press", "https://www.himalpress.com/feed/"),
+    ("Nepal Khabar", "https://nepalkhabar.com/feed"),
+    ("Desh Sanchar", "https://www.deshsanchar.com/feed"),
+    ("Thaha Khabar", "https://thahakhabar.com/feed"),
+    ("Image Khabar", "https://www.imagekhabar.com/feed"),
+    ("Bizmandu", "https://bizmandu.com/feed"),
+]
 #: "World" is the INTERNATIONAL section. Order matters: "For You" (the personalised, taste-ranked
 #: feed) always leads.
 CATEGORIES = ["For You", "Nepal", "World", "Business", "Technology"]
@@ -783,6 +801,8 @@ class NewsService:
             # typed interests, the taste profile still drives a real feed, so we serve it.
             if not items and not interests:
                 return {"ok": True, "category": category, "items": [], "needs_interests": True}
+        elif category == "Nepal":
+            items = await self._nepal_feed()
         else:
             items = await self._category(category)
         cache[category] = {
@@ -791,6 +811,23 @@ class NewsService:
         }
         self._cache.write_text(json.dumps(cache), encoding="utf-8")
         return {"ok": True, "category": category, "items": items, "fetched_at": cache[category]["iso"]}
+
+    async def _nepal_feed(self) -> list[dict[str, Any]]:
+        """The Nepal feed: prefer the multilingual index's cross-lingual MERGED stories once it's
+        warm (so Nepali + English reports of one event show once); fall back to live English RSS
+        until the index has been populated by a background refresh."""
+        try:
+            from himmy_app.news_index import get_news_index
+
+            idx = get_news_index()
+            st = await asyncio.to_thread(idx.stories, category="Nepal", lang="en", limit=60)
+            # English leads must be domestic (Nepali-script leads default through); keep it Nepal-only.
+            st = [s for s in st if s.get("lang") == "ne" or _is_domestic_nepal(s.get("title", ""))]
+            if len(st) >= 10:                       # warm enough to serve instead of the live feed
+                return st[:45]
+        except Exception:  # noqa: BLE001 - any index hiccup → the reliable live feed
+            pass
+        return await self._category("Nepal")
 
     def categories(self) -> list[str]:
         return CATEGORIES
@@ -970,11 +1007,48 @@ async def refresh_all(svc: NewsService, *, force: bool = True) -> None:
     # cache-aware feed(). Refreshing those categories first means their caches are warm (<1s old)
     # when "For You" runs, so the pool hits cache and re-fetches none of those RSS endpoints.
     ordered = [c for c in CATEGORIES if c != "For You"] + (["For You"] if "For You" in CATEGORIES else [])
+    items_by_cat: dict[str, list[dict[str, Any]]] = {}
     for cat in ordered:
         try:
-            await svc.feed(cat, force=force)
+            r = await svc.feed(cat, force=force)
+            items_by_cat[cat] = r.get("items") or []
         except Exception:  # noqa: BLE001 - one bad category must not stop the pass
             pass
+    # Embed the whole corpus into the multilingual news index (RAG + cross-lingual story merge).
+    with contextlib.suppress(Exception):
+        await ingest_corpus(svc, items_by_cat)
+
+
+async def ingest_corpus(svc: NewsService, items_by_cat: dict[str, list[dict[str, Any]]] | None = None) -> dict[str, Any]:
+    """Feed every fetched article into the multilingual NEWS INDEX (embedded → RAG-searchable, and
+    same-event Nepali↔English reports merged). Nepal pulls RAW from the English AND Nepali outlets so
+    cross-lingual clustering sees every report; the other sections reuse the items the refresh just
+    fetched (no re-fetch). Cheap in steady state (only NEW urls embed) and fully best-effort."""
+    from himmy_app.news_index import get_news_index
+
+    idx = get_news_index()
+    by_cat = items_by_cat or {}
+    total = 0
+    # Nepal: raw multilingual pool (EN display sources + NE sources) for cross-lingual merge.
+    nepal_feeds = list(SOURCES.get("Nepal", [])) + list(NEPAL_NE_SOURCES)
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True,
+                                     headers={"User-Agent": "Mozilla/5.0 (Himmy)"}) as c:
+            results = await asyncio.gather(*[svc._fetch_feed(c, n, u) for n, u in nepal_feeds],
+                                           return_exceptions=True)
+        nepal_items = [it for sub in results if isinstance(sub, list) for it in sub]
+        r = await idx.ingest(nepal_items, category="Nepal")
+        total += int(r.get("ingested", 0))
+    except Exception:  # noqa: BLE001
+        pass
+    # World / Business / Technology / For You: ingest the items already fetched this refresh.
+    for cat in ("World", "Business", "Technology", "For You"):
+        try:
+            res = await idx.ingest(by_cat.get(cat) or [], category=cat)
+            total += int(res.get("ingested", 0))
+        except Exception:  # noqa: BLE001
+            pass
+    return {"ok": True, "ingested": total}
 
 
 def _news_id() -> str:

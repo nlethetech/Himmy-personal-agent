@@ -319,6 +319,14 @@ def register(registry: ToolRegistry) -> list[str]:
     except Exception:  # noqa: BLE001 - best-effort; finance tools just won't be offered
         pass
 
+    # --- News RAG: semantic search over the whole embedded news corpus (Nepali + English) -----
+    try:
+        from himmy_app.connectors.news_rag import NewsRAGConnector
+
+        registered += NewsRAGConnector().register_tools(registry)
+    except Exception:  # noqa: BLE001 - best-effort; the search_news tool just won't be offered
+        pass
+
     # --- NRB forex: official Nepal Rastra Bank foreign-exchange rates vs NPR (keyless) --------
     try:
         from himmy_app.connectors.forex import ForexConnector
