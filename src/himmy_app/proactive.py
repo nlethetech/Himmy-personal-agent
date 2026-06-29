@@ -30,6 +30,7 @@ firing silently — proactivity NEVER acts silently on anything risky.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import email.utils
 import json
@@ -58,6 +59,9 @@ SPIKE_FACTOR = 1.6
 SPIKE_MIN_NPR = 1500.0
 #: Near-budget threshold: warn when Food spend this month reaches this fraction of the budget.
 BUDGET_NEAR_FRAC = 0.85
+#: How often the proactive brain scans Gmail for new spending (hours). Independent of the 45-min
+#: loop, so receipts get filed a few times a day, not every cycle.
+EMAIL_SCAN_EVERY_H = 6
 #: Quiet hours (local wall-clock, inclusive start / exclusive end) — no push interrupts.
 QUIET_START_H = 22
 QUIET_END_H = 7
@@ -753,6 +757,72 @@ async def _push(obs: dict[str, Any], cfg: HimmyConfig, level: str) -> bool:
 
 
 # ---------------------------------------------------------------------------------------
+# Proactive money: scan Gmail for new spending and file it (throttled), surfacing one observation
+# ---------------------------------------------------------------------------------------
+def _email_scan_path(cfg: HimmyConfig):
+    return cfg.data_dir / "finance_email_scan.json"
+
+
+def _email_scan_due(cfg: HimmyConfig) -> bool:
+    """True if it's been at least EMAIL_SCAN_EVERY_H since the last successful email spend scan."""
+    try:
+        d = json.loads(_email_scan_path(cfg).read_text(encoding="utf-8"))
+        last = datetime.datetime.fromisoformat(str(d["last"]).replace("Z", "+00:00"))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=datetime.timezone.utc)
+        return (_now_utc() - last) >= datetime.timedelta(hours=EMAIL_SCAN_EVERY_H)
+    except Exception:  # noqa: BLE001 - never scanned / unreadable → due
+        return True
+
+
+def _mark_email_scan(cfg: HimmyConfig) -> None:
+    with contextlib.suppress(Exception):
+        _email_scan_path(cfg).write_text(json.dumps({"last": _iso(_now_utc())}), encoding="utf-8")
+
+
+async def _email_spend_observations(cfg: HimmyConfig, level: str) -> list[dict[str, Any]]:
+    """Proactively read recent Gmail, file any new spending, and return ONE observation when
+    something was logged. Gated on the mail + finance permissions and throttled so it runs only a
+    few times a day. Best-effort — a failure adds nothing and never blocks the rest of the pass."""
+    if level == "off":
+        return []
+    if perms.level_of("mail", cfg) == "off" or perms.level_of("finance", cfg) == "off":
+        return []
+    if not _email_scan_due(cfg):
+        return []
+    try:
+        from himmy_app.email_money import scan_email_for_spending
+
+        res = await scan_email_for_spending(cfg, add=True)
+    except Exception:  # noqa: BLE001
+        return []
+    if not res.get("ok"):                                 # e.g. Gmail not connected → retry next loop
+        return []
+    _mark_email_scan(cfg)                                 # a real, connected scan → throttle for a while
+    exps = res.get("expenses") or []
+    n = len(exps)
+    if n <= 0:
+        return []
+    total = float(res.get("currency_total") or 0)
+    ccy = str(exps[0].get("currency") or "USD")
+    today = _today().isoformat()
+    hh = _local_now().strftime("%H")
+    s = "s" if n != 1 else ""
+    them = "them" if n != 1 else "it"
+    return [{
+        "key": f"email-spend-{today}-{hh}-{n}",
+        "kind": "budget",
+        "surface": "finance",
+        "title": f"Logged {n} purchase{s} from your email",
+        "detail": f"I found {n} new purchase{s} in your inbox totalling {ccy} {total:,.0f} "
+                  f"and added {them} to Money.",
+        "action_label": "Review",
+        "instruction": "Show me the purchases you just found in my email and added to my Money "
+                       "ledger — list them with their amounts and the total.",
+    }]
+
+
+# ---------------------------------------------------------------------------------------
 # notice() — the orchestrator: gather → rules + model → merge/dedupe/cap/store → push
 # ---------------------------------------------------------------------------------------
 async def notice(cfg: HimmyConfig | None = None, *, push: bool = True) -> dict[str, Any]:
@@ -780,6 +850,7 @@ async def notice(cfg: HimmyConfig | None = None, *, push: bool = True) -> dict[s
 
     candidates = _deterministic_observations(snap)
     candidates += await _connect_observations(cfg, snap)
+    candidates += await _email_spend_observations(cfg, level)   # proactively file + surface new spend
 
     created = 0
     pushed = 0

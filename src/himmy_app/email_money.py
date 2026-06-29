@@ -36,6 +36,15 @@ _NOISE_HINTS = (
 )
 #: Currency default for email-found spend (the user is currently in the US — see About-Me location).
 _DEFAULT_CCY = "USD"
+#: At most this many email BODIES are fetched per scan (for receipts whose amount isn't in the
+#: snippet) — bounds cost while still catching spend that only shows up in the full email.
+MAX_BODY_FETCH = 8
+#: A money-looking pattern: a currency mark before a number, or a bare decimal amount (12.34).
+_MONEY_RE = re.compile(r"(?:[$₹£€]|\b(?:rs|npr|usd|inr|eur|gbp)\b\.?)\s*\d|\d[\d,]*\.\d{2}\b", re.I)
+
+
+def _has_amount(text: str) -> bool:
+    return bool(_MONEY_RE.search(text or ""))
 
 
 def _seen_path(cfg: HimmyConfig):
@@ -94,8 +103,28 @@ def _candidates(messages: list[Any]) -> list[dict[str, str]]:
         if not _looks_like_spend(f"{subject}\n{snippet}"):
             continue
         out.append({"id": mid, "from": sender, "subject": subject,
-                    "snippet": snippet[:400], "date": date})
+                    "snippet": snippet[:400], "text": snippet[:400], "date": date})
     return out
+
+
+async def _enrich_with_bodies(cands: list[dict[str, str]], g: Any) -> int:
+    """For candidates whose subject+snippet has NO amount, fetch the email body (bounded) so the
+    model can read the total off the full receipt. Returns how many bodies were fetched."""
+    fetched = 0
+    for c in cands:
+        if fetched >= MAX_BODY_FETCH:
+            break
+        if _has_amount(f"{c['subject']}\n{c['snippet']}"):
+            continue                      # amount already visible — no need to open it
+        try:
+            m = await g.gmail_get(c["id"])
+            body = str(getattr(m, "body", "") or getattr(m, "snippet", "") or "")
+            if body:
+                c["text"] = body[:1500]
+                fetched += 1
+        except Exception:  # noqa: BLE001 - one unreadable message never blocks the rest
+            continue
+    return fetched
 
 
 def _parse_array(content: str) -> list[dict[str, Any]]:
@@ -140,12 +169,15 @@ async def scan_email_for_spending(
     cands = [c for c in _candidates(messages) if c["id"] not in seen]
     if not cands:
         return {"ok": True, "scanned": len(messages), "candidates": 0, "found": 0, "added": 0,
-                "expenses": [], "message": "No new spending emails in your recent inbox."}
+                "duplicates": 0, "expenses": [], "message": "No new spending emails in your recent inbox."}
+
+    # 2b) SMART: for receipts whose amount isn't in the snippet, open the body to read the total
+    await _enrich_with_bodies(cands, g)
 
     # 3) one cheap model pass turns the candidates into structured expenses
     listing = "\n".join(
         f"{i+1}. message_id={c['id']} | from {c['from']} | {c['date']} | "
-        f"SUBJECT: {c['subject']} | {c['snippet']}"
+        f"SUBJECT: {c['subject']} | {c['text']}"
         for i, c in enumerate(cands)
     )
     try:
@@ -167,7 +199,9 @@ async def scan_email_for_spending(
 
     by_id = {c["id"]: c for c in cands}
     store = ExpenseStore(cfg)
+    existing = store.list(limit=500)                          # for SMART dedup vs the current ledger
     expenses: list[dict[str, Any]] = []
+    duplicates = 0
     for r in rows:
         mid = str(r.get("message_id") or "").strip()
         if mid not in by_id:                                  # only the candidates we actually sent
@@ -185,8 +219,12 @@ async def scan_email_for_spending(
             "category": _clean_category(r.get("category")),
             "note": f"from email: {c.get('subject', '')}".strip()[:300],
         }
+        if _is_duplicate(draft, existing):                    # already in the ledger (e.g. logged by hand)
+            duplicates += 1
+            continue
         if add:
             saved = store.add(draft, source="email")
+            existing.append(saved)                            # so two identical receipts don't both file
             expenses.append(saved)
         else:
             expenses.append(draft)
@@ -196,15 +234,44 @@ async def scan_email_for_spending(
 
     total = round(sum(float(e["amount"]) for e in expenses), 2)
     ccy = expenses[0]["currency"] if expenses else _DEFAULT_CCY
+    dup_note = f" ({duplicates} already in your ledger, skipped)" if duplicates else ""
     if not expenses:
-        msg = f"Scanned {len(cands)} likely receipts — nothing I was confident enough to log."
+        msg = (f"Scanned {len(cands)} likely receipts — nothing new to log{dup_note}."
+               if duplicates else
+               f"Scanned {len(cands)} likely receipts — nothing I was confident enough to log.")
     else:
-        msg = (f"Found and logged {len(expenses)} expense(s) from your email "
-               f"totalling {ccy} {total:,.0f}." if add
-               else f"Found {len(expenses)} expense(s) in your email totalling {ccy} {total:,.0f}.")
+        verb = "logged" if add else "found"
+        msg = f"{verb.capitalize()} {len(expenses)} expense(s) from your email totalling {ccy} {total:,.0f}{dup_note}."
     return {"ok": True, "scanned": len(messages), "candidates": len(cands),
-            "found": len(expenses), "added": len(expenses) if add else 0,
+            "found": len(expenses), "added": len(expenses) if add else 0, "duplicates": duplicates,
             "currency_total": total, "expenses": expenses, "message": msg}
+
+
+def _is_duplicate(draft: dict[str, Any], existing: list[dict[str, Any]], *, day_window: int = 2) -> bool:
+    """True if the ledger already holds a matching expense — same merchant, same amount, within a
+    couple of days — so an email receipt never double-counts something already recorded by hand."""
+    import datetime as _dt
+
+    merch = str(draft.get("merchant") or "").strip().lower()
+    amt = round(float(draft.get("amount") or 0), 2)
+    try:
+        ddate = _dt.date.fromisoformat(str(draft.get("date"))[:10])
+    except Exception:  # noqa: BLE001
+        ddate = None
+    for e in existing:
+        if round(float(e.get("amount") or 0), 2) != amt:
+            continue
+        if str(e.get("merchant") or "").strip().lower() != merch:
+            continue
+        if ddate is not None:
+            try:
+                edate = _dt.date.fromisoformat(str(e.get("date"))[:10])
+                if abs((edate - ddate).days) > day_window:
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+        return True
+    return False
 
 
 __all__ = ["scan_email_for_spending"]

@@ -80,3 +80,67 @@ def test_preview_mode_does_not_save(mocked):
     assert r["found"] == 2 and r["added"] == 0
     from himmy_app.finance import ExpenseStore
     assert ExpenseStore(mocked).list(limit=10) == []     # nothing written in preview mode
+
+
+def test_skips_expense_already_in_ledger(mocked):
+    from himmy_app.finance import ExpenseStore
+    # log Uber $18.40 by hand first — the email scan must NOT double-count it
+    ExpenseStore(mocked).add({"merchant": "Uber", "amount": 18.40, "currency": "USD",
+                              "date": "2026-06-28", "category": "Transport"}, source="manual")
+    r = asyncio.run(em.scan_email_for_spending(mocked, lookback=20))
+    assert r["duplicates"] >= 1
+    merchants = [e["merchant"] for e in r["expenses"]]
+    assert "Uber" not in merchants and "Amazon" in merchants   # dup skipped, new one filed
+
+
+def test_reads_body_when_amount_missing_from_snippet(monkeypatch):
+    from himmy.api import studio_google as g
+
+    monkeypatch.setattr(g, "status", lambda: types.SimpleNamespace(connected=True))
+
+    async def fake_list(_n):
+        # snippet has NO amount → the scan must open the body to find the total
+        return [_msg(1, "orders@shop.com", "Your order confirmation", "Thanks for your order!", "2026-06-28")]
+    monkeypatch.setattr(g, "gmail_list", fake_list)
+
+    async def fake_get(mid):
+        return types.SimpleNamespace(id=mid, body="Order total: $25.00 — paid to Shop", snippet="")
+    monkeypatch.setattr(g, "gmail_get", fake_get)
+
+    import himmy.cli.provider as prov
+    captured = {}
+
+    class _Resp:
+        def __init__(self, t): self.output_text = t
+
+    class _Svc:
+        async def run(self, req):
+            captured["user"] = req.messages[-1].content
+            return _Resp('[{"message_id":"m1","merchant":"Shop","amount":25.0,"currency":"USD",'
+                         '"date":"2026-06-28","category":"Shopping","confidence":0.9}]')
+    monkeypatch.setattr(prov, "build_inference_for", lambda _p, _m: _Svc())
+
+    r = asyncio.run(em.scan_email_for_spending(load_config(), lookback=10))
+    assert r["found"] == 1 and r["expenses"][0]["amount"] == 25.0
+    assert "Order total: $25.00" in captured["user"]      # the body was fed to the model
+
+
+def test_proactive_scan_throttles_and_makes_one_observation(monkeypatch):
+    import himmy_app.email_money as em2
+    import himmy_app.proactive as p
+
+    monkeypatch.setattr(p.perms, "level_of", lambda _surface, _c=None: "always")
+    calls = {"n": 0}
+
+    async def fake_scan(_cfg, add=True):
+        calls["n"] += 1
+        return {"ok": True, "found": 2, "currency_total": 81.6,
+                "expenses": [{"currency": "USD", "amount": 18.4}, {"currency": "USD", "amount": 63.2}]}
+    monkeypatch.setattr(em2, "scan_email_for_spending", fake_scan)
+
+    cfg = load_config()
+    obs1 = asyncio.run(p._email_spend_observations(cfg, "always"))
+    assert len(obs1) == 1 and "2 purchases" in obs1[0]["title"] and obs1[0]["surface"] == "finance"
+    assert calls["n"] == 1
+    obs2 = asyncio.run(p._email_spend_observations(cfg, "always"))   # within throttle window
+    assert obs2 == [] and calls["n"] == 1                            # did NOT scan again
