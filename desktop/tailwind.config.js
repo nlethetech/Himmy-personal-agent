@@ -38,6 +38,9 @@ export default {
         mac: "0 1px 2px rgba(0,0,0,0.28), 0 10px 34px -16px rgba(0,0,0,0.55)",
         pop: "0 14px 48px -10px rgba(0,0,0,0.6), 0 0 0 0.5px rgba(255,255,255,0.06)",
         tab: "0 1px 2px rgba(0,0,0,0.25)",
+        // premium "glass card" — a hairline top highlight (lit from above) over a soft float
+        card: "inset 0 1px 0 0 rgba(255,255,255,0.06), 0 1px 2px rgba(0,0,0,0.30), 0 20px 48px -28px rgba(0,0,0,0.78)",
+        cardHover: "inset 0 1px 0 0 rgba(255,255,255,0.10), 0 2px 5px rgba(0,0,0,0.34), 0 28px 64px -28px rgba(0,0,0,0.82)",
       },
     },
   },

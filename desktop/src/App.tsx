@@ -2294,8 +2294,8 @@ function LiveClock() {
   const [hm, ap] = t.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).split(" ");
   return (
     <div className="relative hidden sm:flex items-baseline gap-1.5 tnum">
-      <span className="font-display text-[30px] font-semibold tracking-[-0.02em] text-mac-ink leading-none">{hm}</span>
-      {ap && <span className="text-[12.5px] font-semibold uppercase tracking-wide text-mac-ink3">{ap}</span>}
+      <span className="font-display text-[30px] font-semibold tracking-[-0.02em] leading-none bg-gradient-to-b from-white to-white/70 bg-clip-text text-transparent">{hm}</span>
+      {ap && <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-mac-ink3">{ap}</span>}
     </div>
   );
 }
@@ -2478,10 +2478,15 @@ function TodayBrief() {
   if (brief && !brief.text && !generating) return null;  // no brief and not generating → hide
 
   return (
-    <div className="relative mt-4 rounded-2xl border border-mac-stroke bg-gradient-to-b from-white/[0.045] to-white/[0.012] p-4">
-      <div className="flex items-center justify-between mb-2.5">
-        <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-mac-accentHi">
-          <Sparkles size={12} strokeWidth={2.2} /> Your brief
+    <div className="relative mt-4 rounded-2xl border border-white/[0.07] bg-gradient-to-b from-white/[0.05] to-white/[0.012] shadow-card p-4 overflow-hidden">
+      {/* a faint accent wash in the top-left, so the brief reads as Himmy's own surface */}
+      <div className="pointer-events-none absolute -top-20 -left-16 h-40 w-72 rounded-full bg-mac-accent/[0.07] blur-[64px]" />
+      <div className="relative flex items-center justify-between mb-2.5">
+        <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-mac-accentHi">
+          <span className="h-5 w-5 grid place-items-center rounded-[7px] bg-mac-accent/15 ring-1 ring-inset ring-mac-accent/20">
+            <Sparkles size={11} strokeWidth={2.4} />
+          </span>
+          Your brief
         </div>
         <button onClick={refresh} disabled={refreshing} title="Refresh brief"
           className="h-7 w-7 grid place-items-center rounded-[8px] text-mac-ink3 hover:text-mac-ink hover:bg-mac-fill transition-colors disabled:opacity-60">
@@ -2651,15 +2656,17 @@ function Today({ health }: { health: Health | null }) {
     <div className="h-full flex flex-col mx-auto w-full max-w-[1180px] px-9 pt-7 pb-6">
       {/* hero — glowing time-of-day orb · greeting · date · live clock + Himmy's brief */}
       <div className="relative shrink-0 mb-5">
-        <div className="pointer-events-none absolute -top-10 -left-8 h-32 w-64 rounded-full bg-mac-accent/10 blur-3xl" />
+        <div className="pointer-events-none absolute -top-16 -left-10 h-40 w-80 rounded-full bg-mac-accent/[0.12] blur-[80px]" />
+        <div className="pointer-events-none absolute -top-12 right-0 h-32 w-64 rounded-full bg-mac-accentHi/[0.06] blur-[80px]" />
         <div className="relative flex items-center justify-between gap-4">
           <div className="flex items-center gap-4">
-            <div className="relative h-12 w-12 shrink-0 rounded-full grid place-items-center bg-gradient-to-br from-mac-accentHi to-mac-accent shadow-[0_5px_18px_-3px_rgba(10,132,255,0.55)] ring-1 ring-inset ring-white/15">
-              <GreetIcon size={21} strokeWidth={2} className="text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.25)]" />
+            <div className="relative h-12 w-12 shrink-0 rounded-[15px] grid place-items-center bg-gradient-to-br from-mac-accentHi to-mac-accent shadow-[0_6px_20px_-4px_rgba(10,132,255,0.6)] ring-1 ring-inset ring-white/20">
+              <div className="pointer-events-none absolute inset-0 rounded-[15px] bg-gradient-to-b from-white/25 to-transparent opacity-60" />
+              <GreetIcon size={21} strokeWidth={2} className="relative text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.3)]" />
             </div>
             <div>
-              <h1 className="font-display text-[28px] font-semibold tracking-[-0.02em] leading-none">{part}</h1>
-              <p className="text-[13.5px] text-mac-ink2 mt-1.5">{dateStr}</p>
+              <h1 className="font-display text-[28px] font-semibold tracking-[-0.02em] leading-none bg-gradient-to-b from-white to-white/65 bg-clip-text text-transparent">{part}</h1>
+              <p className="text-[13px] text-mac-ink2 mt-1.5 font-medium tracking-[-0.005em]">{dateStr}</p>
             </div>
           </div>
           <LiveClock />
@@ -2789,8 +2796,8 @@ function AgendaRow({ item, onClick, onComplete }:
   const isEvent = item.kind === "event";
   return (
     <div
-      className="group flex items-center gap-2.5 rounded-[10px] border border-mac-stroke bg-mac-fillHi px-2.5 py-2 hover:border-mac-strokeHi transition-colors">
-      <span className="shrink-0 w-[58px] text-right text-[11px] tnum text-mac-ink3 leading-none">
+      className="group flex items-center gap-2.5 rounded-[11px] border border-white/[0.06] bg-gradient-to-b from-white/[0.06] to-white/[0.02] px-2.5 py-2 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04)] hover:border-white/[0.12] hover:from-white/[0.09] transition-all duration-200">
+      <span className="shrink-0 w-[58px] text-right text-[11px] tnum text-mac-ink3 leading-none font-medium">
         {item.timeLabel || "—"}
       </span>
       {/* a clean outline circle for tasks (checks on hover); a small accent dot for events */}
@@ -7654,21 +7661,21 @@ function Card({ icon: Ico, title, hint, action, onOpen, className = "", children
     className?: string; children: React.ReactNode }) {
   const head = (
     <>
-      <div className="h-6 w-6 shrink-0 rounded-[7px] grid place-items-center bg-mac-fillHi">
-        <Ico size={13} strokeWidth={2.25} className="text-mac-ink2" />
+      <div className="h-7 w-7 shrink-0 rounded-[9px] grid place-items-center bg-gradient-to-b from-white/[0.11] to-white/[0.035] ring-1 ring-inset ring-white/[0.07] shadow-[0_1px_2px_rgba(0,0,0,0.25)]">
+        <Ico size={13.5} strokeWidth={2.25} className="text-mac-ink2 group-hover:text-mac-ink transition-colors" />
       </div>
-      <span className="text-[13.5px] font-semibold text-mac-ink truncate">{title}</span>
-      {hint && <span className="text-[12px] text-mac-ink3 truncate">· {hint}</span>}
-      {onOpen && <ChevronRight size={14} strokeWidth={2} className="text-mac-ink3 shrink-0 group-hover:text-mac-ink transition-colors" />}
+      <span className="text-[13.5px] font-semibold text-mac-ink truncate tracking-[-0.01em]">{title}</span>
+      {hint && <span className="text-[11.5px] text-mac-ink3 truncate font-medium">· {hint}</span>}
+      {onOpen && <ChevronRight size={14} strokeWidth={2} className="text-mac-ink4 shrink-0 group-hover:text-mac-ink2 group-hover:translate-x-0.5 transition-all" />}
     </>
   );
   return (
-    <section className={`rounded-2xl bg-mac-fill border border-mac-stroke shadow-mac p-5 flex flex-col ${className}`}>
+    <section className={`rounded-2xl border border-white/[0.07] bg-gradient-to-b from-white/[0.055] to-white/[0.018] shadow-card p-5 flex flex-col transition-shadow duration-300 hover:shadow-cardHover ${className}`}>
       <div className="flex items-center justify-between mb-3.5">
         {onOpen
           ? <button onClick={onOpen} title={`Open ${title}`}
               className="group flex items-center gap-2.5 min-w-0 -ml-1 -my-1 pl-1 pr-2 py-1 rounded-lg hover:bg-mac-fillHi transition-colors">{head}</button>
-          : <div className="flex items-center gap-2.5 min-w-0">{head}</div>}
+          : <div className="group flex items-center gap-2.5 min-w-0">{head}</div>}
         {action && (
           <button onClick={action.onClick}
             className="shrink-0 text-[12.5px] text-mac-accentHi hover:underline">{action.label}</button>
