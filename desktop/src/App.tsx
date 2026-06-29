@@ -49,13 +49,12 @@ import ChatMarkdown from "./ChatMarkdown";
 /* ───────────────────────────────────────── model */
 // "planner" is the nav tab; "tasks"/"calendar" stay as sections so deep-links (e.g. a home
 // card) can open the Planner on the right sub-tab.
-type Section = "today" | "news" | "library" | "do" | "money" | "planner" | "tasks" | "calendar" | "mail" | "routines";
+type Section = "today" | "news" | "library" | "do" | "planner" | "tasks" | "calendar" | "mail" | "routines";
 const NAV: { id: Section; label: string; icon: LucideIcon }[] = [
   { id: "today", label: "Today", icon: Sun },
   { id: "news", label: "News", icon: Newspaper },
   { id: "library", label: "Library", icon: BookOpen },
   { id: "do", label: "Concierge", icon: ConciergeBell },
-  { id: "money", label: "Money", icon: Wallet },
   { id: "mail", label: "Mail", icon: Mail },
 ];
 
@@ -453,12 +452,12 @@ function Content({ section, health, onOpen }:
     case "library": return <Library onOpen={onOpen} />;
     case "news": return <News />;
     case "do": return <DoTab />;
-    case "money": return <MoneyTab />;
     case "planner": return <HomeTab health={health} initialView="plan" />;
     case "tasks": return <HomeTab health={health} initialView="plan" initialPlan="tasks" />;
     case "calendar": return <HomeTab health={health} initialView="plan" initialPlan="calendar" />;
     case "routines": return <Routines />;
     case "mail": return <MailTab />;
+    default: return <HomeTab health={health} />;
   }
 }
 
@@ -504,284 +503,6 @@ const SEARCH_MODES: { key: SearchKind; label: string; icon: LucideIcon }[] = [
 function doPriceNum(s?: string): number {
   const m = (s || "").replace(/,/g, "").match(/(\d+(\.\d+)?)/);
   return m ? parseFloat(m[1]) : 0;
-}
-
-/* ───────────────────────── Money — personal finance ─────────────────────────
-   Snap a bill → Himmy reads & files it; track spending by category; Excel in/out.
-   ──────────────────────────────────────────────────────────────────────────── */
-const FIN_CATS = ["Food", "Groceries", "Transport", "Shopping", "Bills", "Health",
-  "Entertainment", "Travel", "Education", "Other"];
-// macOS system colors — native, harmonious with the app's system-blue accent.
-const CAT_COLOR: Record<string, string> = {
-  Food: "#FF9F0A", Groceries: "#30D158", Transport: "#0A84FF", Shopping: "#FF375F",
-  Bills: "#FF453A", Health: "#40C8E0", Entertainment: "#BF5AF2", Travel: "#64D2FF",
-  Education: "#5E5CE6", Other: "#98989D",
-};
-const catColor = (c: string) => CAT_COLOR[c] || "#94a3b8";
-const fmtMoney = (n: number, cur = "NPR") => `${cur} ${Math.round(n).toLocaleString()}`;
-const todayISO = () => new Date().toISOString().slice(0, 10);
-
-type FinPeriod = "week" | "month" | "year" | "all";
-
-function MoneyTab() {
-  const [summary, setSummary] = useState<FinanceSummary | null>(null);
-  const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [period, setPeriod] = useState<FinPeriod>("month");
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [draft, setDraft] = useState<ExpenseDraft | null>(null);   // snap/add confirm
-  const [toast, setToast] = useState<string | null>(null);
-  const snapRef = useRef<HTMLInputElement>(null);
-  const importRef = useRef<HTMLInputElement>(null);
-
-  const load = async () => {
-    try {
-      const [s, l] = await Promise.all([api.finance.summary(period), api.finance.list()]);
-      setSummary(s); setExpenses(l.expenses || []);
-    } catch { /* backend warming */ } finally { setLoading(false); }
-  };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [period]);
-  const flash = (m: string) => { setToast(m); setTimeout(() => setToast(null), 2600); };
-
-  const onSnap = async (file: File) => {
-    setBusy("snap");
-    try {
-      const r = await api.finance.snap(file);
-      if (r.ok && r.expense) setDraft(r.expense);
-      else flash(r.message || "Couldn't read that bill.");
-    } catch { flash("Couldn't read that bill."); } finally { setBusy(null); }
-  };
-  const onImport = async (file: File) => {
-    setBusy("import");
-    try {
-      const r = await api.finance.importFile(file);
-      flash(r.ok ? `Imported ${r.imported} expenses.` : (r.message || "Import failed."));
-      if (r.ok) load();
-    } catch { flash("Import failed."); } finally { setBusy(null); }
-  };
-  const doExport = async () => {
-    setBusy("export");
-    try { const r = await api.finance.exportFile("xlsx"); flash(r.ok ? `Saved to ${r.path}` : (r.message || "Export failed.")); }
-    catch { flash("Export failed."); } finally { setBusy(null); }
-  };
-  const saveDraft = async (e: ExpenseDraft) => {
-    setBusy("save");
-    try { await api.finance.add(e); setDraft(null); load(); flash("Expense saved."); }
-    catch { flash("Couldn't save."); } finally { setBusy(null); }
-  };
-  const remove = async (id: string) => {
-    setExpenses((xs) => xs.filter((x) => x.id !== id));
-    try { await api.finance.remove(id); load(); } catch { load(); }
-  };
-
-  const cur = summary?.currency || "NPR";
-  const cats = summary?.by_category || [];
-  const total = summary?.total || 0;
-  const topCat = cats[0]?.category;
-  const pctOf = (v: number) => (total > 0 ? (v / total) * 100 : 0);
-  const periods: { id: FinPeriod; label: string }[] = [
-    { id: "week", label: "Week" }, { id: "month", label: "Month" },
-    { id: "year", label: "Year" }, { id: "all", label: "All" }];
-  const fmtDate = (iso: string) => {
-    const d = new Date(iso + "T00:00:00");
-    return isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  };
-
-  return (
-    <div className="h-full overflow-y-auto">
-      <input ref={snapRef} type="file" accept="image/*,.pdf" className="hidden"
-        onChange={(e) => { if (e.target.files?.[0]) onSnap(e.target.files[0]); e.target.value = ""; }} />
-      <input ref={importRef} type="file" accept=".csv,.xlsx,.xlsm" className="hidden"
-        onChange={(e) => { if (e.target.files?.[0]) onImport(e.target.files[0]); e.target.value = ""; }} />
-
-      <div className="mx-auto w-full max-w-[860px] px-8 pt-9 pb-16">
-        {/* header */}
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-[26px] font-semibold leading-tight tracking-[-0.02em] text-mac-ink">Money</h1>
-            <p className="text-[12.5px] text-mac-ink3 mt-1">Snap a bill and Himmy files it — your spending, in one place.</p>
-          </div>
-          <div className="shrink-0 flex items-center gap-1.5 pt-0.5">
-            <button onClick={() => importRef.current?.click()} disabled={busy === "import"}
-              className="h-8 px-2.5 rounded-[8px] text-[12px] font-medium inline-flex items-center gap-1.5 text-mac-ink2 hover:text-mac-ink hover:bg-mac-fill transition-colors disabled:opacity-60">
-              {busy === "import" ? <Loader2 size={13} className="animate-spin" /> : <FileUp size={13} />} Import
-            </button>
-            <button onClick={doExport} disabled={busy === "export" || !summary?.count}
-              className="h-8 px-2.5 rounded-[8px] text-[12px] font-medium inline-flex items-center gap-1.5 text-mac-ink2 hover:text-mac-ink hover:bg-mac-fill transition-colors disabled:opacity-40">
-              {busy === "export" ? <Loader2 size={13} className="animate-spin" /> : <FileDown size={13} />} Export
-            </button>
-          </div>
-        </div>
-
-        {/* primary actions */}
-        <div className="mt-6 flex items-center gap-2.5">
-          <button onClick={() => snapRef.current?.click()} disabled={busy === "snap"}
-            className="h-10 px-4 rounded-[11px] text-[13px] font-medium inline-flex items-center gap-2 text-white bg-mac-accent hover:bg-mac-accentHi active:brightness-95 transition-colors shadow-[0_1px_2px_rgba(0,0,0,0.3)] disabled:opacity-70">
-            {busy === "snap" ? <Loader2 size={15} className="animate-spin" /> : <Camera size={15} strokeWidth={2} />}
-            {busy === "snap" ? "Reading your bill…" : "Snap a bill"}
-          </button>
-          <button onClick={() => setDraft({ date: todayISO(), merchant: "", amount: 0, currency: "NPR", category: "Other", items: [], note: "" })}
-            className="h-10 px-3.5 rounded-[11px] text-[13px] font-medium inline-flex items-center gap-1.5 bg-mac-fill ring-1 ring-inset ring-mac-stroke text-mac-ink2 hover:text-mac-ink hover:bg-mac-fillHi transition-colors">
-            <Plus size={15} strokeWidth={2.25} /> Add expense
-          </button>
-        </div>
-
-        {/* summary card */}
-        <div className="mt-6 rounded-[18px] bg-mac-fill border border-mac-stroke shadow-mac p-5">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-[11px] uppercase tracking-[0.06em] font-medium text-mac-ink3">{summary?.label || "This month"}</div>
-              <div className="mt-1 flex items-baseline gap-1">
-                <span className="text-[15px] text-mac-ink2 font-medium">{cur}</span>
-                <span className="text-[34px] leading-none font-semibold tracking-[-0.03em] text-mac-ink tabular-nums">
-                  {summary ? Math.round(total).toLocaleString() : "—"}
-                </span>
-              </div>
-              <div className="text-[12px] text-mac-ink3 mt-1.5">
-                {summary?.count || 0} expense{summary?.count === 1 ? "" : "s"}{topCat ? <> · most on <span className="text-mac-ink2">{topCat}</span></> : null}
-              </div>
-            </div>
-            {/* native-style segmented control */}
-            <div className="flex items-center gap-0.5 rounded-[9px] bg-mac-fillHi ring-1 ring-inset ring-mac-stroke p-0.5">
-              {periods.map((p) => (
-                <button key={p.id} onClick={() => setPeriod(p.id)}
-                  className={`h-7 px-2.5 rounded-[7px] text-[11.5px] font-medium transition-all ${period === p.id ? "bg-[rgba(255,255,255,0.14)] text-mac-ink shadow-[0_1px_2px_rgba(0,0,0,0.25)]" : "text-mac-ink3 hover:text-mac-ink2"}`}>{p.label}</button>
-              ))}
-            </div>
-          </div>
-
-          {loading ? (
-            <div className="h-24 grid place-items-center text-mac-ink3"><Loader2 size={16} className="animate-spin" /></div>
-          ) : !cats.length ? (
-            <div className="py-8 text-center">
-              <div className="mx-auto h-11 w-11 rounded-2xl grid place-items-center bg-mac-fillHi"><PieChart size={20} className="text-mac-ink3" /></div>
-              <p className="text-[12.5px] text-mac-ink2 mt-3">Nothing tracked for this period yet.</p>
-              <p className="text-[11.5px] text-mac-ink3 mt-0.5">Snap a bill or add an expense to start.</p>
-            </div>
-          ) : (
-            <>
-              {/* stacked proportion bar */}
-              <div className="mt-5 flex gap-[3px] h-2.5">
-                {cats.map((c) => (
-                  <div key={c.category} className="rounded-[3px] first:rounded-l-full last:rounded-r-full transition-all"
-                    style={{ width: `${Math.max(2, pctOf(c.total))}%`, background: catColor(c.category) }} title={`${c.category} · ${Math.round(pctOf(c.total))}%`} />
-                ))}
-              </div>
-              {/* breakdown list — aligned %/amount columns, no ragged gap */}
-              <div className="mt-4">
-                {cats.map((c) => (
-                  <div key={c.category} className="flex items-center gap-3 py-2.5 border-t border-mac-stroke first:border-t-0">
-                    <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: catColor(c.category) }} />
-                    <span className="flex-1 text-[13px] text-mac-ink2 truncate">{c.category}</span>
-                    <span className="w-12 text-right text-[12px] text-mac-ink3 tabular-nums">{Math.round(pctOf(c.total))}%</span>
-                    <span className="w-28 text-right text-[13px] font-medium text-mac-ink tabular-nums">{fmtMoney(c.total, cur)}</span>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-
-        {/* recent expenses */}
-        <div className="mt-7">
-          <h2 className="text-[12px] uppercase tracking-[0.06em] font-semibold text-mac-ink3 mb-2.5 px-0.5">Recent</h2>
-          {expenses.length === 0 ? (
-            <div className="rounded-[18px] bg-mac-fill border border-mac-stroke shadow-mac py-10 text-center">
-              <p className="text-[12.5px] text-mac-ink3">No expenses logged yet.</p>
-            </div>
-          ) : (
-            <div className="rounded-[18px] bg-mac-fill border border-mac-stroke shadow-mac overflow-hidden">
-              {expenses.slice(0, 60).map((e) => (
-                <div key={e.id} className="group flex items-center gap-3 px-4 py-3 border-t border-mac-stroke first:border-t-0 hover:bg-mac-fillHi transition-colors">
-                  <span className="h-9 w-9 shrink-0 grid place-items-center rounded-[11px] ring-1 ring-inset ring-white/[0.06]"
-                    style={{ background: `${catColor(e.category)}1f`, color: catColor(e.category) }}>
-                    <Receipt size={15} strokeWidth={2} />
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-[13.5px] text-mac-ink truncate leading-tight">{e.merchant}</div>
-                    <div className="text-[11.5px] text-mac-ink3 mt-0.5 flex items-center gap-1.5">
-                      <span>{fmtDate(e.date)}</span>
-                      <span className="h-2.5 w-px bg-mac-strokeHi" />
-                      <span style={{ color: catColor(e.category) }}>{e.category}</span>
-                      {e.source === "snap" && <><span className="h-2.5 w-px bg-mac-strokeHi" /><span className="inline-flex items-center gap-0.5"><Camera size={9} /> snapped</span></>}
-                    </div>
-                  </div>
-                  <span className="shrink-0 text-[14px] font-semibold text-mac-ink tabular-nums tracking-[-0.01em]">{fmtMoney(e.amount, e.currency)}</span>
-                  <button onClick={() => remove(e.id)} title="Delete"
-                    className="shrink-0 -mr-1 opacity-0 group-hover:opacity-100 h-7 w-7 grid place-items-center rounded-[8px] text-mac-ink3 hover:text-mac-red hover:bg-mac-fill transition-all">
-                    <Trash2 size={13} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {draft && <ExpenseEditor draft={draft} busy={busy === "save"} onCancel={() => setDraft(null)} onSave={saveDraft} />}
-      {toast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-[12px] bg-[rgba(40,41,48,0.98)] border border-mac-strokeHi shadow-pop text-[12.5px] text-mac-ink">{toast}</div>
-      )}
-    </div>
-  );
-}
-
-// The snap-confirm / add-expense form — a small editable card over the extracted draft.
-function ExpenseEditor({ draft, busy, onCancel, onSave }: {
-  draft: ExpenseDraft; busy: boolean; onCancel: () => void; onSave: (e: ExpenseDraft) => void;
-}) {
-  const [e, setE] = useState<ExpenseDraft>(draft);
-  const set = (patch: Partial<ExpenseDraft>) => setE((x) => ({ ...x, ...patch }));
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/45 p-6" onMouseDown={onCancel}>
-      <div onMouseDown={(ev) => ev.stopPropagation()}
-        className="w-[420px] max-w-[calc(100%-2rem)] rounded-2xl bg-[rgba(30,31,37,0.98)] backdrop-blur-xl border border-mac-strokeHi shadow-pop p-5">
-        <div className="flex items-center gap-2 mb-3.5">
-          <Receipt size={15} className="text-mac-accentHi" />
-          <span className="text-[14px] font-semibold text-mac-ink">{draft.merchant ? "Confirm this expense" : "Add an expense"}</span>
-          {draft.items.length > 0 && <span className="ml-auto text-[10.5px] text-mac-ink3">Himmy read {draft.items.length} items</span>}
-        </div>
-        <div className="space-y-3">
-          <div className="flex gap-2.5">
-            <label className="flex-1">
-              <span className="block text-[10.5px] uppercase tracking-wide text-mac-ink3 mb-1">Amount (NPR)</span>
-              <input type="number" value={e.amount || ""} onChange={(ev) => set({ amount: parseFloat(ev.target.value) || 0 })}
-                className="w-full h-9 rounded-lg bg-mac-fill border border-mac-stroke px-2.5 text-[14px] text-mac-ink outline-none focus:border-mac-accent" />
-            </label>
-            <label className="w-32">
-              <span className="block text-[10.5px] uppercase tracking-wide text-mac-ink3 mb-1">Date</span>
-              <input type="date" value={e.date} onChange={(ev) => set({ date: ev.target.value })}
-                className="w-full h-9 rounded-lg bg-mac-fill border border-mac-stroke px-2 text-[12.5px] text-mac-ink outline-none focus:border-mac-accent" />
-            </label>
-          </div>
-          <label className="block">
-            <span className="block text-[10.5px] uppercase tracking-wide text-mac-ink3 mb-1">Merchant</span>
-            <input value={e.merchant} onChange={(ev) => set({ merchant: ev.target.value })} placeholder="Where?"
-              className="w-full h-9 rounded-lg bg-mac-fill border border-mac-stroke px-2.5 text-[13px] text-mac-ink outline-none focus:border-mac-accent placeholder:text-mac-ink3" />
-          </label>
-          <div>
-            <span className="block text-[10.5px] uppercase tracking-wide text-mac-ink3 mb-1.5">Category</span>
-            <div className="flex flex-wrap gap-1.5">
-              {FIN_CATS.map((c) => (
-                <button key={c} onClick={() => set({ category: c })}
-                  className={`h-7 px-2.5 rounded-full text-[11.5px] ring-1 ring-inset transition-colors ${e.category === c ? "text-mac-ink" : "text-mac-ink3 hover:text-mac-ink2"}`}
-                  style={e.category === c ? { background: `${catColor(c)}26`, borderColor: `${catColor(c)}66` } : { background: "rgba(255,255,255,0.04)", borderColor: "rgba(255,255,255,0.1)" }}>
-                  {c}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-        <div className="flex items-center gap-2 mt-5">
-          <button onClick={() => onSave(e)} disabled={busy || !e.amount}
-            className="h-9 flex-1 rounded-[10px] text-[13px] font-semibold text-white bg-mac-accent hover:bg-mac-accentHi transition-colors inline-flex items-center justify-center gap-1.5 disabled:opacity-50">
-            {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} Save expense
-          </button>
-          <button onClick={onCancel} className="h-9 px-4 rounded-[10px] text-[12.5px] text-mac-ink2 bg-white/[0.05] ring-1 ring-inset ring-white/10 hover:text-mac-ink transition-colors">Cancel</button>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 function DoTab() {

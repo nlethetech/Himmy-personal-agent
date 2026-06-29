@@ -61,6 +61,14 @@ class FinanceConnector:
         async def expense_summary(args: dict[str, Any]) -> dict[str, Any]:
             return ExpenseStore(cfg).summary(str(args.get("period") or "month"))
 
+        async def scan_email_spending(args: dict[str, Any]) -> dict[str, Any]:
+            from himmy_app.email_money import scan_email_for_spending
+
+            return await scan_email_for_spending(
+                cfg, lookback=int(args.get("lookback") or 40),
+                add=bool(args.get("add", True)),
+            )
+
         names: list[str] = []
         cats = ", ".join(CATEGORIES)
         n = safe_register_local_tool(
@@ -107,6 +115,22 @@ class FinanceConnector:
             args_json_schema={"type": "object", "properties": {
                 "period": {"type": "string"}, "category": {"type": "string"},
                 "limit": {"type": "integer"}}},
+        )
+        if n:
+            names.append(n)
+        n = safe_register_local_tool(
+            registry, name="scan_email_spending", read_only=False, handler=scan_email_spending,
+            description=(
+                "Scan the user's recent Gmail for real SPENDING (receipts, order/payment "
+                "confirmations, charges, bills, subscriptions) and LOG each one to their finance "
+                "ledger. Use when they ask you to 'find my spending from email', 'check my email for "
+                "purchases', 'update my expenses from my inbox', or to keep their ledger current. It "
+                "skips promos, OTPs, shipping pings and refunds, and never logs the same email twice. "
+                "Optional `lookback` (how many recent emails to read, default 40) and `add` (set "
+                "false to preview without saving). Report how many it found and the total."
+            ),
+            args_json_schema={"type": "object", "properties": {
+                "lookback": {"type": "integer"}, "add": {"type": "boolean"}}},
         )
         if n:
             names.append(n)

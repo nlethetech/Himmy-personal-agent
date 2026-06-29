@@ -134,6 +134,15 @@ class ExpenseStore:
             c.execute("DELETE FROM expenses WHERE id = ?", (exp_id,))
         return {"ok": True}
 
+    def clear(self, *, source: str | None = None) -> int:
+        """Delete all expenses (or only those from one ``source``). Returns how many were removed."""
+        with self._conn() as c:
+            if source:
+                cur = c.execute("DELETE FROM expenses WHERE source = ?", (source,))
+            else:
+                cur = c.execute("DELETE FROM expenses")
+            return int(cur.rowcount or 0)
+
     # ---- reads --------------------------------------------------------------------------
     def _row(self, r: Any) -> dict[str, Any]:
         d = dict(r)
