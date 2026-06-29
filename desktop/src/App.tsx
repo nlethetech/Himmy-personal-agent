@@ -7150,13 +7150,16 @@ function newsHue(s: string): number {
   return h;
 }
 
-// The image strip for a card that HAS an image. A neutral glass fallback shows only while the
-// image loads / if it fails — never a big saturated colour block. (Image-less cards skip this
-// entirely and render a clean text-led layout instead.)
-function CardImage({ image }: { source?: string; image?: string }) {
+function CardImage({ source, image, hue }: { source: string; image?: string; hue: number }) {
   return (
-    <div className="relative aspect-[16/9] overflow-hidden shrink-0 grid place-items-center bg-gradient-to-br from-white/[0.07] to-white/[0.02]">
-      <Newspaper size={18} className="text-mac-ink4" />
+    <div className="relative aspect-[16/9] overflow-hidden shrink-0">
+      <div className="absolute inset-0 grid place-items-center"
+        style={{ background: `linear-gradient(135deg, hsl(${hue} 30% 22%), hsl(${hue} 28% 13%))` }}>
+        <div className="flex flex-col items-center gap-1.5">
+          <Newspaper size={20} className="text-white/70" />
+          <span className="text-[12px] font-medium text-white/80">{source || "News"}</span>
+        </div>
+      </div>
       {image && (
         <img src={image} loading="lazy" onError={(e) => { e.currentTarget.style.display = "none"; }}
           className="absolute inset-0 w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300" />
@@ -7171,47 +7174,36 @@ function NewsCard({ a, saved, onOpen, onToggleSave, isForYou = false, isNew = fa
 }) {
   const hue = newsHue(a.source || "News");
   const reason = isForYou ? (a.reason || "").trim() : "";
-  const hasImage = !!a.image;
   return (
-    <article onClick={onOpen}
-      className="group relative flex flex-col h-full rounded-2xl overflow-hidden border border-white/[0.07] bg-gradient-to-b from-white/[0.05] to-white/[0.015] shadow-card hover:shadow-cardHover hover:border-white/[0.12] transition-all duration-200 cursor-pointer">
-      {hasImage && <CardImage image={a.image} />}
-      {/* image-less cards get a faint source-tinted corner glow instead of a saturated block */}
-      {!hasImage && (
-        <div className="pointer-events-none absolute -top-10 -right-10 h-36 w-36 rounded-full blur-[64px] opacity-25"
-          style={{ background: `hsl(${hue} 55% 50%)` }} />
-      )}
+    <div onClick={onOpen}
+      className="group relative flex flex-col h-full rounded-xl overflow-hidden bg-mac-fill border border-mac-stroke hover:border-mac-strokeHi hover:shadow-mac transition-all cursor-pointer">
+      <CardImage source={a.source} image={a.image} hue={hue} />
       {isNew && (
-        <span className="absolute top-2.5 left-2.5 z-10 inline-flex items-center gap-1 rounded-full bg-mac-accent/90 backdrop-blur-md px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
+        <span className="absolute top-2 left-2 inline-flex items-center gap-1 rounded-full bg-mac-accent/90 backdrop-blur-md px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
           <Sparkle size={9} strokeWidth={2.4} /> New
         </span>
       )}
       <button onClick={(e) => { e.stopPropagation(); onToggleSave(); }}
         title={saved ? "Saved — remove from reading list" : "Save to read later"}
-        className={`absolute top-2.5 right-2.5 z-10 h-7 w-7 grid place-items-center rounded-lg backdrop-blur-md border transition-all ${
+        className={`absolute top-2 right-2 h-7 w-7 grid place-items-center rounded-lg backdrop-blur-md border transition-all ${
           saved && saved !== "pending"
             ? "bg-mac-accent/90 border-transparent text-white"
-            : hasImage
-              ? "bg-black/40 border-white/15 text-white/90 hover:bg-black/65 opacity-0 group-hover:opacity-100"
-              : "bg-mac-fillHi border-mac-stroke text-mac-ink3 hover:text-mac-ink opacity-0 group-hover:opacity-100"}`}>
+            : "bg-black/40 border-white/15 text-white/90 hover:bg-black/65 opacity-0 group-hover:opacity-100"}`}>
         {saved === "pending" ? <Loader2 size={13} className="animate-spin" /> : saved ? <BookmarkCheck size={14} /> : <Bookmark size={14} />}
       </button>
-      <div className={`relative p-4 flex-1 flex flex-col ${hasImage ? "" : "justify-center"}`}>
-        <div className="flex items-center gap-1.5 text-[11px] mb-2">
-          <span className="inline-flex items-center gap-1.5 font-medium" style={{ color: `hsl(${hue} 52% 72%)` }}>
-            <span className="h-1.5 w-1.5 rounded-full shrink-0" style={{ background: `hsl(${hue} 55% 60%)` }} />
-            {a.source || "News"}
-          </span>
+      <div className="p-3.5 flex-1 flex flex-col">
+        <div className="flex items-center gap-1.5 text-[11px] mb-1.5">
+          <span className="font-medium" style={{ color: `hsl(${hue} 68% 68%)` }}>{a.source || "News"}</span>
           {a.ago && <span className="text-mac-ink3">· {a.ago}</span>}
           {(a.report_count ?? 0) > 1 && (
             <span title={`Also reported by ${(a.reports || []).map((r) => r.source).filter((s) => s !== a.source).join(", ")}`}
               className="ml-auto inline-flex items-center gap-1 rounded-full bg-mac-accent/12 text-mac-accentHi px-1.5 py-[1px] text-[10px] font-medium shrink-0">
-              <Newspaper size={9} strokeWidth={2.2} /> {a.report_count}
+              <Newspaper size={9} strokeWidth={2.2} /> {a.report_count} outlets
             </span>
           )}
         </div>
-        <h3 className={`text-mac-ink font-semibold leading-snug tracking-[-0.01em] ${hasImage ? "text-[14px] line-clamp-2" : "text-[16.5px] line-clamp-3"}`}>{a.title}</h3>
-        {a.snippet && <p className={`text-mac-ink2 mt-2 leading-relaxed ${hasImage ? "text-[12.5px] line-clamp-2" : "text-[13px] line-clamp-3"}`}>{a.snippet}</p>}
+        <div className="text-[14px] text-mac-ink font-medium leading-snug line-clamp-2">{a.title}</div>
+        {a.snippet && <div className="text-[12.5px] text-mac-ink2 mt-1.5 leading-snug line-clamp-2">{a.snippet}</div>}
         {reason && (
           <div className="mt-auto pt-2.5 flex items-center gap-1.5 text-[11px] text-mac-accentHi">
             <Sparkles size={11} strokeWidth={2} className="shrink-0" />
@@ -7219,39 +7211,29 @@ function NewsCard({ a, saved, onOpen, onToggleSave, isForYou = false, isNew = fa
           </div>
         )}
       </div>
-    </article>
+    </div>
   );
 }
 
 function SavedCard({ a, onOpen, onRemove }: { a: SavedArticle; onOpen: () => void; onRemove: () => void }) {
   const hue = newsHue(a.source || "News");
-  const hasImage = !!a.image;
   return (
-    <article onClick={onOpen}
-      className="group relative flex flex-col h-full rounded-2xl overflow-hidden border border-white/[0.07] bg-gradient-to-b from-white/[0.05] to-white/[0.015] shadow-card hover:shadow-cardHover hover:border-white/[0.12] transition-all duration-200 cursor-pointer">
-      {hasImage && <CardImage image={a.image} />}
-      {!hasImage && (
-        <div className="pointer-events-none absolute -top-10 -right-10 h-36 w-36 rounded-full blur-[64px] opacity-25"
-          style={{ background: `hsl(${hue} 55% 50%)` }} />
-      )}
+    <div onClick={onOpen}
+      className="group relative flex flex-col h-full rounded-xl overflow-hidden bg-mac-fill border border-mac-stroke hover:border-mac-strokeHi hover:shadow-mac transition-all cursor-pointer">
+      <CardImage source={a.source} image={a.image} hue={hue} />
       <button onClick={(e) => { e.stopPropagation(); onRemove(); }} title="Remove from saved"
-        className={`absolute top-2.5 right-2.5 z-10 h-7 w-7 grid place-items-center rounded-lg backdrop-blur-md border transition-all opacity-0 group-hover:opacity-100 ${
-          hasImage ? "bg-black/40 border-white/15 text-white/90 hover:bg-mac-red hover:border-transparent"
-                   : "bg-mac-fillHi border-mac-stroke text-mac-ink3 hover:text-mac-red"}`}>
+        className="absolute top-2 right-2 h-7 w-7 grid place-items-center rounded-lg bg-black/40 border border-white/15 text-white/90 hover:bg-mac-red hover:border-transparent backdrop-blur-md opacity-0 group-hover:opacity-100 transition-all">
         <Trash2 size={13} />
       </button>
-      <div className={`relative p-4 flex-1 flex flex-col ${hasImage ? "" : "justify-center"}`}>
-        <div className="flex items-center gap-1.5 text-[11px] mb-2">
-          <span className="inline-flex items-center gap-1.5 font-medium" style={{ color: `hsl(${hue} 52% 72%)` }}>
-            <span className="h-1.5 w-1.5 rounded-full shrink-0" style={{ background: `hsl(${hue} 55% 60%)` }} />
-            {a.source || "News"}
-          </span>
+      <div className="p-3.5 flex-1 flex flex-col">
+        <div className="flex items-center gap-1.5 text-[11px] mb-1.5">
+          <span className="font-medium" style={{ color: `hsl(${hue} 68% 68%)` }}>{a.source || "News"}</span>
           <span className="text-mac-ink3 inline-flex items-center gap-1">· <Folder size={9} /> {a.folder}</span>
         </div>
-        <h3 className={`text-mac-ink font-semibold leading-snug tracking-[-0.01em] ${hasImage ? "text-[14px] line-clamp-2" : "text-[16.5px] line-clamp-3"}`}>{a.title}</h3>
-        {a.snippet && <p className={`text-mac-ink2 mt-2 leading-relaxed ${hasImage ? "text-[12.5px] line-clamp-3" : "text-[13px] line-clamp-3"}`}>{a.snippet}</p>}
+        <div className="text-[14px] text-mac-ink font-medium leading-snug line-clamp-2">{a.title}</div>
+        {a.snippet && <div className="text-[12.5px] text-mac-ink2 mt-1.5 leading-snug line-clamp-3">{a.snippet}</div>}
       </div>
-    </article>
+    </div>
   );
 }
 
