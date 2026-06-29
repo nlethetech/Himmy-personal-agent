@@ -7,7 +7,7 @@ import {
   Bookmark, BookmarkCheck, ArrowLeft, FolderPlus, Globe, Circle, CheckCircle2,
   MessageSquare, SquarePen, PanelLeft, PanelRight, Telescope, ListChecks, BookText, Link2,
   Inbox, MapPin, KeyRound, ShieldCheck, Minus, ChevronLeft, ChevronRight, Repeat,
-  Gauge, Coins, Zap, CalendarClock, Bell, Play, Flag,
+  Coins, Zap, CalendarClock, Bell, Play, Flag,
   Star, BellOff, Users, TrendingUp, TrendingDown, Wind, Cpu, Sparkle,
   Info, StickyNote, Highlighter, Eye, EyeOff, BrainCircuit, Cpu as CpuIcon, ServerCog,
   ShoppingBag, Plane, Bus, UtensilsCrossed, ThumbsDown, ShoppingCart, Heart, ArrowRight, ConciergeBell,
@@ -2550,9 +2550,6 @@ function Today({ health }: { health: Health | null }) {
   const { status: google, connect } = useGoogle();
   const googleConnected = !!google?.connected;
 
-  // Token + cost usage, polled live so the meter ticks while you work.
-  const [usage, setUsage] = useState<Usage | null>(null);
-
   const [events, setEvents] = useState<CalendarEvent[] | null>(null);   // today's events (for the agenda)
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [taskCount, setTaskCount] = useState<{ open: number; total: number }>({ open: 0, total: 0 });
@@ -2590,13 +2587,10 @@ function Today({ health }: { health: Health | null }) {
     try { const r = await api.library.list(); setPapers(dedupeByTitle(r.items).slice(0, 3)); } catch { setPapers([]); }
     try { setReadStats(await api.reading.stats()); } catch { /* backend warming */ }
   };
-  const loadUsage = async () => { try { setUsage(await api.usage()); } catch { /* backend warming */ } };
-
   useEffect(() => {
-    loadTasks(); loadReading(); loadUsage(); loadPlan();
+    loadTasks(); loadReading(); loadPlan();
     const t = setInterval(loadTasks, 5000);
-    const u = setInterval(loadUsage, 15000);
-    return () => { clearInterval(t); clearInterval(u); };
+    return () => { clearInterval(t); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useRefreshSignal("tasks", loadTasks);
@@ -2653,7 +2647,7 @@ function Today({ health }: { health: Health | null }) {
   };
 
   return (
-    // One screen, no page scroll: hero (fixed) · three cards fill the height · slim usage strip.
+    // One screen, no page scroll: hero (fixed) · three cards fill the height. (Usage moved to Settings.)
     <div className="h-full flex flex-col mx-auto w-full max-w-[1180px] px-9 pt-7 pb-6">
       {/* hero — glowing time-of-day orb · greeting · date · live clock + Himmy's brief */}
       <div className="relative shrink-0 mb-5">
@@ -2784,8 +2778,6 @@ function Today({ health }: { health: Health | null }) {
         </Card>
       </div>
 
-      {/* Usage — what Himmy has cost (live), read from himmy's metrics registry */}
-      <div className="shrink-0 mt-4"><UsageCard usage={usage} /></div>
     </div>
   );
 }
@@ -2877,27 +2869,6 @@ function UsageStat({ label, totals, primary }: { label: string; totals: UsageTot
         <span className="tnum">{fmtTokens(totals.tokens_out)}</span> out
       </div>
     </div>
-  );
-}
-
-function UsageCard({ usage }: { usage: Usage | null }) {
-  return (
-    <Card className="col-span-12" icon={Gauge} title="Usage" hint={usage?.model || undefined}>
-      {!usage ? (
-        <div className="h-full min-h-[72px] grid place-items-center"><Loader2 size={16} className="animate-spin text-mac-ink3" /></div>
-      ) : (
-        <div>
-          <div className="flex flex-wrap items-end gap-x-12 gap-y-4">
-            <UsageStat label="This session" totals={usage.session} primary />
-            <UsageStat label="All time" totals={usage.lifetime} />
-          </div>
-          <p className="flex items-center gap-1.5 text-[11px] text-mac-ink3 mt-4">
-            <Coins size={11} strokeWidth={2} className="text-mac-ink4" />
-            Estimated from token counts at current model prices — session resets on restart, all-time is kept on this Mac.
-          </p>
-        </div>
-      )}
-    </Card>
   );
 }
 
@@ -4282,8 +4253,16 @@ function PreferencesSection({ dir, onReveal }: { dir: string; onReveal: () => vo
   const [providers, setProviders] = useState<ModelProvider[] | null>(null);
   const [current, setCurrent] = useState<{ provider: string; model: string | null } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [usage, setUsage] = useState<Usage | null>(null);
   const load = () => api.models.list().then((r) => { setProviders(r.providers); setCurrent(r.current); }).catch(() => {});
   useEffect(() => { load(); }, []);
+  // Live usage/cost — polled while the panel is open so the meter ticks if Himmy is working.
+  useEffect(() => {
+    const tick = () => api.usage().then(setUsage).catch(() => {});
+    tick();
+    const t = setInterval(tick, 15000);
+    return () => clearInterval(t);
+  }, []);
 
   const pick = async (provider: string, model: string, baseUrl?: string | null) => {
     setBusy(`${provider}:${model}`);
@@ -4358,10 +4337,32 @@ function PreferencesSection({ dir, onReveal }: { dir: string; onReveal: () => vo
         )}
 
         <p className="text-[11px] text-mac-ink3 leading-relaxed mt-3">
-          Cost is tracked live in Today → Usage, so the meter always matches what's running. Local & on-device models
+          Cost is tracked live under Usage below, so the meter always matches what's running. Local & on-device models
           are free; API models are billed per token. Himmy's tools (mail, tasks, search) work best with a tool-calling
           model — OpenRouter or the Claude API.
         </p>
+      </div>
+
+      <div className="h-px bg-mac-stroke" />
+      <div>
+        <div className="flex items-center justify-between mb-2.5">
+          <span className="text-[11px] uppercase tracking-[0.06em] font-semibold text-mac-ink3">Usage</span>
+          {usage?.model && <span className="text-[11px] font-mono text-mac-ink3 truncate max-w-[16rem]">{usage.model}</span>}
+        </div>
+        {!usage ? (
+          <div className="h-20 grid place-items-center rounded-xl border border-mac-stroke"><Loader2 size={15} className="animate-spin text-mac-ink3" /></div>
+        ) : (
+          <div className="rounded-xl border border-mac-stroke p-4">
+            <div className="flex flex-wrap items-end gap-x-12 gap-y-4">
+              <UsageStat label="This session" totals={usage.session} primary />
+              <UsageStat label="All time" totals={usage.lifetime} />
+            </div>
+            <p className="flex items-center gap-1.5 text-[11px] text-mac-ink3 mt-4">
+              <Coins size={11} strokeWidth={2} className="text-mac-ink4" />
+              Estimated from token counts at current model prices — session resets on restart, all-time is kept on this Mac.
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="h-px bg-mac-stroke" />
