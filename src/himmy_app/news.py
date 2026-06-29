@@ -813,20 +813,23 @@ class NewsService:
         return {"ok": True, "category": category, "items": items, "fetched_at": cache[category]["iso"]}
 
     async def _nepal_feed(self) -> list[dict[str, Any]]:
-        """The Nepal feed: prefer the multilingual index's cross-lingual MERGED stories once it's
-        warm (so Nepali + English reports of one event show once); fall back to live English RSS
-        until the index has been populated by a background refresh."""
-        try:
-            from himmy_app.news_index import get_news_index
+        """The Nepal feed. By default the clean, English, within-outlet-merged live feed.
 
-            idx = get_news_index()
-            st = await asyncio.to_thread(idx.stories, category="Nepal", lang="en", limit=60)
-            # English leads must be domestic (Nepali-script leads default through); keep it Nepal-only.
-            st = [s for s in st if s.get("lang") == "ne" or _is_domestic_nepal(s.get("title", ""))]
-            if len(st) >= 10:                       # warm enough to serve instead of the live feed
-                return st[:45]
-        except Exception:  # noqa: BLE001 - any index hiccup → the reliable live feed
-            pass
+        The multilingual index's cross-lingual MERGED stories are served ONLY when
+        ``HIMMY_NEWS_INDEX_FEED=1`` — that path still needs clustering-threshold + language-balance
+        tuning (Nepali embeddings over-cluster at the current bar, and NE outlets flood the feed), so
+        it's behind a flag until tuned. The index itself stays live for RAG (search_news) regardless."""
+        if os.environ.get("HIMMY_NEWS_INDEX_FEED") == "1":
+            try:
+                from himmy_app.news_index import get_news_index
+
+                idx = get_news_index()
+                st = await asyncio.to_thread(idx.stories, category="Nepal", lang="en", limit=60)
+                st = [s for s in st if s.get("lang") == "ne" or _is_domestic_nepal(s.get("title", ""))]
+                if len(st) >= 10:
+                    return st[:45]
+            except Exception:  # noqa: BLE001
+                pass
         return await self._category("Nepal")
 
     def categories(self) -> list[str]:
