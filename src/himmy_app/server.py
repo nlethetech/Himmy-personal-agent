@@ -1704,6 +1704,13 @@ def create_app() -> FastAPI:
 
         return DayPlan(cfg).toggle_done(body.id, body.done)
 
+    @app.get("/today/history")
+    async def today_history(days: int = 14) -> dict[str, Any]:
+        """The kept record of recent days — each day's scheduled items + what was done vs missed."""
+        from himmy_app.dayplan import DayPlan
+
+        return {"ok": True, "days": DayPlan(cfg).history(days)}
+
     # ---- "Do" hub: a smart Nepal concierge over flights / food / shopping ----------------
     from himmy_app.do_concierge import DoCart, DoConcierge
 

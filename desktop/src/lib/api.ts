@@ -546,9 +546,18 @@ export type DayPlanItem = {
   id: string;
   title: string;
   done: boolean;
+  overdue?: boolean;    // event: its time has passed and it wasn't ticked
   time?: string;        // event: local HH:MM
   due?: string | null;  // task
   reason?: string;      // task: short "why" (overdue / due today / …)
+};
+
+// One day in the kept record: what was scheduled, and how much got done vs missed.
+export type DayRecord = {
+  date: string;
+  done: number;
+  missed: number;
+  items: { id: string; title: string; time: string; done: boolean; missed: boolean }[];
 };
 
 // In-app AI provider setup — lets a non-coder pick a provider, paste their key, and confirm it
@@ -1037,11 +1046,14 @@ export const api = {
       `/brief${force ? "?force=true" : ""}`),
   // Today's plan — today's calendar + the prioritised tasks, as one checklist.
   todayPlan: (force = false) =>
-    jget<{ ok: boolean; date: string; note: string; items: DayPlanItem[]; total: number; events: number; open_tasks: number }>(
+    jget<{ ok: boolean; date: string; note: string; items: DayPlanItem[]; total: number; events: number; open_tasks: number; overdue: number }>(
       `/today/plan${force ? "?force=true" : ""}`),
   // Tick / un-tick a calendar item in the plan for today (tasks complete via api.tasks.complete).
   todayPlanDone: (id: string, done: boolean) =>
     jpost<{ ok: boolean }>("/today/plan/done", { id, done }),
+  // The kept record — recent days of scheduled items + what was done vs missed.
+  todayHistory: (days = 14) =>
+    jget<{ ok: boolean; days: DayRecord[] }>(`/today/history?days=${days}`),
   tasks: {
     list: () => jget<{ ok: boolean; tasks: Task[]; open: number; total: number }>("/tasks"),
     add: (title: string, opts?: { due?: string | null; priority?: number }) =>

@@ -2676,21 +2676,37 @@ function to12h(hm?: string): string {
   return `${h % 12 || 12}:${String(m || 0).padStart(2, "0")} ${h >= 12 ? "PM" : "AM"}`;
 }
 
+// True once a timed item's wall-clock has passed today — drives the live "overdue" flag, so a
+// scheduled item flips to overdue the moment its time goes by (no refetch needed).
+function isPastTime(hm?: string): boolean {
+  if (!hm) return false;
+  const [h, m] = hm.split(":").map(Number);
+  if (isNaN(h)) return false;
+  const now = new Date();
+  return now.getHours() * 60 + now.getMinutes() > h * 60 + (m || 0);
+}
+
 // A today's-calendar item rendered as a checkable to-do row inside the "To do" card — same shape as
 // HomeTaskRow, with the event's time on the right. Ticking marks it done for today (resets daily).
 function PlanEventRow({ item, done, last, onToggle }:
   { item: DayPlanItem; done: boolean; last?: boolean; onToggle: () => void }) {
+  const overdue = !done && isPastTime(item.time);   // past its time and not ticked → missed
   return (
     <div className={`group flex items-center gap-2.5 py-2.5 px-1 ${last ? "" : "border-b border-mac-stroke"}`}>
       <button onClick={onToggle} title={done ? "Done today — tap to undo" : "Mark done for today"}
         className="shrink-0 grid place-items-center transition-colors">
         {done
           ? <CheckCircle2 size={16} strokeWidth={1.75} className="text-mac-green" />
-          : <Circle size={16} strokeWidth={1.75} className="text-mac-ink3 group-hover:text-mac-accentHi" />}
+          : <Circle size={16} strokeWidth={1.75} className={overdue ? "text-mac-red/80 group-hover:text-mac-green" : "text-mac-ink3 group-hover:text-mac-accentHi"} />}
       </button>
       <span className={`min-w-0 flex-1 truncate text-[13.5px] ${done ? "text-mac-ink3 line-through" : "text-mac-ink"}`}>{item.title}</span>
+      {overdue && (
+        <span className="shrink-0 text-[10.5px] font-medium uppercase tracking-[0.04em] text-mac-red/90 bg-mac-red/10 rounded px-1.5 py-0.5">
+          overdue
+        </span>
+      )}
       {item.time && (
-        <span className="shrink-0 inline-flex items-center gap-1 text-[12px] text-mac-ink3">
+        <span className={`shrink-0 inline-flex items-center gap-1 text-[12px] ${overdue ? "text-mac-red/90" : "text-mac-ink3"}`}>
           <Clock size={11} />{to12h(item.time)}
         </span>
       )}
@@ -2881,9 +2897,11 @@ function Today({ health }: { health: Health | null }) {
 
   // Smart sort: open first, overdue, priority desc, due asc (see compareTasks).
   const openTasks = (tasks ?? []).filter((t) => !t.done).sort(compareTasks);
-  // The To-do card = today's calendar events (checkable) + your open tasks. Count what's left to do.
+  // The To-do card = today's calendar events (checkable) + your open tasks. Count what's left to do,
+  // and how many timed items have slipped past their time without being ticked (overdue).
   const todayEvents = planEvents ?? [];
   const todoOpenCount = openTasks.length + todayEvents.filter((e) => !eventDone.has(e.id)).length;
+  const overdueCount = todayEvents.filter((e) => !eventDone.has(e.id) && isPastTime(e.time)).length;
   // Today agenda — one time-sorted timeline merging calendar + scheduled/due tasks.
   const agenda = buildTodayAgenda(events ?? [], tasks ?? []);
   // Due-soon nudge — open tasks due today or tomorrow (within ~36h).
@@ -2958,7 +2976,7 @@ function Today({ health }: { health: Health | null }) {
         {/* To do — today's calendar (checkable) + your tasks; complete on hover, add inline */}
         <Card className="col-span-12 md:col-span-4 min-h-0" icon={ListChecks} title="To do"
           onOpen={() => nav("tasks")}
-          hint={todoOpenCount ? `${todoOpenCount} to do` : undefined}>
+          hint={overdueCount ? `${overdueCount} overdue` : todoOpenCount ? `${todoOpenCount} to do` : undefined}>
           <div className="flex flex-col h-full">
             <div className="flex-1 min-h-0 overflow-auto -mt-1">
               {tasks === null ? (

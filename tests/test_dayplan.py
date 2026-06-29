@@ -95,6 +95,36 @@ def test_done_tracker_toggles_and_resets(cfg):
     assert "evt-1" not in dp._done_today()
 
 
+def test_overdue_flag_and_kept_record(cfg, monkeypatch):
+    """A timed event past its time and not ticked is overdue; ticking clears it; the record keeps it."""
+    import himmy_app.dayplan as dp
+
+    monkeypatch.setattr(dp, "_now_hhmm", lambda: "12:00")   # fixed "now" = noon
+
+    async def _events(_cfg):
+        return [
+            {"id": "e1", "title": "Morning standup", "time": "09:00", "start": "2026-06-29T09:00:00"},
+            {"id": "e2", "title": "Evening walk", "time": "18:00", "start": "2026-06-29T18:00:00"},
+        ]
+    monkeypatch.setattr(dp, "_today_events", _events)
+
+    plan = DayPlan(cfg)
+    r = asyncio.run(plan.get(force=True))
+    by_id = {i["id"]: i for i in r["items"]}
+    assert by_id["e1"]["overdue"] is True     # 09:00 < 12:00 and not ticked → overdue
+    assert by_id["e2"]["overdue"] is False    # 18:00 still ahead
+    assert r["overdue"] == 1
+
+    plan.toggle_done("e1", True)              # I did it (late) → no longer overdue
+    r2 = asyncio.run(plan.get(force=True))
+    assert {i["id"]: i for i in r2["items"]}["e1"]["overdue"] is False
+    assert r2["overdue"] == 0
+
+    rec = plan.history(7)                      # the kept record reflects 1 done, 0 missed today
+    assert rec and rec[0]["date"] == dp._today()
+    assert rec[0]["done"] == 1 and rec[0]["missed"] == 0
+
+
 def test_cache_reused_until_tasks_change(cfg, monkeypatch):
     import himmy_app.dayplan as dp
 

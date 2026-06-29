@@ -23,9 +23,17 @@ from himmy_app.config import HimmyConfig, load_config
 #: How many tasks a daily plan surfaces — a focused few, not the whole board.
 MAX_PLAN = 5
 
+#: How many days of "what I planned vs what I actually did" records to keep (rolling).
+HISTORY_DAYS = 90
+
 
 def _today() -> str:
     return datetime.date.today().isoformat()
+
+
+def _now_hhmm() -> str:
+    """Current local wall-clock as HH:MM — used to decide if a timed item is now overdue."""
+    return datetime.datetime.now().astimezone().strftime("%H:%M")
 
 
 def _open_tasks(cfg: HimmyConfig) -> list[dict[str, Any]]:
@@ -181,8 +189,9 @@ async def _model_plan(cfg: HimmyConfig, tasks: list[dict[str, Any]]) -> dict[str
 class DayPlan:
     def __init__(self, config: HimmyConfig | None = None) -> None:
         self.cfg = config or load_config()
-        self._cache = self.cfg.data_dir / "dayplan_cache.json"   # the task-ranking cache
-        self._done = self.cfg.data_dir / "dayplan_done.json"     # which items are ticked TODAY
+        self._cache = self.cfg.data_dir / "dayplan_cache.json"     # the task-ranking cache
+        self._done = self.cfg.data_dir / "dayplan_done.json"       # which items are ticked TODAY
+        self._history = self.cfg.data_dir / "dayplan_history.json"  # rolling done/missed record
 
     # ---- task-ranking cache (re-plans when the open-task set changes) -------------------
     def _read(self) -> dict[str, Any] | None:
@@ -226,27 +235,78 @@ class DayPlan:
             self._done.write_text(json.dumps({"date": _today(), "ids": sorted(ids)}), encoding="utf-8")
         return {"ok": True, "id": item_id, "done": done}
 
+    # ---- record keeping: a rolling log of what was scheduled vs what got done -------------
+    def _record_day(self, date: str, events: list[dict[str, Any]]) -> None:
+        """Snapshot today's scheduled items + their done/missed status into the rolling history.
+
+        Re-written each time the plan is read, so the last read of the day is the day's final
+        record — a kept account of what was planned and what slipped, for review and for Himmy."""
+        try:
+            raw = json.loads(self._history.read_text(encoding="utf-8"))
+            days = raw.get("days") if isinstance(raw, dict) else None
+        except Exception:  # noqa: BLE001
+            days = None
+        if not isinstance(days, dict):
+            days = {}
+        days[date] = {
+            "items": [{"id": e["id"], "title": e["title"], "time": e.get("time", ""),
+                       "done": bool(e["done"]), "missed": bool(e["overdue"])} for e in events],
+            "done": sum(1 for e in events if e["done"]),
+            "missed": sum(1 for e in events if e["overdue"]),
+        }
+        for old in sorted(days)[:-HISTORY_DAYS]:   # prune to the most recent HISTORY_DAYS
+            days.pop(old, None)
+        with contextlib.suppress(Exception):
+            self._history.write_text(json.dumps({"days": days}, ensure_ascii=False), encoding="utf-8")
+
+    def history(self, days: int = 14) -> list[dict[str, Any]]:
+        """Recent daily records, newest first — the kept account of scheduled vs done/missed."""
+        try:
+            raw = json.loads(self._history.read_text(encoding="utf-8"))
+            days_map = raw.get("days") or {}
+        except Exception:  # noqa: BLE001
+            return []
+        out: list[dict[str, Any]] = []
+        for date in sorted(days_map.keys(), reverse=True)[:max(1, days)]:
+            rec = days_map[date]
+            out.append({"date": date, "done": int(rec.get("done", 0)),
+                        "missed": int(rec.get("missed", 0)), "items": rec.get("items", [])})
+        return out
+
     # ---- the unified plan: today's calendar + the prioritised tasks ----------------------
     async def get(self, *, force: bool = False) -> dict[str, Any]:
         """Today's plan as a single checklist: today's CALENDAR events (time-ordered, the real
-        backbone of most days) followed by the model-prioritised open TASKS. Always well-formed."""
+        backbone of most days) followed by the model-prioritised open TASKS. A timed event whose
+        time has passed and isn't ticked is flagged ``overdue``. Always well-formed."""
         events = await _today_events(self.cfg)
         tasks = _open_tasks(self.cfg)
         done = self._done_today()
+        now = _now_hhmm()
         note, ranked = await self._ranked_tasks(tasks, force=force)
 
-        items: list[dict[str, Any]] = []
+        event_items: list[dict[str, Any]] = []
         for e in events:
-            items.append({"kind": "event", "id": e["id"], "title": e["title"],
-                          "time": e.get("time", ""), "done": e["id"] in done})
+            eid = e["id"]
+            is_done = eid in done
+            t = e.get("time", "")
+            overdue = bool(t and not is_done and t < now)   # timed, past, and not ticked → missed
+            event_items.append({"kind": "event", "id": eid, "title": e["title"],
+                                "time": t, "done": is_done, "overdue": overdue})
+        if event_items:
+            self._record_day(_today(), event_items)         # keep the day's record up to date
+
+        items: list[dict[str, Any]] = list(event_items)
         for t in ranked:
             items.append({"kind": "task", "id": t["task_id"], "title": t["title"],
-                          "due": t.get("due"), "reason": t.get("reason", ""), "done": False})
+                          "due": t.get("due"), "reason": t.get("reason", ""),
+                          "done": False, "overdue": False})
 
+        overdue_n = sum(1 for e in event_items if e["overdue"])
         if not note and events:
             note = "Your day at a glance — your schedule, plus anything that needs doing."
         return {"ok": True, "date": _today(), "note": note, "items": items,
-                "events": len(events), "open_tasks": len(tasks), "total": len(items)}
+                "events": len(events), "open_tasks": len(tasks), "overdue": overdue_n,
+                "total": len(items)}
 
 
 __all__ = ["DayPlan", "MAX_PLAN"]
