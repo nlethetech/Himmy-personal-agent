@@ -200,6 +200,11 @@ export default function App() {
   const [onbForced, setOnbForced] = useState(false);
   const [notifs, setNotifs] = useState<NotificationItem[]>([]);
   const [unread, setUnread] = useState(0);
+  // Himmy's proactive observations — the "Himmy noticed" cards, now living in the bell. Owned here
+  // so the bell badge counts them and we can fire a macOS notification when a new one appears.
+  const [obs, setObs] = useState<Observation[]>([]);
+  const obsSeenRef = useRef<Set<string>>(new Set());
+  const obsSeededRef = useRef(false);
   const { status: account } = useGoogle();   // drives the account-button avatar (connected email)
   // Track which notification ids we've already seen so we fire a native macOS notification
   // exactly once per new item — and never for the backlog present on first load.
@@ -272,6 +277,38 @@ export default function App() {
     try { const r = await api.notifications.list(50); setNotifs(r.notifications); setUnread(r.unread); }
     catch { /* ignore */ }
   };
+  const loadObs = async () => {
+    try { const r = await api.proactive.list(); setObs(r.observations || []); }
+    catch { /* ignore */ }
+  };
+
+  // Poll the proactive brain's observations (they live in /proactive, not the routine inbox): keep
+  // the bell badge fresh and raise a native macOS notification once per NEW observation.
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await api.proactive.list();
+        if (!alive) return;
+        const list = r.observations || [];
+        setObs(list);
+        if (!obsSeededRef.current) {
+          list.forEach((o) => obsSeenRef.current.add(o.id));
+          obsSeededRef.current = true;
+        } else {
+          for (const o of list) {
+            if (obsSeenRef.current.has(o.id)) continue;
+            obsSeenRef.current.add(o.id);
+            try { (window as any).himmy?.notify?.({ title: `Himmy noticed: ${o.title}`, body: (o.detail || "").slice(0, 180) }); }
+            catch { /* notifications are best-effort */ }
+          }
+        }
+      } catch { /* backend warming up */ }
+    };
+    load();
+    const t = setInterval(load, 30000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
 
   // Tell Himmy which paper is open (so "how does this relate to my work?" knows). Only while the
   // Reader is actually on screen — a paper kept open behind the News/Planner tab isn't "open".
@@ -318,7 +355,7 @@ export default function App() {
           else setSection(s);
         }}
         online={!!health && !err} onSettings={() => setSettingsOpen(true)}
-        unread={unread} onBell={() => setNotifOpen(true)} accountEmail={account?.email} />
+        unread={unread + obs.length} onBell={() => { loadObs(); setNotifOpen(true); }} accountEmail={account?.email} />
       <main className="flex-1 min-h-0 overflow-auto">
         {openId && section === "library"
           ? <Reader id={openId} onClose={() => setOpenId(null)} />
@@ -329,6 +366,8 @@ export default function App() {
       {notifOpen && (
         <NotificationsPanel
           notifs={notifs}
+          obs={obs}
+          onObsRefresh={() => { loadObs(); loadNotifs(); }}
           onRefresh={loadNotifs}
           onClose={() => { setNotifOpen(false); loadNotifs(); }}
           onRoutines={() => { setNotifOpen(false); setRoutinesOpen(true); }}
@@ -2556,93 +2595,69 @@ function obsSurfaceIcon(o: Observation): LucideIcon {
   }
 }
 
-// "Himmy noticed …" — the proactive brain's strip at the top of Today. A small set of premium
-// cards, each a single high-quality observation with a one-tap action (Do it · Dismiss · Snooze).
-// Hidden entirely when there's nothing active, so the no-scroll Today layout is preserved.
-function HimmyNoticed() {
-  const [obs, setObs] = useState<Observation[] | null>(null);
-  // ids with an action in flight ("doing") or just acted-on locally (dismiss/snooze), so the UI
-  // can disable buttons + slide the card out without waiting on a reload.
+// "Himmy noticed …" — the proactive brain's actionable observations, rendered at the TOP of the
+// notification centre (the bell). Presentational: the App owns the observation list (so the bell
+// badge + macOS notification track it) and passes it in; this just renders + acts. Each row mirrors
+// the approval-card layout (title + detail, then an action row) so it fits the 420px panel cleanly.
+function HimmyNoticedList({ obs, onRefresh }: { obs: Observation[]; onRefresh: () => void }) {
   const [busy, setBusy] = useState<Record<string, "do" | "dismiss" | "snooze">>({});
-
-  const load = async () => {
-    try { const r = await api.proactive.list(); setObs(r.observations || []); }
-    catch { setObs((o) => o ?? []); }
-  };
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 30_000);   // poll ~30s so new observations surface live
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  useRefreshSignal("tasks", load);
-  useRefreshSignal("calendar", load);
+  const setB = (id: string, v: "do" | "dismiss" | "snooze" | null) =>
+    setBusy((b) => { const n = { ...b }; if (v) n[id] = v; else delete n[id]; return n; });
 
   const doIt = async (o: Observation) => {
-    setBusy((b) => ({ ...b, [o.id]: "do" }));
+    setB(o.id, "do");
     try {
       const r = await api.proactive.do(o.id);
-      if (r.ok && r.result?.awaiting_approval) {
-        // Risky action parked for HITL — route the user to the bell/approval card.
-        openBell();
-        // leave the observation active; clear busy so it can be retried/inspected
-      } else {
-        // Completed (or errored) — drop it from the strip and refresh from source.
-        setObs((list) => (list ?? []).filter((x) => x.id !== o.id));
-        emitRefresh("tasks");
-      }
+      // Risky action parked for approval → the approval card appears in this same panel on refresh;
+      // a completed action just clears the observation. Either way, reload + nudge the tabs.
+      onRefresh(); emitRefresh("tasks");
     } catch { /* best-effort */ }
-    finally { setBusy((b) => { const n = { ...b }; delete n[o.id]; return n; }); }
+    finally { setB(o.id, null); }
   };
   const dismiss = async (o: Observation) => {
-    setBusy((b) => ({ ...b, [o.id]: "dismiss" }));
-    setObs((list) => (list ?? []).filter((x) => x.id !== o.id));
-    try { await api.proactive.dismiss(o.id); } catch { load(); }
+    setB(o.id, "dismiss");
+    try { await api.proactive.dismiss(o.id); } finally { onRefresh(); }
   };
   const snooze = async (o: Observation) => {
-    setBusy((b) => ({ ...b, [o.id]: "snooze" }));
-    setObs((list) => (list ?? []).filter((x) => x.id !== o.id));
-    try { await api.proactive.snooze(o.id, 4); } catch { load(); }
+    setB(o.id, "snooze");
+    try { await api.proactive.snooze(o.id, 4); } finally { onRefresh(); }
   };
 
-  const items = obs ?? [];
-  if (!items.length) return null;   // never show an empty box
-
+  if (!obs.length) return null;
   return (
-    <div className="relative mt-4 rounded-2xl border border-mac-stroke bg-gradient-to-b from-white/[0.045] to-white/[0.012] p-4">
-      <div className="flex items-center gap-1.5 mb-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-mac-accentHi">
+    <div className="border-b border-mac-stroke">
+      <div className="px-4 pt-3 pb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-mac-accentHi">
         <Sparkles size={12} strokeWidth={2.2} /> Himmy noticed
-        <span className="text-mac-ink4 normal-case tracking-normal font-medium">· {items.length}</span>
+        <span className="text-mac-ink4 normal-case tracking-normal font-medium">· {obs.length}</span>
       </div>
-      <div className="flex gap-2.5 overflow-x-auto pb-0.5 -mb-0.5">
-        {items.map((o) => {
+      <div className="divide-y divide-mac-stroke/60">
+        {obs.map((o) => {
           const Icon = obsSurfaceIcon(o);
           const b = busy[o.id];
           return (
-            <div key={o.id}
-              className="shrink-0 w-[268px] rounded-[14px] border border-mac-stroke bg-mac-fill hover:bg-mac-fillHi transition-colors p-3 flex flex-col">
+            <div key={o.id} className="px-4 py-3 hover:bg-mac-fill transition-colors">
               <div className="flex items-start gap-2.5">
                 <div className="h-7 w-7 shrink-0 grid place-items-center rounded-[8px] bg-mac-fillHi ring-1 ring-inset ring-white/[0.06]">
                   <Icon size={14} strokeWidth={2} className="text-mac-accentHi" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="text-[13px] font-semibold text-mac-ink leading-snug truncate">{o.title}</div>
+                  <div className="text-[13px] font-medium text-mac-ink leading-snug">{o.title}</div>
                   <div className="text-[12px] text-mac-ink3 leading-snug mt-0.5 line-clamp-2">{o.detail}</div>
                 </div>
-              </div>
-              <div className="flex items-center gap-1.5 mt-3">
-                <button onClick={() => doIt(o)} disabled={!!b}
-                  className="flex-1 h-7 inline-flex items-center justify-center gap-1.5 rounded-[8px] bg-mac-accent/90 hover:bg-mac-accent text-white text-[12px] font-semibold transition-colors disabled:opacity-60">
-                  {b === "do" ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} strokeWidth={2.4} />}
-                  <span className="truncate">{o.action_label || "Do it"}</span>
-                </button>
-                <button onClick={() => snooze(o)} disabled={!!b} title="Snooze 4 hours"
-                  className="h-7 w-7 grid place-items-center rounded-[8px] text-mac-ink3 hover:text-mac-ink hover:bg-mac-fillHi transition-colors disabled:opacity-60">
-                  <Clock size={13} />
-                </button>
                 <button onClick={() => dismiss(o)} disabled={!!b} title="Dismiss"
-                  className="h-7 w-7 grid place-items-center rounded-[8px] text-mac-ink3 hover:text-mac-ink hover:bg-mac-fillHi transition-colors disabled:opacity-60">
-                  <X size={13} />
+                  className="shrink-0 grid place-items-center h-6 w-6 rounded-[6px] text-mac-ink3 hover:text-mac-red hover:bg-mac-fillHi transition-colors disabled:opacity-50">
+                  {b === "dismiss" ? <Loader2 size={12} className="animate-spin" /> : <X size={13} strokeWidth={2} />}
+                </button>
+              </div>
+              <div className="flex gap-2 mt-2.5 pl-[38px]">
+                <button onClick={() => doIt(o)} disabled={!!b}
+                  className="h-7 px-3 rounded-[7px] bg-mac-accent text-white text-[12px] font-medium hover:bg-mac-accentHi transition-colors disabled:opacity-60 inline-flex items-center gap-1.5">
+                  {b === "do" ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} strokeWidth={2.5} />}
+                  <span className="truncate max-w-[180px]">{o.action_label || "Do it"}</span>
+                </button>
+                <button onClick={() => snooze(o)} disabled={!!b}
+                  className="h-7 px-3 rounded-[7px] bg-mac-fill border border-mac-stroke text-[12px] text-mac-ink2 hover:text-mac-ink transition-colors disabled:opacity-60 inline-flex items-center gap-1.5">
+                  {b === "snooze" ? <Loader2 size={12} className="animate-spin" /> : <Clock size={12} />} Snooze
                 </button>
               </div>
             </div>
@@ -2858,10 +2873,8 @@ function Today({ health }: { health: Health | null }) {
         <TodayBrief />
       </div>
 
-      {/* Himmy noticed — the proactive brain's actionable observations (hidden when empty) */}
-      <div className="shrink-0">
-        <HimmyNoticed />
-      </div>
+      {/* "Himmy noticed" lives in the notification centre (the bell), not on Today — keeps Today
+          calm and puts the proactive observations where notifications belong. */}
 
       <div className="flex-1 min-h-0 grid grid-cols-12 grid-rows-1 gap-4">
         {/* Today — one time-sorted agenda merging calendar events + scheduled/due tasks */}
@@ -6841,8 +6854,9 @@ function RoutineForm({ editing, name, setName, prompt, setPrompt, sched, setSche
 }
 
 /* ── notifications inbox (routine results · errors · approval parks) ───────── */
-function NotificationsPanel({ notifs, onRefresh, onClose, onRoutines }:
-  { notifs: NotificationItem[]; onRefresh: () => void; onClose: () => void; onRoutines: () => void }) {
+function NotificationsPanel({ notifs, obs, onObsRefresh, onRefresh, onClose, onRoutines }:
+  { notifs: NotificationItem[]; obs: Observation[]; onObsRefresh: () => void;
+    onRefresh: () => void; onClose: () => void; onRoutines: () => void }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const markRead = async (id: string) => { try { await api.notifications.read(id); } finally { onRefresh(); } };
   const remove = async (id: string) => { try { await api.notifications.remove(id); } finally { onRefresh(); } };
@@ -6876,11 +6890,13 @@ function NotificationsPanel({ notifs, onRefresh, onClose, onRoutines }:
           </div>
         </div>
         <div className="flex-1 min-h-0 overflow-auto">
-          {notifs.length === 0 ? (
+          {/* "Himmy noticed" — the proactive brain's actionable observations, at the top. */}
+          <HimmyNoticedList obs={obs} onRefresh={onObsRefresh} />
+          {notifs.length === 0 && obs.length === 0 ? (
             <div className="p-10 text-center">
               <Inbox size={30} strokeWidth={1.5} className="text-mac-ink3 mb-2.5 mx-auto" />
               <p className="text-[12.5px] text-mac-ink3 max-w-[34ch] mx-auto">
-                Nothing yet. Results from your scheduled routines will show up here.
+                Nothing yet. Himmy will flag things that need you, and your scheduled routines, here.
               </p>
             </div>
           ) : (

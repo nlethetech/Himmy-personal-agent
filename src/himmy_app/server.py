@@ -912,21 +912,13 @@ def create_app() -> FastAPI:
                     pass
                 await asyncio.sleep(6 * 3600)
 
-        # Smart Nudges: deterministically scan tasks/calendar/mail every few hours and drop
-        # deduped "needs you" notifications into the same bell. Mirrors _warm_recs — an initial
-        # pass shortly after startup, then on an interval, wrapped so a bad pass never kills the
-        # loop. It lives here (not as a himmy Routine) because it's deterministic and must NOT run
-        # through ask_turn / HITL (no model budget, no chat history).
+        # Smart Nudges: SUPERSEDED by the proactive brain (himmy_app.proactive). The proactive
+        # layer covers the same ground — tasks due/overdue, budget, meeting prep, unreplied mail —
+        # but as ACTIONABLE observations in the "Himmy noticed" section of the bell, instead of
+        # plain duplicate notifications. Running both flooded the bell with overlapping nudges, so
+        # this loop is retired (the no-op keeps the lifespan's create/cancel/gather wiring intact).
         async def _nudge_loop() -> None:
-            from himmy_app import nudges
-
-            await asyncio.sleep(20)  # let first-run indexing/Google settle before the first scan
-            while True:
-                try:
-                    await nudges.generate(cfg)
-                except Exception:  # noqa: BLE001 - a bad nudge pass must never crash the server
-                    pass
-                await asyncio.sleep(nudges.NUDGE_INTERVAL_S)
+            return
 
         # NEPSE daily price refresh: keep the small default watchlist warm so the Markets surface
         # opens instantly. Deterministic (no model / no HITL) — it lives here, not as a himmy

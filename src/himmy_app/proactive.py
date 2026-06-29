@@ -721,12 +721,15 @@ _URGENT_KINDS = {"prep", "task", "budget"}
 
 
 async def _push(obs: dict[str, Any], cfg: HimmyConfig, level: str) -> bool:
-    """Mirror a new observation into the bell Inbox + Telegram, honoring level + quiet hours.
+    """Push a new observation OUT (Telegram), honoring level + quiet hours.
 
-    Returns True if a push was actually dispatched (so the caller can count it).
+    Returns True if a push was dispatched (so the caller can count it). The IN-APP notification
+    centre (the bell) + the macOS notification + the badge read observations directly from
+    ``/proactive`` — so this no longer mirrors them into the notification Inbox (which double-showed
+    each one as both an actionable card and a plain notification). This now only handles the
+    external Telegram push.
 
-    - off: never push (caller won't even reach here).
-    - gentle: no push at all (items appear silently in the list).
+    - off / gentle: never push (items appear silently in the bell's "Himmy noticed" section).
     - calm: push ONLY urgent kinds (prep/task/budget), and never during quiet hours.
     - always: push everything, but still never during quiet hours.
     """
@@ -739,26 +742,14 @@ async def _push(obs: dict[str, Any], cfg: HimmyConfig, level: str) -> bool:
 
     title = obs.get("title") or "Himmy noticed something"
     body = obs.get("detail") or ""
-    pushed = False
-
-    # 1) The shared notification Inbox (bell + macOS notify auto-read this). Stable key dedups.
-    try:
-        from himmy_app.routines import get_inbox
-
-        if get_inbox().add_nudge(key=f"proactive-{obs['key']}", title=title, body=body) is not None:
-            pushed = True
-    except Exception:  # noqa: BLE001 - a push must never break the scan
-        pass
-
-    # 2) Telegram (no-op if not linked).
+    # Telegram (no-op if not linked).
     try:
         from himmy_app import telegram
 
         await telegram.push(f"Himmy noticed: {title}\n{body}".strip(), cfg)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - a push must never break the scan
         pass
-
-    return pushed
+    return True
 
 
 # ---------------------------------------------------------------------------------------
