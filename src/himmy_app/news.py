@@ -169,6 +169,77 @@ def _is_trusted(domain: str) -> bool:
     return any(d == t or d.endswith("." + t) for t in TRUSTED_SOURCES)
 
 
+# ---------------------------------------------------------------------------------------
+# Domestic vs foreign — Nepali outlets (Ratopati, Online Khabar, Kathmandu Post) publish BOTH
+# domestic Nepal news and world news on one feed, so "Nepal" used to fill up with Israel / Azerbaijan
+# / Afghanistan stories. We classify each item by its TITLE so the dateline ("Kathmandu.", which is
+# on every story regardless) can't fool us: a Nepal place / party / leader ⇒ domestic; otherwise a
+# foreign country / leader / bloc ⇒ foreign; if neither, default to domestic (the outlet is Nepali).
+# Names of the Nepal-outlet sources (so the World feed can keep only their FOREIGN stories).
+_NEPAL_SOURCE_NAMES: set[str] = {n for n, _ in SOURCES.get("Nepal", [])}
+
+#: Nepal markers — places, provinces, parties, institutions and current political figures. A hit in
+#: the TITLE means the story is about Nepal (even if it also names a foreign country, e.g. a state visit).
+_NEPAL_MARKERS = [
+    "nepal", "nepali", "nepalese", "kathmandu", "pokhara", "lalitpur", "patan", "bhaktapur",
+    "biratnagar", "birgunj", "bharatpur", "butwal", "dharan", "hetauda", "janakpur", "nepalgunj",
+    "dhangadhi", "itahari", "damak", "gorkha", "chitwan", "mustang", "dolakha", "jumla", "humla",
+    "rolpa", "sindhupalchok", "kavre", "makwanpur", "morang", "jhapa", "sunsari", "rupandehi",
+    "kaski", "dang", "banke", "bardiya", "doti", "ilam", "solukhumbu", "rasuwa", "dolpa",
+    "koshi", "madhesh", "madhes", "bagmati", "gandaki", "lumbini", "karnali", "sudurpashchim",
+    "sudurpaschim", "terai", "himalaya", "himalayan", "everest", "sagarmatha", "annapurna",
+    "nepali congress", "rastriya swatantra", "rastriya prajatantra", "maoist", "cpn", "uml",
+    "janata samajwadi", "singha durbar", "baluwatar", "sheetal niwas", "nepal rastra bank",
+    "tribhuvan", "kp oli", "oli", "deuba", "prachanda", "dahal", "balen", "balendra", "bhattarai",
+    "gagan thapa", "rabi lamichhane", "lamichhane", "swatantra", "nepse",
+]
+
+#: Foreign markers — countries, capitals, leaders and blocs. A hit in the TITLE, with NO Nepal
+#: marker present, means the story is foreign. (Curated to word-boundary-safe tokens — no bare "us".)
+_FOREIGN_MARKERS = [
+    "israel", "israeli", "palestine", "palestinian", "gaza", "hamas", "hezbollah", "lebanon",
+    "syria", "syrian", "iran", "iranian", "iraq", "saudi", "qatar", "uae", "dubai", "yemen",
+    "turkey", "turkiye", "azerbaijan", "armenia", "armenian", "georgia", "kazakhstan",
+    "russia", "russian", "ukraine", "ukrainian", "moscow", "kyiv", "putin", "zelensky", "belarus",
+    "poland", "germany", "german", "berlin", "france", "french", "paris", "britain", "british",
+    "england", "scotland", "ireland", "spain", "spanish", "italy", "italian", "greece",
+    "netherlands", "sweden", "norway", "finland", "denmark", "switzerland", "austria", "portugal",
+    "european union", "nato", "usa", "united states", "america", "american", "washington",
+    "trump", "biden", "harris", "pentagon", "white house",
+    "china", "chinese", "beijing", "xi jinping", "taiwan", "hong kong", "japan", "japanese",
+    "tokyo", "korea", "korean", "seoul", "pyongyang", "kim jong",
+    "pakistan", "pakistani", "islamabad", "bangladesh", "dhaka", "sri lanka", "colombo",
+    "myanmar", "bhutan", "maldives", "india", "indian", "new delhi", "modi",
+    "mexico", "brazil", "argentina", "venezuela", "canada", "australia", "new zealand",
+    "nigeria", "egypt", "ethiopia", "sudan", "somalia", "kenya", "south africa", "congo",
+    "afghanistan", "afghan", "kabul", "taliban", "united nations", "world bank", "imf",
+]
+
+
+def _compile_markers(words: list[str]) -> "re.Pattern[str]":
+    # longest-first so multi-word phrases match before their parts; \b keeps short tokens word-safe
+    alt = "|".join(re.escape(w) for w in sorted(set(words), key=len, reverse=True))
+    return re.compile(rf"\b(?:{alt})\b", re.IGNORECASE)
+
+
+_NEPAL_RE = _compile_markers(_NEPAL_MARKERS)
+_FOREIGN_RE = _compile_markers(_FOREIGN_MARKERS)
+
+
+def _is_domestic_nepal(title: str) -> bool:
+    """True if a Nepali-outlet story is DOMESTIC (about Nepal); False if it's foreign/world news.
+
+    Title-only on purpose: the body's "Kathmandu." dateline is on foreign stories too, so it would
+    misclassify them as domestic. A Nepal marker wins (covers Nepal–foreign stories like state
+    visits); else a foreign marker means foreign; else default domestic (the outlet is Nepali)."""
+    t = (title or "").lower()
+    if _NEPAL_RE.search(t):
+        return True
+    if _FOREIGN_RE.search(t):
+        return False
+    return True
+
+
 _CACHE_TTL = 900  # seconds
 #: How often the background refresher re-pulls every category (real-time freshness). Override via
 #: HIMMY_NEWS_REFRESH_SECS. Kept >= the cache TTL so a refresh always recomputes rather than
@@ -405,7 +476,11 @@ class NewsService:
         return out
 
     async def _category(self, cat: str) -> list[dict[str, Any]]:
-        feeds = SOURCES.get(cat, [])
+        feeds = list(SOURCES.get(cat, []))
+        # World also carries the WORLD stories that Nepali outlets cover, so domestic Nepal news and
+        # foreign news end up cleanly separated (Nepal = domestic only, below).
+        if cat == "World":
+            feeds = feeds + list(SOURCES.get("Nepal", []))
         async with httpx.AsyncClient(timeout=15, follow_redirects=True,
                                      headers={"User-Agent": "Mozilla/5.0 (Himmy)"}) as c:
             results = await asyncio.gather(*[self._fetch_feed(c, n, u) for n, u in feeds])
@@ -418,6 +493,13 @@ class NewsService:
                 continue
             seen.add(k)
             deduped.append(it)
+        # Domestic/foreign split for the Nepali outlets: Nepal keeps only domestic stories; World
+        # keeps the foreign ones from those outlets (and every international-outlet story untouched).
+        if cat == "Nepal":
+            deduped = [it for it in deduped if _is_domestic_nepal(it["title"])]
+        elif cat == "World":
+            deduped = [it for it in deduped
+                       if it.get("source") not in _NEPAL_SOURCE_NAMES or not _is_domestic_nepal(it["title"])]
         return deduped[:45]
 
     # ---- "For You" — a taste-RANKED personal feed -------------------------------------------
