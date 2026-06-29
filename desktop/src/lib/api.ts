@@ -540,6 +540,9 @@ export type ReadingStats = {
   total_seconds: number;
 };
 
+// Today's plan — Himmy's prioritised daily to-do built from the task board.
+export type DayPlanItem = { task_id: string; title: string; due?: string | null; reason: string };
+
 // In-app AI provider setup — lets a non-coder pick a provider, paste their key, and confirm it
 // works, all without touching .env. A key set here is written through himmy's writable secrets
 // layer (keychain on macOS, encrypted file elsewhere — the same path the Google sign-in uses) and
@@ -1024,6 +1027,10 @@ export const api = {
   brief: (force = false) =>
     jget<{ ok: boolean; text: string; generated_at?: string; stale?: boolean; generating?: boolean }>(
       `/brief${force ? "?force=true" : ""}`),
+  // Today's plan — Himmy turns the task board into a focused, prioritised daily to-do.
+  todayPlan: (force = false) =>
+    jget<{ ok: boolean; date: string; note: string; plan: DayPlanItem[]; open: number }>(
+      `/today/plan${force ? "?force=true" : ""}`),
   tasks: {
     list: () => jget<{ ok: boolean; tasks: Task[]; open: number; total: number }>("/tasks"),
     add: (title: string, opts?: { due?: string | null; priority?: number }) =>

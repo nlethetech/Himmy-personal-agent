@@ -1684,6 +1684,13 @@ def create_app() -> FastAPI:
     async def brief_get(force: bool = False) -> dict[str, Any]:
         return await brief.get(force=force)
 
+    # ---- today's plan: Himmy turns the task board into a focused, prioritised daily to-do --
+    @app.get("/today/plan")
+    async def today_plan(force: bool = False) -> dict[str, Any]:
+        from himmy_app.dayplan import DayPlan
+
+        return await DayPlan(cfg).get(force=force)
+
     # ---- "Do" hub: a smart Nepal concierge over flights / food / shopping ----------------
     from himmy_app.do_concierge import DoCart, DoConcierge
 

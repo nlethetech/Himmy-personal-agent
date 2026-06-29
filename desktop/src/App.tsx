@@ -38,7 +38,7 @@ import {
   type ToolResult,
   type AttachmentResult, type AttachmentItem, type AssistantConfig, type AssistantStyleOpt,
   type Expense, type ExpenseDraft, type FinanceSummary,
-  type Observation, type ProactiveLevel,
+  type Observation, type ProactiveLevel, type DayPlanItem,
 } from "./lib/api";
 import { apa, mla, bibtex } from "./lib/cite";
 import Reader from "./Reader";
@@ -2668,6 +2668,68 @@ function HimmyNoticedList({ obs, onRefresh }: { obs: Observation[]; onRefresh: (
   );
 }
 
+// "Today's plan" — Himmy proactively turns your task board into a focused, prioritised daily
+// to-do (overdue → due → important), each item checkable (completing the underlying task). Hidden
+// when there are no open tasks. Re-plans when you complete/add a task.
+function TodayPlan() {
+  const [data, setData] = useState<{ note: string; plan: DayPlanItem[]; open: number } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [done, setDone] = useState<Set<string>>(new Set());
+
+  const load = async (force = false) => {
+    if (force) setRefreshing(true);
+    try { const r = await api.todayPlan(force); setData({ note: r.note, plan: r.plan, open: r.open }); }
+    catch { /* backend warming */ }
+    finally { setLoading(false); setRefreshing(false); }
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+  useRefreshSignal("tasks", () => load(false));
+
+  const complete = async (id: string) => {
+    setDone((s) => new Set(s).add(id));
+    try { await api.tasks.complete(id); emitRefresh("tasks"); setTimeout(() => load(true), 500); }
+    catch { setDone((s) => { const n = new Set(s); n.delete(id); return n; }); }
+  };
+
+  if (loading || !data || data.open === 0 || data.plan.length === 0) return null;
+  const todayStr = new Date().toISOString().slice(0, 10);
+  return (
+    <div className="mt-5 rounded-2xl border border-mac-stroke bg-gradient-to-b from-white/[0.045] to-white/[0.012] p-4">
+      <div className="flex items-center justify-between mb-2.5">
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-mac-accentHi">
+          <ListChecks size={12} strokeWidth={2.2} /> Today's plan
+          <span className="text-mac-ink4 normal-case tracking-normal font-medium">· {data.plan.length}</span>
+        </div>
+        <button onClick={() => load(true)} disabled={refreshing} title="Re-plan from your tasks"
+          className="h-6 w-6 grid place-items-center rounded-md text-mac-ink3 hover:text-mac-ink hover:bg-mac-fill transition-colors disabled:opacity-60">
+          <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
+        </button>
+      </div>
+      {data.note && <p className="text-[12.5px] text-mac-ink2 leading-snug mb-2.5">{data.note}</p>}
+      <div className="space-y-0.5">
+        {data.plan.map((p, i) => {
+          const isDone = done.has(p.task_id);
+          const overdue = !!p.due && p.due < todayStr;
+          return (
+            <div key={p.task_id}
+              className="group flex items-center gap-2.5 rounded-lg px-2 py-2 hover:bg-mac-fill transition-colors">
+              <button onClick={() => !isDone && complete(p.task_id)} className="shrink-0">
+                {isDone
+                  ? <CheckCircle2 size={17} className="text-mac-green" />
+                  : <Circle size={17} strokeWidth={1.75} className="text-mac-ink3 group-hover:text-mac-accentHi transition-colors" />}
+              </button>
+              <span className="shrink-0 text-[11px] font-semibold text-mac-ink4 tabular-nums w-3.5 text-center">{i + 1}</span>
+              <span className={`flex-1 min-w-0 text-[13.5px] truncate ${isDone ? "text-mac-ink3 line-through" : "text-mac-ink"}`}>{p.title}</span>
+              <span className={`shrink-0 text-[11px] ${overdue ? "text-mac-red/90" : "text-mac-ink3"}`}>{p.reason}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function TodayBrief() {
   const [brief, setBrief] = useState<{ text: string; generating?: boolean; stale?: boolean; generated_at?: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -2873,8 +2935,11 @@ function Today({ health }: { health: Health | null }) {
         <TodayBrief />
       </div>
 
-      {/* "Himmy noticed" lives in the notification centre (the bell), not on Today — keeps Today
-          calm and puts the proactive observations where notifications belong. */}
+      {/* "Himmy noticed" lives in the notification centre (the bell), not on Today. Today instead
+          gets a proactive "Today's plan" — Himmy's prioritised to-do built from the task board. */}
+      <div className="shrink-0">
+        <TodayPlan />
+      </div>
 
       <div className="flex-1 min-h-0 grid grid-cols-12 grid-rows-1 gap-4">
         {/* Today — one time-sorted agenda merging calendar events + scheduled/due tasks */}
