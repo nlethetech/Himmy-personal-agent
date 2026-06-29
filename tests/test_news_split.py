@@ -62,3 +62,28 @@ def test_world_gets_nepali_outlets_foreign(mocked_feeds):
     assert any("Israel" in t for t in titles) and any("Russia" in t for t in titles)  # foreign in
     assert any("EU summit" in t for t in titles)                                       # intl outlet kept
     assert not any("Bagmati" in t or "milk bank" in t for t in titles)                 # domestic excluded
+
+
+def test_developing_clusters_shared_coverage(monkeypatch):
+    """Headlines sharing >=2 distinctive terms group into one developing story; loners don't."""
+    def feed_items(*titles):
+        return [{"title": t, "url": f"http://x/{i}", "source": f"src{i}", "image": "",
+                 "snippet": "", "ts": 1000 - i, "ago": "1h"} for i, t in enumerate(titles)]
+
+    async def fake_feed(self, cat, force=False):
+        if cat == "World":
+            return {"ok": True, "items": feed_items(
+                "Supreme Court blocks Trump attempt to fire Federal Reserve official",
+                "Supreme Court rejects Trump appeal in Carroll case",
+                "Trump escalates fight with Supreme Court over agencies",
+                "Local council debates new park budget",          # unrelated loner
+            )}
+        return {"ok": True, "items": []}
+    monkeypatch.setattr(NewsService, "feed", fake_feed)
+
+    r = asyncio.run(NewsService().developing(categories=["World"]))
+    assert r["ok"]
+    top = r["stories"][0]
+    assert top["count"] == 3 and "Supreme Court" in top["title"]   # the 3 Trump/Court articles
+    assert len(top["sources"]) == 3
+    assert not any("park budget" in s["title"] for s in r["stories"])  # the loner isn't a story

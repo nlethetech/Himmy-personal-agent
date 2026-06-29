@@ -1603,6 +1603,16 @@ def create_app() -> FastAPI:
     async def news_feed(cat: str = "For You", force: bool = False) -> dict[str, Any]:
         return await news.feed(cat, force=force)
 
+    @app.get("/news/developing")
+    async def news_developing() -> dict[str, Any]:
+        """Developing stories — events several articles/sources are tracking, clustered."""
+        return await news.developing()
+
+    @app.get("/news/digest")
+    async def news_digest() -> dict[str, Any]:
+        """A short 'catch me up' digest of today's top Nepal + World stories."""
+        return await news.digest(title="Your news digest")
+
     @app.get("/news/recommendations")
     async def news_recommendations(force: bool = False) -> dict[str, Any]:
         return await news.recommendations(force=force)

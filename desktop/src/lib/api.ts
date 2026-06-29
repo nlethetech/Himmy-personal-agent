@@ -118,6 +118,12 @@ export type NewsFeed = {
   ok: boolean; category: string; items: NewsArticle[];
   fetched_at?: string | null; needs_interests?: boolean;
 };
+// A developing story — one event several articles/sources are tracking, clustered together.
+export type DevelopingStory = {
+  title: string; count: number; sources: string[]; category: string;
+  image: string; ago: string; latest_ts: number;
+  articles: { title: string; url: string; source: string; ago: string }[];
+};
 export type SavedArticle = {
   id: string; title: string; source: string; url: string; image: string;
   author?: string; published?: string; snippet: string; folder: string;
@@ -907,6 +913,8 @@ export const api = {
       jget<NewsFeed>(
         `/news/feed?cat=${encodeURIComponent(cat)}${force ? "&force=true" : ""}`
       ),
+    developing: () => jget<{ ok: boolean; stories: DevelopingStory[] }>("/news/developing"),
+    digest: () => jget<{ ok: boolean; text: string; count: number }>("/news/digest"),
     recommendations: (force = false) =>
       jget<RecResult>(`/news/recommendations${force ? "?force=true" : ""}`),
     dismissRec: (p: { doi?: string; title?: string; concepts?: string[] }) =>

@@ -6830,6 +6830,11 @@ function News() {
   const [, setNowTick] = useState(0);
   // Per-category timestamp of when the user last looked at it — anything newer gets a "New" dot.
   const [lastSeen, setLastSeen] = useState<Record<string, number>>({});
+  // Developing stories — events several articles/sources are tracking, shown as a rail atop a feed.
+  const [developing, setDeveloping] = useState<DevelopingStory[]>([]);
+  const loadDeveloping = async () => {
+    try { const r = await api.news.developing(); setDeveloping(r.stories || []); } catch { /* warming */ }
+  };
 
   const isFeed = view.kind === "feed";
 
@@ -6869,6 +6874,7 @@ function News() {
   };
   useEffect(() => {
     loadFolders();
+    loadDeveloping();
     api.news.interests().then((r) => setInterests(r.interests || [])).catch(() => {});
   }, []);
   useEffect(() => {
@@ -6929,7 +6935,7 @@ function News() {
   };
 
   const refresh = () => {
-    if (view.kind === "feed") loadFeed(view.cat, true);
+    if (view.kind === "feed") { loadFeed(view.cat, true); loadDeveloping(); }
     else loadSaved(view.folder);
   };
 
@@ -7000,6 +7006,10 @@ function News() {
         )}
 
         <div className="flex-1 min-h-0 overflow-auto px-7 pb-9">
+          {isFeed && !q && !needsInterests && developing.length > 0 && (
+            <DevelopingRail stories={developing}
+              onOpen={(a) => setReading({ article: a })} />
+          )}
           {loading && (isFeed ? items.length === 0 : saved.length === 0) ? (
             <div className="h-48 grid place-items-center text-mac-ink3"><Loader2 size={18} className="animate-spin" /></div>
           ) : isFeed ? (
@@ -7044,6 +7054,47 @@ function News() {
             </div>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// "Developing now" — a horizontal rail of clustered, actively-covered stories above the feed.
+function DevelopingRail({ stories, onOpen }: {
+  stories: DevelopingStory[];
+  onOpen: (a: { url: string; title: string; source: string; image: string; snippet: string }) => void;
+}) {
+  return (
+    <div className="mb-5">
+      <div className="flex items-center gap-1.5 mb-2.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-mac-accentHi">
+        <TrendingUp size={12} strokeWidth={2.4} /> Developing now
+      </div>
+      <div className="flex gap-3 overflow-x-auto pb-1 -mx-1 px-1">
+        {stories.map((s, i) => (
+          <button key={i}
+            onClick={() => onOpen({ url: s.articles[0]?.url || "", title: s.title,
+                                    source: s.sources[0] || "", image: s.image, snippet: "" })}
+            className="group shrink-0 w-[256px] text-left rounded-2xl border border-white/[0.07] bg-gradient-to-b from-white/[0.055] to-white/[0.018] shadow-card overflow-hidden hover:shadow-cardHover transition-shadow">
+            {s.image ? (
+              <div className="relative h-[104px] w-full overflow-hidden">
+                <img src={s.image} alt="" className="h-full w-full object-cover group-hover:scale-[1.03] transition-transform duration-300" />
+                <span className="absolute top-2 left-2 text-[9.5px] font-semibold uppercase tracking-[0.06em] text-white bg-mac-red/90 rounded px-1.5 py-0.5 shadow">Developing</span>
+              </div>
+            ) : (
+              <div className="relative h-[104px] w-full bg-mac-fill grid place-items-center">
+                <Newspaper size={20} className="text-mac-ink4" />
+                <span className="absolute top-2 left-2 text-[9.5px] font-semibold uppercase tracking-[0.06em] text-white bg-mac-red/90 rounded px-1.5 py-0.5">Developing</span>
+              </div>
+            )}
+            <div className="p-3">
+              <div className="text-[13px] font-medium text-mac-ink leading-snug line-clamp-2">{s.title}</div>
+              <div className="mt-2 flex items-center gap-1.5 text-[11px] text-mac-ink3">
+                <Newspaper size={11} strokeWidth={2} />
+                {s.count} articles · {s.sources.length} {s.sources.length === 1 ? "source" : "sources"}
+              </div>
+            </div>
+          </button>
+        ))}
       </div>
     </div>
   );

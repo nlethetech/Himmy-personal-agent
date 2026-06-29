@@ -226,6 +226,31 @@ _NEPAL_RE = _compile_markers(_NEPAL_MARKERS)
 _FOREIGN_RE = _compile_markers(_FOREIGN_MARKERS)
 
 
+#: Words too generic to identify a STORY — stopped before clustering so coverage groups on the
+#: distinctive terms (entities/topics), not on "government"/"after"/"new" that every headline shares.
+_CLUSTER_STOP = {
+    "the", "and", "for", "with", "from", "after", "over", "into", "amid", "says", "said", "say",
+    "new", "more", "than", "that", "this", "will", "have", "has", "are", "was", "were", "been",
+    "its", "his", "her", "their", "our", "your", "out", "off", "but", "not", "who", "what", "how",
+    "why", "when", "where", "about", "against", "between", "before", "during", "under", "near",
+    "report", "reports", "reported", "plan", "plans", "calls", "call", "warns", "warn", "urges",
+    "vows", "vow", "faces", "face", "set", "amid", "due", "year", "years", "day", "days", "week",
+    "today", "first", "second", "third", "two", "three", "top", "big", "high", "low", "back",
+    "government", "minister", "party", "leader", "official", "officials", "country", "people",
+    "national", "state", "public", "news", "update", "latest", "breaking", "crisis", "issue",
+}
+
+
+def _signif_tokens(title: str) -> set[str]:
+    """Distinctive lowercase terms in a headline (>=4 chars, not a generic news/stop word)."""
+    out: set[str] = set()
+    for w in re.findall(r"[A-Za-z][A-Za-z'-]+", title or ""):
+        lw = w.lower().strip("'-")
+        if len(lw) >= 4 and lw not in _CLUSTER_STOP:
+            out.add(lw)
+    return out
+
+
 def _is_domestic_nepal(title: str) -> bool:
     """True if a Nepali-outlet story is DOMESTIC (about Nepal); False if it's foreign/world news.
 
@@ -714,6 +739,67 @@ class NewsService:
 
     def categories(self) -> list[str]:
         return CATEGORIES
+
+    # ---- developing stories — events covered by several articles, clustered together --------
+    async def developing(self, categories: list[str] | None = None, *,
+                         min_articles: int = 2, max_stories: int = 8) -> dict[str, Any]:
+        """Cluster today's coverage into DEVELOPING stories — an event several articles are tracking.
+
+        Deterministic + no model: pull the recent pool, key each headline by its distinctive terms
+        (proper nouns/topics, with generic news words stopped), and greedily group headlines that
+        share >=2 key terms. A cluster with >= ``min_articles`` is a developing story, ranked by how
+        many articles (and sources) are covering it, then recency. Returns ``{ok, stories}``."""
+        cats = categories or ["Nepal", "World", "Business", "Technology"]
+        pool: list[dict[str, Any]] = []
+        seen_titles: set[str] = set()
+        for cat in cats:
+            try:
+                r = await self.feed(cat)
+            except Exception:  # noqa: BLE001
+                continue
+            for it in (r.get("items") or [])[:25]:
+                key = (it.get("title") or "").lower()
+                if not key or key in seen_titles:
+                    continue
+                seen_titles.add(key)
+                pool.append({**it, "category": cat})
+
+        clusters: list[dict[str, Any]] = []
+        for it in pool:
+            toks = _signif_tokens(it.get("title", ""))
+            if len(toks) < 2:
+                continue
+            placed = False
+            for cl in clusters:
+                if len(toks & cl["tokens"]) >= 2:        # share >=2 distinctive terms → same story
+                    cl["items"].append(it)
+                    cl["tokens"] |= toks
+                    placed = True
+                    break
+            if not placed:
+                clusters.append({"items": [it], "tokens": set(toks)})
+
+        stories: list[dict[str, Any]] = []
+        for cl in clusters:
+            items = cl["items"]
+            if len(items) < min_articles:
+                continue
+            items.sort(key=lambda x: x.get("ts", 0.0), reverse=True)
+            sources = list(dict.fromkeys(i.get("source", "") for i in items if i.get("source")))
+            stories.append({
+                "title": items[0]["title"],
+                "count": len(items),
+                "sources": sources,
+                "category": items[0].get("category", ""),
+                "image": next((i.get("image") for i in items if i.get("image")), ""),
+                "latest_ts": items[0].get("ts", 0.0),
+                "ago": items[0].get("ago", ""),
+                "articles": [{"title": i.get("title", ""), "url": i.get("url", ""),
+                              "source": i.get("source", ""), "ago": i.get("ago", "")} for i in items[:6]],
+            })
+        # most-covered first (more articles + more distinct sources = more "developing"), then fresh
+        stories.sort(key=lambda s: (s["count"], len(s["sources"]), s["latest_ts"]), reverse=True)
+        return {"ok": True, "stories": stories[:max_stories]}
 
     # ---- news digest — a short "catch me up", for the Today brief, Telegram pushes, routines ----
     async def digest(self, categories: list[str] | None = None, *, per_cat: int = 6,
