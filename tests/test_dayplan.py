@@ -28,6 +28,14 @@ def cfg(monkeypatch):
     import himmy.api.studio_tasks as st
 
     monkeypatch.setattr(st, "_STORE", None, raising=False)
+    # Isolate the calendar from tests — the Google token lives in the keychain (not the data dir),
+    # so without this _today_events would read the REAL connected calendar. The task path is what
+    # these tests exercise; the calendar merge is verified live.
+    import himmy_app.dayplan as dp
+
+    async def _no_events(_cfg):
+        return []
+    monkeypatch.setattr(dp, "_today_events", _no_events)
     return load_config()
 
 
@@ -48,9 +56,10 @@ def test_deterministic_ordering():
     assert out[0]["reason"] == "overdue" and out[1]["reason"] == "due today"
 
 
-def test_empty_when_no_open_tasks(cfg):
+def test_empty_when_no_tasks_or_events(cfg):
+    # No open tasks and no connected calendar in the test env → an empty plan.
     r = asyncio.run(DayPlan(cfg).get(force=True))
-    assert r["ok"] and r["open"] == 0 and r["plan"] == []
+    assert r["ok"] and r["open_tasks"] == 0 and r["total"] == 0 and r["items"] == []
 
 
 def test_plan_from_tasks_offline(cfg, monkeypatch):
@@ -65,8 +74,8 @@ def test_plan_from_tasks_offline(cfg, monkeypatch):
     _seed("Ship demo", today.isoformat())                                # due today
     _seed("Someday idea", None)                                          # undated
     r = asyncio.run(DayPlan(cfg).get(force=True))
-    assert r["open"] == 3
-    titles = [p["title"] for p in r["plan"]]
+    assert r["open_tasks"] == 3
+    titles = [p["title"] for p in r["items"] if p["kind"] == "task"]
     assert titles[0] == "Pay rent" and titles[1] == "Ship demo"          # urgent first
     # a completed task drops out of the next plan
     from himmy.api.studio_tasks import get_tasks_store
@@ -74,7 +83,16 @@ def test_plan_from_tasks_offline(cfg, monkeypatch):
     done_id = [t.id for t in store.list() if t.title == "Pay rent"][0]
     store.set_done(done_id, True)
     r2 = asyncio.run(DayPlan(cfg).get(force=True))
-    assert "Pay rent" not in [p["title"] for p in r2["plan"]]
+    assert "Pay rent" not in [p["title"] for p in r2["items"]]
+
+
+def test_done_tracker_toggles_and_resets(cfg):
+    dp = DayPlan(cfg)
+    assert dp._done_today() == set()
+    dp.toggle_done("evt-1", True)
+    assert "evt-1" in dp._done_today()
+    dp.toggle_done("evt-1", False)
+    assert "evt-1" not in dp._done_today()
 
 
 def test_cache_reused_until_tasks_change(cfg, monkeypatch):

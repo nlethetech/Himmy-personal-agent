@@ -540,8 +540,16 @@ export type ReadingStats = {
   total_seconds: number;
 };
 
-// Today's plan — Himmy's prioritised daily to-do built from the task board.
-export type DayPlanItem = { task_id: string; title: string; due?: string | null; reason: string };
+// Today's plan — a unified daily checklist: today's CALENDAR events + the prioritised open TASKS.
+export type DayPlanItem = {
+  kind: "event" | "task";
+  id: string;
+  title: string;
+  done: boolean;
+  time?: string;        // event: local HH:MM
+  due?: string | null;  // task
+  reason?: string;      // task: short "why" (overdue / due today / …)
+};
 
 // In-app AI provider setup — lets a non-coder pick a provider, paste their key, and confirm it
 // works, all without touching .env. A key set here is written through himmy's writable secrets
@@ -1027,10 +1035,13 @@ export const api = {
   brief: (force = false) =>
     jget<{ ok: boolean; text: string; generated_at?: string; stale?: boolean; generating?: boolean }>(
       `/brief${force ? "?force=true" : ""}`),
-  // Today's plan — Himmy turns the task board into a focused, prioritised daily to-do.
+  // Today's plan — today's calendar + the prioritised tasks, as one checklist.
   todayPlan: (force = false) =>
-    jget<{ ok: boolean; date: string; note: string; plan: DayPlanItem[]; open: number }>(
+    jget<{ ok: boolean; date: string; note: string; items: DayPlanItem[]; total: number; events: number; open_tasks: number }>(
       `/today/plan${force ? "?force=true" : ""}`),
+  // Tick / un-tick a calendar item in the plan for today (tasks complete via api.tasks.complete).
+  todayPlanDone: (id: string, done: boolean) =>
+    jpost<{ ok: boolean }>("/today/plan/done", { id, done }),
   tasks: {
     list: () => jget<{ ok: boolean; tasks: Task[]; open: number; total: number }>("/tasks"),
     add: (title: string, opts?: { due?: string | null; priority?: number }) =>

@@ -51,6 +51,39 @@ def _open_tasks(cfg: HimmyConfig) -> list[dict[str, Any]]:
         return []
 
 
+async def _today_events(cfg: HimmyConfig) -> list[dict[str, Any]]:
+    """Today's calendar events as ``{id, title, time}`` (time = local HH:MM), time-ordered.
+
+    Permission-gated (Calendar) and best-effort: [] if Calendar is off, Google isn't connected, or
+    anything fails. The day's schedule IS most people's real to-do, so the plan is built from it."""
+    try:
+        from himmy_app import permissions
+
+        if permissions.level_of("calendar", cfg) == "off":
+            return []
+        from himmy.api import studio_google as g
+
+        if not g.status().connected:
+            return []
+        # Local day window WITH the machine tz offset (Google rejects an offset-less time window).
+        now = datetime.datetime.now().astimezone()
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        events = await g.calendar_range(start.isoformat(), (start + datetime.timedelta(days=1)).isoformat(), 50)
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[dict[str, Any]] = []
+    for e in events:
+        summary = str(getattr(e, "summary", "") or "").strip()
+        if not summary:
+            continue
+        start_s = str(getattr(e, "start", "") or "")
+        m = re.search(r"T(\d{2}:\d{2})", start_s)   # local wall-clock HH:MM
+        out.append({"id": str(getattr(e, "id", "") or ""), "title": summary,
+                    "time": m.group(1) if m else "", "start": start_s})
+    out.sort(key=lambda x: x["start"] or "~")
+    return out
+
+
 def _deterministic(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Fallback ranking with no model: overdue → due today → due soon → high priority → the rest."""
     today = _today()
@@ -148,8 +181,10 @@ async def _model_plan(cfg: HimmyConfig, tasks: list[dict[str, Any]]) -> dict[str
 class DayPlan:
     def __init__(self, config: HimmyConfig | None = None) -> None:
         self.cfg = config or load_config()
-        self._cache = self.cfg.data_dir / "dayplan_cache.json"
+        self._cache = self.cfg.data_dir / "dayplan_cache.json"   # the task-ranking cache
+        self._done = self.cfg.data_dir / "dayplan_done.json"     # which items are ticked TODAY
 
+    # ---- task-ranking cache (re-plans when the open-task set changes) -------------------
     def _read(self) -> dict[str, Any] | None:
         try:
             return json.loads(self._cache.read_text(encoding="utf-8"))
@@ -160,28 +195,58 @@ class DayPlan:
         with contextlib.suppress(Exception):
             self._cache.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    async def get(self, *, force: bool = False) -> dict[str, Any]:
-        """Today's plan. Served from the daily cache unless stale/forced; regenerates from the
-        current task board (model rank, deterministic fallback). Always returns a well-formed dict."""
-        tasks = _open_tasks(self.cfg)
+    async def _ranked_tasks(self, tasks: list[dict[str, Any]], *, force: bool) -> tuple[str, list[dict[str, Any]]]:
+        """(note, ordered task items) — model-ranked, cached per day by the open-task set."""
         if not tasks:
-            return {"ok": True, "date": _today(), "note": "", "plan": [], "open": 0}
-
+            return "", []
         cached = self._read()
-        # Reuse today's cache only when the open-task set hasn't changed (so completing/adding a task
-        # re-plans), and not when forced.
         cur_ids = sorted(t["id"] for t in tasks)
         if (cached and not force and cached.get("date") == _today()
                 and cached.get("task_ids") == cur_ids):
-            return {"ok": True, "date": cached["date"], "note": cached.get("note", ""),
-                    "plan": cached.get("plan", []), "open": len(tasks), "cached": True}
-
+            return cached.get("note", ""), cached.get("plan", [])
         built = await _model_plan(self.cfg, tasks) or {"note": "", "plan": _deterministic(tasks)}
-        payload = {"date": _today(), "note": built["note"], "plan": built["plan"],
-                   "task_ids": cur_ids}
-        self._write(payload)
-        return {"ok": True, "date": _today(), "note": built["note"], "plan": built["plan"],
-                "open": len(tasks)}
+        self._write({"date": _today(), "note": built["note"], "plan": built["plan"], "task_ids": cur_ids})
+        return built["note"], built["plan"]
+
+    # ---- per-day "done" tracker (for calendar items, which Google has no done-state for) -
+    def _done_today(self) -> set[str]:
+        try:
+            d = json.loads(self._done.read_text(encoding="utf-8"))
+            if d.get("date") == _today():
+                return set(d.get("ids") or [])
+        except Exception:  # noqa: BLE001
+            pass
+        return set()
+
+    def toggle_done(self, item_id: str, done: bool) -> dict[str, Any]:
+        """Tick / un-tick a plan item for today (used for calendar events). Resets daily."""
+        ids = self._done_today()
+        ids.add(item_id) if done else ids.discard(item_id)
+        with contextlib.suppress(Exception):
+            self._done.write_text(json.dumps({"date": _today(), "ids": sorted(ids)}), encoding="utf-8")
+        return {"ok": True, "id": item_id, "done": done}
+
+    # ---- the unified plan: today's calendar + the prioritised tasks ----------------------
+    async def get(self, *, force: bool = False) -> dict[str, Any]:
+        """Today's plan as a single checklist: today's CALENDAR events (time-ordered, the real
+        backbone of most days) followed by the model-prioritised open TASKS. Always well-formed."""
+        events = await _today_events(self.cfg)
+        tasks = _open_tasks(self.cfg)
+        done = self._done_today()
+        note, ranked = await self._ranked_tasks(tasks, force=force)
+
+        items: list[dict[str, Any]] = []
+        for e in events:
+            items.append({"kind": "event", "id": e["id"], "title": e["title"],
+                          "time": e.get("time", ""), "done": e["id"] in done})
+        for t in ranked:
+            items.append({"kind": "task", "id": t["task_id"], "title": t["title"],
+                          "due": t.get("due"), "reason": t.get("reason", ""), "done": False})
+
+        if not note and events:
+            note = "Your day at a glance — your schedule, plus anything that needs doing."
+        return {"ok": True, "date": _today(), "note": note, "items": items,
+                "events": len(events), "open_tasks": len(tasks), "total": len(items)}
 
 
 __all__ = ["DayPlan", "MAX_PLAN"]

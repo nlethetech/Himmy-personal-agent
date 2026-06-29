@@ -2668,64 +2668,32 @@ function HimmyNoticedList({ obs, onRefresh }: { obs: Observation[]; onRefresh: (
   );
 }
 
-// "Today's plan" — Himmy proactively turns your task board into a focused, prioritised daily
-// to-do (overdue → due → important), each item checkable (completing the underlying task). Hidden
-// when there are no open tasks. Re-plans when you complete/add a task.
-function TodayPlan() {
-  const [data, setData] = useState<{ note: string; plan: DayPlanItem[]; open: number } | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [done, setDone] = useState<Set<string>>(new Set());
+// HH:MM (24h) → "7:00 AM" — matches the agenda card.
+function to12h(hm?: string): string {
+  if (!hm) return "";
+  const [h, m] = hm.split(":").map(Number);
+  if (isNaN(h)) return hm;
+  return `${h % 12 || 12}:${String(m || 0).padStart(2, "0")} ${h >= 12 ? "PM" : "AM"}`;
+}
 
-  const load = async (force = false) => {
-    if (force) setRefreshing(true);
-    try { const r = await api.todayPlan(force); setData({ note: r.note, plan: r.plan, open: r.open }); }
-    catch { /* backend warming */ }
-    finally { setLoading(false); setRefreshing(false); }
-  };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
-  useRefreshSignal("tasks", () => load(false));
-
-  const complete = async (id: string) => {
-    setDone((s) => new Set(s).add(id));
-    try { await api.tasks.complete(id); emitRefresh("tasks"); setTimeout(() => load(true), 500); }
-    catch { setDone((s) => { const n = new Set(s); n.delete(id); return n; }); }
-  };
-
-  if (loading || !data || data.open === 0 || data.plan.length === 0) return null;
-  const todayStr = new Date().toISOString().slice(0, 10);
+// A today's-calendar item rendered as a checkable to-do row inside the "To do" card — same shape as
+// HomeTaskRow, with the event's time on the right. Ticking marks it done for today (resets daily).
+function PlanEventRow({ item, done, last, onToggle }:
+  { item: DayPlanItem; done: boolean; last?: boolean; onToggle: () => void }) {
   return (
-    <div className="mt-5 rounded-2xl border border-mac-stroke bg-gradient-to-b from-white/[0.045] to-white/[0.012] p-4">
-      <div className="flex items-center justify-between mb-2.5">
-        <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-mac-accentHi">
-          <ListChecks size={12} strokeWidth={2.2} /> Today's plan
-          <span className="text-mac-ink4 normal-case tracking-normal font-medium">· {data.plan.length}</span>
-        </div>
-        <button onClick={() => load(true)} disabled={refreshing} title="Re-plan from your tasks"
-          className="h-6 w-6 grid place-items-center rounded-md text-mac-ink3 hover:text-mac-ink hover:bg-mac-fill transition-colors disabled:opacity-60">
-          <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
-        </button>
-      </div>
-      {data.note && <p className="text-[12.5px] text-mac-ink2 leading-snug mb-2.5">{data.note}</p>}
-      <div className="space-y-0.5">
-        {data.plan.map((p, i) => {
-          const isDone = done.has(p.task_id);
-          const overdue = !!p.due && p.due < todayStr;
-          return (
-            <div key={p.task_id}
-              className="group flex items-center gap-2.5 rounded-lg px-2 py-2 hover:bg-mac-fill transition-colors">
-              <button onClick={() => !isDone && complete(p.task_id)} className="shrink-0">
-                {isDone
-                  ? <CheckCircle2 size={17} className="text-mac-green" />
-                  : <Circle size={17} strokeWidth={1.75} className="text-mac-ink3 group-hover:text-mac-accentHi transition-colors" />}
-              </button>
-              <span className="shrink-0 text-[11px] font-semibold text-mac-ink4 tabular-nums w-3.5 text-center">{i + 1}</span>
-              <span className={`flex-1 min-w-0 text-[13.5px] truncate ${isDone ? "text-mac-ink3 line-through" : "text-mac-ink"}`}>{p.title}</span>
-              <span className={`shrink-0 text-[11px] ${overdue ? "text-mac-red/90" : "text-mac-ink3"}`}>{p.reason}</span>
-            </div>
-          );
-        })}
-      </div>
+    <div className={`group flex items-center gap-2.5 py-2.5 px-1 ${last ? "" : "border-b border-mac-stroke"}`}>
+      <button onClick={onToggle} title={done ? "Done today — tap to undo" : "Mark done for today"}
+        className="shrink-0 grid place-items-center transition-colors">
+        {done
+          ? <CheckCircle2 size={16} strokeWidth={1.75} className="text-mac-green" />
+          : <Circle size={16} strokeWidth={1.75} className="text-mac-ink3 group-hover:text-mac-accentHi" />}
+      </button>
+      <span className={`min-w-0 flex-1 truncate text-[13.5px] ${done ? "text-mac-ink3 line-through" : "text-mac-ink"}`}>{item.title}</span>
+      {item.time && (
+        <span className="shrink-0 inline-flex items-center gap-1 text-[12px] text-mac-ink3">
+          <Clock size={11} />{to12h(item.time)}
+        </span>
+      )}
     </div>
   );
 }
@@ -2854,9 +2822,27 @@ function Today({ health }: { health: Health | null }) {
   const [newDue, setNewDue] = useState("");          // YYYY-MM-DD from the date input
   const [newPriority, setNewPriority] = useState(0); // 0..3, cycled by the flag button
 
+  // Today's CALENDAR events, surfaced as checkable rows at the top of the To-do card so the to-do
+  // reflects the day you've planned in your calendar (not just free-floating tasks).
+  const [planEvents, setPlanEvents] = useState<DayPlanItem[] | null>(null);
+  const [eventDone, setEventDone] = useState<Set<string>>(new Set());
+
   const loadTasks = async () => {
     try { const r = await api.tasks.list(); setTasks(r.tasks); setTaskCount({ open: r.open, total: r.total }); }
     catch { setTasks((t) => t ?? []); }
+  };
+  const loadPlan = async () => {
+    try {
+      const r = await api.todayPlan();
+      const evs = r.items.filter((i) => i.kind === "event");
+      setPlanEvents(evs);
+      setEventDone(new Set(evs.filter((e) => e.done).map((e) => e.id)));
+    } catch { setPlanEvents((p) => p ?? []); }
+  };
+  const toggleEvent = async (id: string) => {
+    const next = !eventDone.has(id);
+    setEventDone((s) => { const n = new Set(s); next ? n.add(id) : n.delete(id); return n; });
+    try { await api.todayPlanDone(id, next); } catch { loadPlan(); }
   };
   const loadReading = async () => {
     try { const r = await api.news.saved(); setSaved(dedupeByTitle(r.items).slice(0, 3)); } catch { setSaved([]); }
@@ -2866,13 +2852,14 @@ function Today({ health }: { health: Health | null }) {
   const loadUsage = async () => { try { setUsage(await api.usage()); } catch { /* backend warming */ } };
 
   useEffect(() => {
-    loadTasks(); loadReading(); loadUsage();
+    loadTasks(); loadReading(); loadUsage(); loadPlan();
     const t = setInterval(loadTasks, 5000);
     const u = setInterval(loadUsage, 15000);
     return () => { clearInterval(t); clearInterval(u); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useRefreshSignal("tasks", loadTasks);
+  useRefreshSignal("calendar", loadPlan);
   useRefreshSignal("library", loadReading);
   useRefreshSignal("news", loadReading);
 
@@ -2889,11 +2876,14 @@ function Today({ health }: { health: Health | null }) {
     } catch { setEvents([]); }
   };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { loadEvents(); }, [googleConnected]);
+  useEffect(() => { loadEvents(); loadPlan(); }, [googleConnected]);
   useRefreshSignal("calendar", loadEvents);
 
   // Smart sort: open first, overdue, priority desc, due asc (see compareTasks).
   const openTasks = (tasks ?? []).filter((t) => !t.done).sort(compareTasks);
+  // The To-do card = today's calendar events (checkable) + your open tasks. Count what's left to do.
+  const todayEvents = planEvents ?? [];
+  const todoOpenCount = openTasks.length + todayEvents.filter((e) => !eventDone.has(e.id)).length;
   // Today agenda — one time-sorted timeline merging calendar + scheduled/due tasks.
   const agenda = buildTodayAgenda(events ?? [], tasks ?? []);
   // Due-soon nudge — open tasks due today or tomorrow (within ~36h).
@@ -2935,12 +2925,8 @@ function Today({ health }: { health: Health | null }) {
         <TodayBrief />
       </div>
 
-      {/* "Himmy noticed" lives in the notification centre (the bell), not on Today. Today instead
-          gets a proactive "Today's plan" — Himmy's prioritised to-do built from the task board. */}
-      <div className="shrink-0">
-        <TodayPlan />
-      </div>
-
+      {/* "Himmy noticed" lives in the notification centre (the bell). Today's calendar-aware plan
+          isn't a separate block — it's folded into the "To do" card below. */}
       <div className="flex-1 min-h-0 grid grid-cols-12 grid-rows-1 gap-4">
         {/* Today — one time-sorted agenda merging calendar events + scheduled/due tasks */}
         <Card className="col-span-12 md:col-span-4 min-h-0" icon={CalendarClock} title="Today"
@@ -2969,21 +2955,28 @@ function Today({ health }: { health: Health | null }) {
           </div>
         </Card>
 
-        {/* To do — complete on hover, add inline */}
+        {/* To do — today's calendar (checkable) + your tasks; complete on hover, add inline */}
         <Card className="col-span-12 md:col-span-4 min-h-0" icon={ListChecks} title="To do"
           onOpen={() => nav("tasks")}
-          hint={taskCount.total ? `${taskCount.open} open` : undefined}>
+          hint={todoOpenCount ? `${todoOpenCount} to do` : undefined}>
           <div className="flex flex-col h-full">
             <div className="flex-1 min-h-0 overflow-auto -mt-1">
               {tasks === null ? (
                 <div className="h-full grid place-items-center"><Loader2 size={16} className="animate-spin text-mac-ink3" /></div>
-              ) : openTasks.length === 0 ? (
-                <Placeholder icon={CheckCircle2} text={taskCount.total ? "All caught up." : "No tasks yet — add one below."} />
+              ) : todayEvents.length === 0 && openTasks.length === 0 ? (
+                <Placeholder icon={CheckCircle2} text={taskCount.total ? "All caught up." : "Nothing on today — add a task below or schedule your day."} />
               ) : (
-                openTasks.map((t, i, a) => (
-                  <HomeTaskRow key={t.id} task={t} last={i === a.length - 1}
-                    onComplete={() => completeTask(t.id)} onOpen={() => nav("tasks")} />
-                ))
+                <>
+                  {todayEvents.map((e, i) => (
+                    <PlanEventRow key={`evt-${e.id}`} item={e} done={eventDone.has(e.id)}
+                      last={i === todayEvents.length - 1 && openTasks.length === 0}
+                      onToggle={() => toggleEvent(e.id)} />
+                  ))}
+                  {openTasks.map((t, i, a) => (
+                    <HomeTaskRow key={t.id} task={t} last={i === a.length - 1}
+                      onComplete={() => completeTask(t.id)} onOpen={() => nav("tasks")} />
+                  ))}
+                </>
               )}
             </div>
             {soon.length > 0 && (

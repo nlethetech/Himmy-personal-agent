@@ -130,6 +130,12 @@ class AssistantUpdate(BaseModel):
     note: str = ""
 
 
+class PlanDoneRequest(BaseModel):
+    # Tick / un-tick a "Today's plan" item (a calendar event) for today.
+    id: str
+    done: bool = True
+
+
 class ExpenseRequest(BaseModel):
     # A manually-added (or snap-confirmed) expense for the finance ledger.
     amount: float
@@ -1684,12 +1690,19 @@ def create_app() -> FastAPI:
     async def brief_get(force: bool = False) -> dict[str, Any]:
         return await brief.get(force=force)
 
-    # ---- today's plan: Himmy turns the task board into a focused, prioritised daily to-do --
+    # ---- today's plan: today's calendar + the prioritised tasks, as one daily checklist ---
     @app.get("/today/plan")
     async def today_plan(force: bool = False) -> dict[str, Any]:
         from himmy_app.dayplan import DayPlan
 
         return await DayPlan(cfg).get(force=force)
+
+    @app.post("/today/plan/done")
+    async def today_plan_done(body: PlanDoneRequest) -> dict[str, Any]:
+        """Tick / un-tick a plan item for today (calendar events; tasks complete via /tasks)."""
+        from himmy_app.dayplan import DayPlan
+
+        return DayPlan(cfg).toggle_done(body.id, body.done)
 
     # ---- "Do" hub: a smart Nepal concierge over flights / food / shopping ----------------
     from himmy_app.do_concierge import DoCart, DoConcierge
