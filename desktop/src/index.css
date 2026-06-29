@@ -56,6 +56,17 @@ body {
   background: transparent;
 }
 
+/* Fully hide the scrollbar (still scrollable) — for horizontal rails that should read as native. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 .tnum {
   font-variant-numeric: tabular-nums;
 }

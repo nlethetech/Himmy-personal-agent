@@ -7070,7 +7070,7 @@ function DevelopingRail({ stories, onOpen }: {
       <div className="flex items-center gap-1.5 mb-2.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-mac-accentHi">
         <TrendingUp size={12} strokeWidth={2.4} /> Developing now
       </div>
-      <div className="flex gap-3 overflow-x-auto pb-1 -mx-1 px-1">
+      <div className="flex gap-3 overflow-x-auto no-scrollbar pb-1 -mx-1 px-1">
         {stories.map((s, i) => (
           <button key={i}
             onClick={() => onOpen({ url: s.articles[0]?.url || "", title: s.title,
