@@ -240,6 +240,15 @@ def _is_domestic_nepal(title: str) -> bool:
     return True
 
 
+#: System prompt for the news digest — a tight, scannable "catch me up" grouped by section.
+_DIGEST_SYS = (
+    "You write a short, scannable NEWS DIGEST from the headlines (with snippets) you're given, "
+    "grouped by section. Start with a one-line '{heading}' header. For EACH section, a bold section "
+    "name then 3-6 of the most important stories as ONE crisp line each — lead with what happened, "
+    "no fluff, no clickbait, never invent facts beyond the headline/snippet. Keep the whole digest "
+    "tight enough to read on a phone. Use simple Markdown (bold for section names, '•' bullets)."
+)
+
 _CACHE_TTL = 900  # seconds
 #: How often the background refresher re-pulls every category (real-time freshness). Override via
 #: HIMMY_NEWS_REFRESH_SECS. Kept >= the cache TTL so a refresh always recomputes rather than
@@ -705,6 +714,66 @@ class NewsService:
 
     def categories(self) -> list[str]:
         return CATEGORIES
+
+    # ---- news digest — a short "catch me up", for the Today brief, Telegram pushes, routines ----
+    async def digest(self, categories: list[str] | None = None, *, per_cat: int = 6,
+                     title: str = "") -> dict[str, Any]:
+        """A concise, scannable summary of today's top stories across the given sections.
+
+        Pulls each section's (cached) feed, then ONE cheap model pass writes a tight bulleted digest.
+        Degrades to a deterministic headline list if the model is unavailable — a digest always
+        appears. Returns ``{ok, text, count, sections, generated_at}``. This is the engine behind the
+        'News Digest' routine (auto-sent to Telegram) — reusable by any aggregator on top of Himmy."""
+        cats = categories or ["Nepal", "World"]
+        sections: list[tuple[str, list[dict[str, Any]]]] = []
+        for cat in cats:
+            try:
+                r = await self.feed(cat)
+            except Exception:  # noqa: BLE001
+                continue
+            items = (r.get("items") or [])[:max(1, per_cat)]
+            if items:
+                sections.append((cat, items))
+        total = sum(len(items) for _, items in sections)
+        if total == 0:
+            return {"ok": False, "text": "", "count": 0, "sections": [],
+                    "message": "No news to summarise right now."}
+
+        heading = (title or "Your news digest").strip()
+        # Deterministic fallback: headline list by section (always valid, no model needed).
+        def _plain() -> str:
+            lines = [f"📰 {heading}", ""]
+            for cat, items in sections:
+                lines.append(f"*{cat}*")
+                lines += [f"• {it['title']}" for it in items[:per_cat]]
+                lines.append("")
+            return "\n".join(lines).strip()
+
+        listing = "\n\n".join(
+            f"## {cat}\n" + "\n".join(
+                f"- {it['title']}" + (f" — {it['snippet']}" if it.get("snippet") else "")
+                for it in items
+            ) for cat, items in sections
+        )
+        text = _plain()
+        try:
+            from himmy.cli.provider import build_inference_for
+            from himmy.services.inference.models import InferenceMessage, InferenceRequest
+
+            svc = build_inference_for(self._cfg.provider, self._cfg.model)
+            resp = await svc.run(InferenceRequest(
+                messages=[InferenceMessage(role="system", content=_DIGEST_SYS.format(heading=heading)),
+                          InferenceMessage(role="user", content="Today's stories:\n" + listing[:6000])],
+                generation_params={"temperature": 0.3}, timeout_seconds=45,
+            ))
+            out = (resp.output_text or "").strip()
+            if out:
+                text = out
+        except Exception:  # noqa: BLE001 - fall back to the deterministic headline list
+            pass
+        return {"ok": True, "text": text, "count": total,
+                "sections": [{"category": c, "count": len(i)} for c, i in sections],
+                "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
 
     # ---- paper recommendations (for the future "Recommended" surface, NOT news) ---------
     async def _arxiv(self, interests: list[str], limit: int = 25) -> list[dict[str, Any]]:

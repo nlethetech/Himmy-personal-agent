@@ -466,6 +466,27 @@ class AppScheduler:
             )
             return "ok", text, None
 
+        if routine.name == _NEWS_DIGEST_NAME:
+            # Deterministic news digest → Telegram (no agent/HITL). Builds a short "catch me up" of
+            # today's top Nepal + World stories, pushes it to Telegram (no-op if unlinked), and lands
+            # it in the inbox so it's visible in-app too.
+            from himmy_app import telegram
+            from himmy_app.news import NewsService
+
+            cfg = load_config()
+            d = await NewsService(cfg).digest(title="Your news digest")
+            text = (d.get("text") or "").strip()
+            if not text:
+                get_inbox().add(routine_id=routine.id, routine_name=routine.name, kind="result",
+                                title=routine.name, body="No news to summarise right now.", status="ok")
+                return "ok", "no news", None
+            sent = await telegram.push(text, cfg)
+            body = text + ("\n\n— sent to your Telegram." if sent
+                           else "\n\n(Link Telegram in Settings → Connections to get this on your phone.)")
+            get_inbox().add(routine_id=routine.id, routine_name=routine.name, kind="result",
+                            title=routine.name, body=body, status="ok")
+            return "ok", text, None
+
         res = await ask_turn(routine.prompt)  # no session_id: routines don't pollute chat history
         if res.get("awaiting_approval"):
             cp = res.get("checkpoint_id")
@@ -539,6 +560,10 @@ _BRIEFING_NAME = "Morning Brief"
 #: never coexist. The thin _BRIEFING_PROMPT it used is gone; the rich prompt now lives in
 #: brief._BRIEF_PROMPT, shared word-for-word with the Today card.
 _OLD_BRIEFING_NAME = "Daily Briefing"
+#: The built-in "News Digest" routine — special-cased in _fire to build a news digest and push it to
+#: Telegram. Seeded DISABLED so the user opts in and picks a schedule. The engine (NewsService.digest)
+#: is reusable, so an aggregator (RONB, 24Ghanta) can drive scheduled digests off the same path.
+_NEWS_DIGEST_NAME = "News Digest"
 
 
 def seed_default_routines() -> None:
@@ -557,23 +582,40 @@ def seed_default_routines() -> None:
     from himmy_app.brief import _BRIEF_PROMPT  # the rich prompt, shared with the Today card
 
     store = get_routines_store()
-    if any(r.name == _BRIEFING_NAME for r in store.list()):
-        return
-    # One-time upgrade: drop the superseded 'Daily Briefing' seed if it's still around.
-    for r in store.list():
-        if r.name == _OLD_BRIEFING_NAME:
-            store.delete(r.id)
+    existing = {r.name for r in store.list()}
     cfg = load_config()
-    store.upsert(
-        Routine(
-            name=_BRIEFING_NAME,
-            agent_path=str(_SPEC),
-            prompt=_BRIEF_PROMPT,
-            # Daily 07:00 in the configured timezone (HIMMY_TZ → Asia/Kathmandu); coalesce so a
-            # late boot still pushes once that morning.
-            schedule=Schedule(kind="cron", expr="0 7 * * *", missed="coalesce"),
-            provider=cfg.provider,
-            model=cfg.model,
-            enabled=True,  # the morning push is on by default
+
+    if _BRIEFING_NAME not in existing:
+        # One-time upgrade: drop the superseded 'Daily Briefing' seed if it's still around.
+        for r in store.list():
+            if r.name == _OLD_BRIEFING_NAME:
+                store.delete(r.id)
+        store.upsert(
+            Routine(
+                name=_BRIEFING_NAME,
+                agent_path=str(_SPEC),
+                prompt=_BRIEF_PROMPT,
+                # Daily 07:00 in the configured timezone (HIMMY_TZ → Asia/Kathmandu); coalesce so a
+                # late boot still pushes once that morning.
+                schedule=Schedule(kind="cron", expr="0 7 * * *", missed="coalesce"),
+                provider=cfg.provider,
+                model=cfg.model,
+                enabled=True,  # the morning push is on by default
+            )
         )
-    )
+
+    if _NEWS_DIGEST_NAME not in existing:
+        # The news-digest-to-Telegram template — OFF by default; the user enables it and picks a
+        # schedule (e.g. daily 07:30, or every few hours). Special-cased in _fire (no agent/HITL).
+        store.upsert(
+            Routine(
+                name=_NEWS_DIGEST_NAME,
+                agent_path=str(_SPEC),
+                prompt="Summarise today's top Nepal + World news into a short digest and send it to "
+                       "my Telegram.",
+                schedule=Schedule(kind="cron", expr="30 7 * * *", missed="skip"),
+                provider=cfg.provider,
+                model=cfg.model,
+                enabled=False,  # opt-in: the user turns it on and schedules it
+            )
+        )
