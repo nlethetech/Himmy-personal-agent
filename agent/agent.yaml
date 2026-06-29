@@ -353,6 +353,8 @@ tools:
   - add_expense
   - list_expenses
   - expense_summary
+  # Find spending in the user's email (receipts/charges) and file it to the ledger.
+  - scan_email_spending
   - calculator
   - current_time
   # Task board — the user's tasks live in the Tasks tab; these let Himmy read and
