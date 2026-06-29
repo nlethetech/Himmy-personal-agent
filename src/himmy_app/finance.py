@@ -26,6 +26,7 @@ import re
 import sqlite3
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -92,7 +93,10 @@ class ExpenseStore:
 
     @staticmethod
     def _new_id() -> str:
-        return f"exp_{int(time.time() * 1000):x}"
+        # Time-prefixed (so ids sort roughly by creation) + a random suffix so two expenses added in
+        # the SAME millisecond (a quick add, or a CSV/Excel import loop) never collide and silently
+        # overwrite each other via INSERT OR REPLACE.
+        return f"exp_{int(time.time() * 1000):x}_{uuid.uuid4().hex[:8]}"
 
     # ---- writes -------------------------------------------------------------------------
     def add(self, e: dict[str, Any], *, source: str = "manual") -> dict[str, Any]:
