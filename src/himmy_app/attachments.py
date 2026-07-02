@@ -19,6 +19,7 @@ Both ride the workspace backup.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import re
 import sqlite3
@@ -194,9 +195,11 @@ class AttachmentStore:
             path = self._blob_path(att_id, "")
             path.write_bytes(data)
 
-        # Doc/file text is synchronous; image/audio need the async media core (and the user's
+        # Doc/file text extraction is CPU-heavy (a big PDF can take seconds) and SYNCHRONOUS, so
+        # run it on a worker thread — otherwise parsing an upload freezes the whole backend (every
+        # request + background loop stalls). image/audio need the async media core (and the user's
         # "Files & media" permission — when off we still store the file but don't read it).
-        text = self._extract(kind, ext, path, data, mime)
+        text = await asyncio.to_thread(self._extract, kind, ext, path, data, mime)
         if kind == "image" and read_media:
             from himmy_app.connectors.media import image_to_text
 

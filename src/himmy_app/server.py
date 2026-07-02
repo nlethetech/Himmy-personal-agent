@@ -992,6 +992,22 @@ def create_app() -> FastAPI:
                     pass
                 await asyncio.sleep(proactive.PROACTIVE_INTERVAL_S)
 
+        # Pre-warm the chat agent ONCE so the FIRST message is as fast as the tenth. Building the
+        # runtime cold pays ~450ms extra (imports for 40+ tool connectors, the memory embedder, and
+        # the provider client). Done on a worker thread after a short settle so it can't block
+        # /health or delay the window painting. Best-effort — a warm hiccup must never crash
+        # startup. (Only the AGENT runtime is warmed here; the papers-RAG index warm is deliberately
+        # NOT done — see the note above /health about its GIL/embed instability.)
+        async def _prewarm_agent() -> None:
+            await asyncio.sleep(2)
+            try:
+                from himmy_app.cli import _build_runtime
+
+                await asyncio.to_thread(_build_runtime, cfg, None)
+            except Exception:  # noqa: BLE001 - a warm hiccup must never crash the server
+                pass
+
+        prewarm_task = asyncio.create_task(_prewarm_agent())
         warm_task = asyncio.create_task(_warm_recs())
         news_task = asyncio.create_task(_refresh_news())
         learn_task = asyncio.create_task(_auto_learn())
@@ -1008,6 +1024,7 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
+            prewarm_task.cancel()
             warm_task.cancel()
             news_task.cancel()
             learn_task.cancel()
@@ -1022,8 +1039,8 @@ def create_app() -> FastAPI:
                 pass
             # Await the cancelled tasks so in-flight I/O unwinds before we stop the scheduler.
             await asyncio.gather(
-                warm_task, news_task, learn_task, nudge_task, nepse_task, proactive_task,
-                return_exceptions=True,
+                prewarm_task, warm_task, news_task, learn_task, nudge_task, nepse_task,
+                proactive_task, return_exceptions=True,
             )
             await routines_mod.get_scheduler().stop()
 
@@ -1452,7 +1469,8 @@ def create_app() -> FastAPI:
         data = await file.read()
         if not data:
             return {"ok": False, "message": "That file was empty."}
-        return ExpenseStore(cfg).import_bytes(data, file.filename or "")
+        # openpyxl parsing is synchronous/CPU-bound → off the event loop.
+        return await asyncio.to_thread(ExpenseStore(cfg).import_bytes, data, file.filename or "")
 
     @app.get("/finance/export")
     async def finance_export(fmt: str = "xlsx") -> dict[str, Any]:
@@ -1485,7 +1503,8 @@ def create_app() -> FastAPI:
 
     @app.post("/library/files")
     async def library_add_files(body: FilesRequest) -> dict[str, Any]:
-        return lib.add_files(body.paths)
+        # Copying + reading PDF metadata for a batch is synchronous → off the event loop.
+        return await asyncio.to_thread(lib.add_files, body.paths)
 
     @app.put("/library/{item_id}")
     async def library_update(item_id: str, body: UpdateItemRequest) -> dict[str, Any]:

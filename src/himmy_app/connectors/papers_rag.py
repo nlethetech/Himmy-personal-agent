@@ -257,11 +257,10 @@ class PapersIndex:
             for r in records
         }
 
-    async def _sync(self, records: list[dict[str, Any]]) -> None:
-        """Bring the persisted index in line with ``records``: ingest new/changed docs (dedup
-        keeps it warm), then prune documents — paper, note, OR highlight — no longer present
-        (a removed paper, a cleared note, deleted highlights)."""
-        kb, kb_id = await self._kb_handle()
+    def _collect_inputs(self, records: list[dict[str, Any]]) -> tuple[list[DocumentInput], set[str]]:
+        """Build every DocumentInput (extracting + caching PDF text as needed) plus the set of
+        source_uris to keep. Purely synchronous — the CPU-bound PDF parsing (``_pdf_text``) lives
+        here so ``_sync`` can run it OFF the event loop via ``to_thread``."""
         inputs: list[DocumentInput] = []
         keep: set[str] = set()
         for r in records:
@@ -269,6 +268,17 @@ class PapersIndex:
                 inputs.append(d)
                 if d.source_uri is not None:
                     keep.add(d.source_uri)
+        return inputs, keep
+
+    async def _sync(self, records: list[dict[str, Any]]) -> None:
+        """Bring the persisted index in line with ``records``: ingest new/changed docs (dedup
+        keeps it warm), then prune documents — paper, note, OR highlight — no longer present
+        (a removed paper, a cleared note, deleted highlights)."""
+        kb, kb_id = await self._kb_handle()
+        # Building the inputs extracts full text from every uncached PDF (pypdf, CPU-heavy and
+        # SYNCHRONOUS). Run it on a worker thread so indexing a library — or the first search
+        # after launch — can't freeze the whole backend while it parses PDFs.
+        inputs, keep = await asyncio.to_thread(self._collect_inputs, records)
         if inputs:
             await kb.ingest_documents(kb_id, inputs)
         try:

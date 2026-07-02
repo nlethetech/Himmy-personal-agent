@@ -16,6 +16,7 @@ The ledger (``finance.db``) is a normal store under the workspace, so it rides t
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import csv
 import datetime
@@ -316,7 +317,8 @@ async def _bill_text(data: bytes, mime: str, name: str, cfg: HimmyConfig) -> str
             tmp.close()
             from himmy_app.attachments import _factory
 
-            return _factory().read(tmp.name)
+            # Parsing a PDF/xlsx bill is CPU-heavy + synchronous → run it off the event loop.
+            return await asyncio.to_thread(_factory().read, tmp.name)
         except Exception:  # noqa: BLE001
             pass
         finally:

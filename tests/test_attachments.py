@@ -52,6 +52,45 @@ def test_html_reader(tmp_path):
     assert "drop()" not in out and ".a{}" not in out
 
 
+# ---- parsing must not block the event loop ----------------------------------------------
+def test_ingest_offloads_parsing_from_event_loop(store, monkeypatch):
+    """A heavy synchronous parse (big PDF/docx) must run on a WORKER THREAD, not the event loop —
+    otherwise one upload freezes the whole backend. Prove it: while ingest() runs a deliberately
+    slow _extract, a concurrent heartbeat coroutine must keep ticking, and the parse must land on a
+    thread other than the loop's."""
+    import threading
+    import time
+
+    main_thread = threading.get_ident()
+    seen: dict[str, int] = {}
+
+    def slow_extract(kind, ext, path, data, mime):  # noqa: ANN001 - test stub
+        seen["thread"] = threading.get_ident()
+        time.sleep(0.3)  # simulate a heavy parse
+        return "parsed body text"
+
+    monkeypatch.setattr(store, "_extract", slow_extract)
+
+    async def run():
+        ticks = 0
+
+        async def heartbeat():
+            nonlocal ticks
+            for _ in range(15):
+                await asyncio.sleep(0.02)
+                ticks += 1
+
+        hb = asyncio.create_task(heartbeat())
+        res = await store.ingest("big.txt", b"hello world", "text/plain")
+        await hb
+        return res, ticks
+
+    res, ticks = asyncio.run(run())
+    assert res["chars"] > 0 and "parsed" in res["text"]
+    assert seen["thread"] != main_thread, "parse must run OFF the event-loop thread"
+    assert ticks >= 5, "event loop stalled during parse — parsing is still blocking"
+
+
 # ---- ingest / store / rag ---------------------------------------------------------------
 def test_ingest_text_and_rag_record(store):
     att = asyncio.run(store.ingest("lease.txt", b"Rent Rs 35000. Deposit 2 months.", "text/plain"))
